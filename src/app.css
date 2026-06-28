@@ -33,3 +33,12 @@
   border-top: 1px solid var(--border);
   text-align: center;
 }
+
+.lp--center { align-items: center; justify-content: center; }
+.splash {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  text-align: center;
+}
