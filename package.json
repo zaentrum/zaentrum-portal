@@ -10,10 +10,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@nalet/design-system": "file:../../../../tmp/design-system/nalet-design-system-0.1.0.tgz",
+    "@nalet/design-system": "file:vendor/nalet-design-system-0.1.0.tgz",
     "lucide-react": "^1.21.0",
+    "oidc-client-ts": "^3.5.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "react-oidc-context": "^3.3.1"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",
