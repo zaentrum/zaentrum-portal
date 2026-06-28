@@ -4,8 +4,9 @@ import type { AuthContextProps } from 'react-oidc-context';
 import { ZaentrumLockup, CGlyph, TGlyph, MGlyph } from './glyphs';
 import './app.css';
 
-// products are siblings on this origin (SSO); the bare path full-page-navigates there.
-const CHINO_URL = '/chino';
+// products are siblings on this origin (SSO); the tile full-page-navigates there.
+// trailing slash so it lands on chino's /chino/ base directly.
+const CHINO_URL = '/chino/';
 
 export function Launchpad({ auth }: { auth: AuthContextProps }) {
   const p = auth.user?.profile;
