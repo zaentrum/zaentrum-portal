@@ -15,7 +15,7 @@ variables:
 
 build:
   stage: build
-  image: registry.nalet.cloud/infrastructure/library/node:22-alpine
+  image: registry.nalet.cloud/infrastructure/library/node:20-alpine
   script:
     - npm ci --no-audit --no-fund
     - npm run build
