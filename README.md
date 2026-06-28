@@ -1,32 +1,46 @@
-# React + TypeScript + Vite
+# zaentrum-portal
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+the launchpad shell for **zaentrum**, a neutral self-hosted media platform. you log in
+once and land on a portal of spaces and tiles; each product (chino for video; tv and musig
+planned) is an app you launch from a tile. bring your own server.
 
-Currently, two official plugins are available:
+built with react + vite + [`@nalet/design-system`](https://github.com/nalet/design-system)
+(square, dark, terminal aesthetic). single-page app, served under a configurable base path,
+authenticating against any OIDC issuer it discovers at runtime.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## how it works
 
-## React Compiler
+- **auth** — on load the app fetches `GET /api/config` for the OIDC issuer + web client id,
+  then runs an authorization-code + PKCE flow against that issuer (`src/auth/oidc.ts`).
+  point it at your own keycloak / identity provider; nothing is baked in at build time.
+- **base path** — the SPA is built with a Vite `base` (default `/portal/`). the bundled
+  nginx serves it there and 302s the bare host to the launchpad.
+- **tiles** — products are siblings on the same origin. launching a tile full-page-navigates
+  to that app, which re-uses the shared session (SSO) — no second login.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## develop
 
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install          # builds the vendored @nalet/design-system tarball
+npm run dev          # vite dev server
+npm run build        # production bundle into dist/
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+## build the container
+
+```bash
+docker build -t zaentrum-portal .
+docker run -p 8080:8080 zaentrum-portal      # http://localhost:8080 -> /portal/
+```
+
+the image is a static nginx serving the built SPA on port 8080 (non-root). configure the
+OIDC issuer through your platform's `/api/config` endpoint.
+
+## deploy
+
+deployment manifests and the GitOps wiring for the reference instance live separately
+(GitLab, deploy-only). this repository is the application source.
+
+## license
+
+[MPL-2.0](LICENSE).
