@@ -1,5 +1,5 @@
 # build the SPA (vendored @nalet/design-system tarball is in ./vendor)
-FROM registry.nalet.cloud/infrastructure/library/node:22-alpine AS build
+FROM registry.nalet.cloud/infrastructure/library/node:20-alpine AS build
 WORKDIR /src
 COPY package.json package-lock.json* ./
 COPY vendor ./vendor
