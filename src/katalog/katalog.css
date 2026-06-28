@@ -1,0 +1,118 @@
+.kat__head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.kat__sub {
+  font-size: 13px;
+  color: var(--fg-dim, #8b95a7);
+}
+.kat__body {
+  margin-top: 20px;
+}
+
+/* filter bar */
+.kat__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.kat__filters > * {
+  min-width: 140px;
+}
+.kat__spacer {
+  flex: 1;
+}
+
+/* generic row helpers */
+.kat__rowlink {
+  color: var(--cloud-blue, #58a6ff);
+  cursor: pointer;
+}
+.kat__poster {
+  width: 32px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 2px;
+  background: var(--surface, #11161f);
+  display: block;
+}
+.kat__muted {
+  color: var(--fg-dim, #8b95a7);
+}
+.kat__mono {
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+}
+
+/* state row */
+.kat__state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+}
+.kat__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+/* object page */
+.kat__obj-head {
+  display: flex;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+.kat__obj-poster {
+  width: 120px;
+  height: 180px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--surface, #11161f);
+  flex: none;
+}
+.kat__obj-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.kat__obj-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+.kat__facet {
+  margin-top: 18px;
+}
+.kat__kv {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 6px 16px;
+  font-size: 13px;
+}
+.kat__kv dt {
+  color: var(--fg-dim, #8b95a7);
+}
+.kat__kv dd {
+  margin: 0;
+}
+.kat__form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.kat__err {
+  color: var(--amber, #f2b233);
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 13px;
+  padding: 8px 0;
+}
+.kat__ok {
+  color: var(--green, #2ea043);
+  font-size: 13px;
+}
