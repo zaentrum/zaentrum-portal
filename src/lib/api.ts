@@ -67,6 +67,48 @@ export interface Me {
   isAdmin: boolean;
 }
 
+// ─── operator / instances ────────────────────────────────────────────────────
+
+export interface Instance {
+  name: string;
+  image: string;
+  desiredReplicas: number;
+  readyReplicas: number;
+  updatedReplicas: number;
+  availableReplicas: number;
+  restarts: number;
+  phase: string; // ready|progressing|degraded|stopped
+  protected: boolean;
+  operatorManaged: boolean;
+  alwaysPull: boolean;
+}
+export interface OperatorComponent {
+  name: string;
+  ready: boolean;
+  image: string;
+}
+// When present is false (the demo / no operator) the backend omits the rest and
+// may include a note, so the detail fields are optional.
+export interface OperatorInfo {
+  present: boolean;
+  note?: string;
+  name?: string;
+  channel?: string;
+  version?: string;
+  updateMode?: string;
+  hostname?: string;
+  phase?: string;
+  currentVersion?: string;
+  availableUpdate?: string;
+  components?: OperatorComponent[];
+}
+export interface OperatorState {
+  available: boolean;
+  operator: OperatorInfo;
+  instances: Instance[];
+  error?: string;
+}
+
 // usePortalApi returns a fetcher bound to the current access token. It throws an
 // Error (with the server message) on any non-2xx.
 export function usePortalApi() {

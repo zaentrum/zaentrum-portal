@@ -9,7 +9,7 @@ import (
 // A disabled verifier (no issuer / AuthDisabled) authorizes as an anonymous
 // admin so the registry is usable without an IdP.
 func TestDisabledVerifierAuthorizesAsAdmin(t *testing.T) {
-	j, err := NewJWTVerifier(context.Background(), "", "chino", false, true)
+	j, err := NewJWTVerifier(context.Background(), "", "chino", "zaentrum-admin", false, true)
 	if err != nil {
 		t.Fatalf("NewJWTVerifier: %v", err)
 	}
@@ -18,7 +18,7 @@ func TestDisabledVerifierAuthorizesAsAdmin(t *testing.T) {
 	if !ok {
 		t.Fatal("disabled verifier should authorize")
 	}
-	if !p.HasRole("stube-admin") {
+	if !p.HasRole("zaentrum-admin") {
 		t.Fatal("disabled verifier should grant admin")
 	}
 }
@@ -26,7 +26,7 @@ func TestDisabledVerifierAuthorizesAsAdmin(t *testing.T) {
 // An unreachable issuer must be non-fatal at construction and fail closed on
 // bearer verification until discovery succeeds.
 func TestUnreachableIssuerFailsClosed(t *testing.T) {
-	j, err := NewJWTVerifier(context.Background(), "https://127.0.0.1:1/realms/none", "chino", false, false)
+	j, err := NewJWTVerifier(context.Background(), "https://127.0.0.1:1/realms/none", "chino", "zaentrum-admin", false, false)
 	if err != nil {
 		t.Fatalf("unreachable issuer should be non-fatal, got %v", err)
 	}
@@ -38,8 +38,8 @@ func TestUnreachableIssuerFailsClosed(t *testing.T) {
 }
 
 func TestHasRole(t *testing.T) {
-	p := &Principal{Roles: []string{"a", "stube-admin"}}
-	if !p.HasRole("stube-admin") {
+	p := &Principal{Roles: []string{"a", "zaentrum-admin"}}
+	if !p.HasRole("zaentrum-admin") {
 		t.Fatal("expected role present")
 	}
 	if p.HasRole("missing") {

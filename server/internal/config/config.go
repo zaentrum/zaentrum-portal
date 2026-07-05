@@ -25,7 +25,14 @@ type Config struct {
 	AuthDisabled     bool   // AUTH_DISABLED (default false)
 
 	// Realm role that authorizes registry writes (settings admin).
-	AdminRole string // PORTAL_ADMIN_ROLE (default "stube-admin")
+	AdminRole string // PORTAL_ADMIN_ROLE (default "zaentrum-admin")
+
+	// Operator / instances console.
+	InstanceSelector string   // PORTAL_INSTANCE_SELECTOR — label filter for listed deployments (default "" = all in ns)
+	ProtectedNames   []string // PORTAL_PROTECT — deployments the UI must not scale/restart (default postgres,kafka,valkey,keycloak)
+	OperatorGroup    string   // PORTAL_OPERATOR_GROUP (default zaentrum.io)
+	OperatorVersion  string   // PORTAL_OPERATOR_VERSION (default v1alpha1)
+	OperatorPlural   string   // PORTAL_OPERATOR_PLURAL (default zaentrums)
 }
 
 func env(keys ...string) string {
@@ -88,6 +95,23 @@ func Load() Config {
 		AudienceRequired: envBool(false, "OIDC_AUDIENCE_REQUIRED"),
 		AuthDisabled:     envBool(false, "AUTH_DISABLED"),
 
-		AdminRole: envDefault("stube-admin", "PORTAL_ADMIN_ROLE"),
+		AdminRole: envDefault("zaentrum-admin", "PORTAL_ADMIN_ROLE"),
+
+		InstanceSelector: env("PORTAL_INSTANCE_SELECTOR"),
+		ProtectedNames:   splitCSV(envDefault("postgres,kafka,valkey,keycloak", "PORTAL_PROTECT")),
+		OperatorGroup:    envDefault("zaentrum.io", "PORTAL_OPERATOR_GROUP"),
+		OperatorVersion:  envDefault("v1alpha1", "PORTAL_OPERATOR_VERSION"),
+		OperatorPlural:   envDefault("zaentrums", "PORTAL_OPERATOR_PLURAL"),
 	}
+}
+
+// splitCSV parses a comma-separated list, trimming blanks.
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

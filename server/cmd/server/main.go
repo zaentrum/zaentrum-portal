@@ -22,6 +22,8 @@ import (
 	"github.com/zaentrum/zaentrum-portal/server/internal/api"
 	"github.com/zaentrum/zaentrum-portal/server/internal/auth"
 	"github.com/zaentrum/zaentrum-portal/server/internal/config"
+	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
+	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
 	"github.com/zaentrum/zaentrum-portal/server/internal/store"
 )
 
@@ -50,11 +52,31 @@ func run() error {
 		return err
 	}
 
-	jwt, err := auth.NewJWTVerifier(bgCtx, cfg.OIDCIssuer, cfg.Audience, cfg.AudienceRequired, cfg.AuthDisabled)
+	jwt, err := auth.NewJWTVerifier(bgCtx, cfg.OIDCIssuer, cfg.Audience, cfg.AdminRole, cfg.AudienceRequired, cfg.AuthDisabled)
 	if err != nil {
 		return err
 	}
 	authMW := auth.NewMiddleware(jwt, cfg.AdminRole)
+
+	// Operator / instances console. The k8s client is in-cluster; when not
+	// running in a cluster it reports Available()==false and the operator API
+	// degrades gracefully (the console shows an "unavailable" note).
+	kc, err := k8s.New()
+	if err != nil {
+		return err
+	}
+	if kc.InCluster() {
+		log.Printf("operator: managing instances in namespace %q", kc.Namespace())
+		// Guard-rail: auth-disabled + in-cluster would grant unauthenticated
+		// callers admin over real Deployment/CR mutations via the SA. Never do
+		// this in a cluster — shout loudly if someone configured it that way.
+		if cfg.AuthDisabled || cfg.OIDCIssuer == "" {
+			log.Printf("SECURITY WARNING: AUTH is DISABLED while running in a cluster — the operator console is UNAUTHENTICATED with cluster-write rights. Set OIDC_ISSUER and unset AUTH_DISABLED.")
+		}
+	} else {
+		log.Printf("operator: not running in a cluster — instances console disabled")
+	}
+	opSvc := operator.New(kc, cfg)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
@@ -74,7 +96,7 @@ func run() error {
 	// Authenticated surface.
 	r.Group(func(pr chi.Router) {
 		pr.Use(authMW.Authn)
-		api.New(st, cfg).Register(pr, authMW)
+		api.New(st, cfg, opSvc).Register(pr, authMW)
 	})
 
 	srv := &http.Server{
