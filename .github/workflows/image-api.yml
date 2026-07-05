@@ -1,17 +1,17 @@
-name: image
-# The web image (the launchpad SPA). The registry backend has its own image
-# workflow (image-api.yml); server-only changes don't rebuild the SPA.
+name: image-api
+# The portal-api image (the launchpad registry), built from ./server. Folded
+# into this repo but published as its own image the demo pulls.
 on:
   push:
     branches: [main]
-    paths-ignore:
+    paths:
       - 'server/**'
   workflow_dispatch:
 permissions:
   contents: read
   packages: write
 jobs:
-  image:
+  image-api:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,8 +23,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./server
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/zaentrum/portal-api:latest
+            ghcr.io/zaentrum/portal-api:${{ github.sha }}

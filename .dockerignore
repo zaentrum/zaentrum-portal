@@ -1,0 +1,11 @@
+# The web image (root Dockerfile) builds only the SPA — keep the Go backend, node
+# artifacts and CI out of its build context. The portal-api image builds from
+# ./server, which has its own context.
+server
+node_modules
+dist
+dist-ssr
+.git
+.github
+*.log
+.DS_Store
