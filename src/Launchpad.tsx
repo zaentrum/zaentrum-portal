@@ -1,18 +1,32 @@
-import { TileGroup, Tile, Heading, Text } from '@nalet/design-system';
-import { Library } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { TileGroup, Tile, Heading, Text, Spinner } from '@nalet/design-system';
+import type { TileBadgeTone, TileStatus } from '@nalet/design-system';
+import { Settings } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { CGlyph, TGlyph, MGlyph } from './glyphs';
+import { usePortalApi, type Launchpad as LaunchpadData } from './lib/api';
+import { resolveIcon } from './lib/icons';
 import './app.css';
 
-// products are siblings on this origin (SSO); the tile full-page-navigates there.
-// trailing slash so it lands on chino's /chino/ base directly.
-const CHINO_URL = '/chino/';
-
 // The launchpad home space — rendered inside the portal shell (which owns the
-// header/sign-out). Tiles launch products (siblings via SSO) and in-shell apps
-// (the katalog console routes internally).
-export function Launchpad() {
+// header/sign-out). It is assembled at runtime from the portal-api registry:
+// spaces → tiles → apps. Tiles launch products/apps (siblings on this origin via
+// SSO, a full-page nav) or open external tools in a new tab. Admins additionally
+// see a "settings" tile that opens the in-shell registry console.
+export function Launchpad({ isAdmin }: { isAdmin: boolean }) {
+  const api = usePortalApi();
   const nav = useNavigate();
+  const [lp, setLp] = useState<LaunchpadData | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    api<LaunchpadData>('/launchpad')
+      .then((d) => live && setLp(d))
+      .catch((e) => live && setErr(e instanceof Error ? e.message : String(e)));
+    return () => {
+      live = false;
+    };
+  }, [api]);
 
   return (
     <div className="lp">
@@ -23,33 +37,46 @@ export function Launchpad() {
         <Text variant="muted">your spaces and apps</Text>
       </div>
 
-      <TileGroup legend="apps" columns={3} gap="md">
-        <Tile
-          variant="app"
-          title="chino"
-          description="movies & shows"
-          icon={CGlyph}
-          status="online"
-          badge="ready"
-          badgeTone="success"
-          href={CHINO_URL}
-        />
-        <Tile variant="app" title="tv" description="live channels" icon={TGlyph} status="offline" badge="soon" disabled />
-        <Tile variant="app" title="musig" description="music" icon={MGlyph} status="offline" badge="soon" disabled />
-      </TileGroup>
+      {err && <p style={{ color: 'var(--danger, #f85149)' }}>couldn’t load your launchpad: {err}</p>}
+      {!lp && !err && (
+        <div className="lp__state">
+          <Spinner /> <Text variant="muted">loading your launchpad…</Text>
+        </div>
+      )}
 
-      <TileGroup legend="manage" columns={3} gap="md">
-        <Tile
-          variant="app"
-          title="katalog"
-          description="catalog management"
-          icon={Library}
-          status="online"
-          badge="admin"
-          badgeTone="info"
-          onClick={() => nav('/katalog')}
-        />
-      </TileGroup>
+      {lp?.spaces.map((space) => (
+        <TileGroup key={space.key} legend={space.title} columns={3} gap="md">
+          {space.tiles.map((t) => (
+            <Tile
+              key={t.key}
+              variant="app"
+              title={t.title}
+              description={t.description || undefined}
+              icon={resolveIcon(t.icon)}
+              status={(t.status || undefined) as TileStatus | undefined}
+              badge={t.badge || undefined}
+              badgeTone={(t.badgeTone || undefined) as TileBadgeTone | undefined}
+              disabled={t.disabled || undefined}
+              href={t.href || undefined}
+              external={t.external || undefined}
+            />
+          ))}
+        </TileGroup>
+      ))}
+
+      {isAdmin && (
+        <TileGroup legend="system" columns={3} gap="md">
+          <Tile
+            variant="app"
+            title="settings"
+            description="register apps, spaces & tiles"
+            icon={Settings}
+            badge="admin"
+            badgeTone="info"
+            onClick={() => nav('/settings')}
+          />
+        </TileGroup>
+      )}
 
       <footer className="lp__foot">
         <Text variant="dim">zaentrum · demo</Text>
