@@ -68,7 +68,8 @@ type claims struct {
 // reachable. This survives a simultaneous rollout where Keycloak is still
 // booting; an eager, fatal init would crash-loop the service until Keycloak up.
 type JWTVerifier struct {
-	disabled bool
+	disabled  bool
+	adminRole string // synthetic role granted in disabled (no-IdP) mode
 
 	issuer string
 	cfg    *oidc.Config
@@ -78,11 +79,13 @@ type JWTVerifier struct {
 }
 
 // NewJWTVerifier builds a verifier. When disabled is true or issuer is blank,
-// every request authorizes as an anonymous admin. Otherwise it attempts OIDC
-// discovery once; failure is non-fatal (self-heals in the background).
-func NewJWTVerifier(ctx context.Context, issuer, audience string, audienceRequired, disabled bool) (*JWTVerifier, error) {
+// every request authorizes as an anonymous admin (a no-IdP dev convenience —
+// callers MUST NOT set this in a cluster). Otherwise it attempts OIDC discovery
+// once; failure is non-fatal (self-heals in the background). adminRole is the
+// realm role used both for gating and for the disabled-mode synthetic principal.
+func NewJWTVerifier(ctx context.Context, issuer, audience, adminRole string, audienceRequired, disabled bool) (*JWTVerifier, error) {
 	if disabled || issuer == "" {
-		return &JWTVerifier{disabled: true}, nil
+		return &JWTVerifier{disabled: true, adminRole: adminRole}, nil
 	}
 	cfg := &oidc.Config{SkipClientIDCheck: !audienceRequired}
 	if audienceRequired {
@@ -155,7 +158,7 @@ func (j *JWTVerifier) Disabled() bool { return j.disabled }
 // the principal (with realm roles). Before discovery completes it fails closed.
 func (j *JWTVerifier) verifyBearer(ctx context.Context, r *http.Request) (*Principal, bool) {
 	if j.disabled {
-		return &Principal{Subject: "anonymous", Username: "anonymous", Roles: []string{"stube-admin"}}, true
+		return &Principal{Subject: "anonymous", Username: "anonymous", Roles: []string{j.adminRole}}, true
 	}
 	verifier := j.tokenVerifier()
 	if verifier == nil {

@@ -7,7 +7,7 @@ const env = import.meta.env;
 // the ISSUER from the server's /api/config so a single build is relocatable; the
 // products (chino/tv/musig) ride the same Keycloak SSO session on this origin.
 export let authority: string =
-  env.VITE_OIDC_AUTHORITY ?? 'https://zaentrum.demo.nalet.cloud/auth/realms/stube';
+  env.VITE_OIDC_AUTHORITY ?? 'https://zaentrum.demo.nalet.cloud/auth/realms/zaentrum';
 export const clientId: string = env.VITE_OIDC_CLIENT_ID ?? 'zaentrum-web';
 
 // redirect_uri stays under /portal/ so it never collides with Keycloak's /auth route

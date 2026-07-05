@@ -1,0 +1,91 @@
+/* operator / instances console. reads design-system tokens. */
+.op__head {
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.op__sub {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 13px;
+  color: var(--fg-3, #8b949e);
+}
+
+.op__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+}
+.op__msg {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--cloud-blue, #4c8dff);
+}
+.op__err {
+  color: var(--danger, #f85149);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.op__state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 0;
+}
+
+.op__card-title {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-weight: 700;
+}
+
+.op__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px;
+}
+.op__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.op__field-label {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-3, #8b949e);
+}
+
+.op__svc {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.op__lock {
+  display: inline-flex;
+  color: var(--fg-3, #8b949e);
+}
+.op__mono {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--fg-2, #c9d1d9);
+}
+.op__scale {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.op__count {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  min-width: 34px;
+  text-align: center;
+}
+
+.op {
+  margin-bottom: 24px;
+}
+.op :global(.card) {
+  margin-bottom: 20px;
+}

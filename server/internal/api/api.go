@@ -14,16 +14,18 @@ import (
 	"github.com/zaentrum/zaentrum-portal/server/internal/auth"
 	"github.com/zaentrum/zaentrum-portal/server/internal/config"
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
+	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
 	"github.com/zaentrum/zaentrum-portal/server/internal/store"
 )
 
 type API struct {
 	st  *store.Store
 	cfg config.Config
+	op  *operator.Service
 }
 
-func New(st *store.Store, cfg config.Config) *API {
-	return &API{st: st, cfg: cfg}
+func New(st *store.Store, cfg config.Config, op *operator.Service) *API {
+	return &API{st: st, cfg: cfg, op: op}
 }
 
 // Register mounts the registry routes under /api/portal. Authn is applied by the
@@ -52,8 +54,107 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 			ar.Post("/tiles", a.upsertTile)
 			ar.Patch("/tiles/{key}", a.patchTile)
 			ar.Delete("/tiles/{key}", a.deleteTile)
+
+			// Operator / instances console (view running services, scale, update,
+			// monitor). Admin-only — it manages the platform's Deployments / CR.
+			ar.Get("/operator", a.operatorGet)
+			ar.Patch("/operator", a.operatorPatch)
+			ar.Post("/operator/apply-update", a.operatorApplyUpdate)
+			ar.Post("/operator/instances/{name}/scale", a.instanceScale)
+			ar.Post("/operator/instances/{name}/restart", a.instanceRestart)
 		})
 	})
+}
+
+// ─── operator / instances ────────────────────────────────────────────────────
+
+// operatorGet returns the whole console state in one call: whether instance
+// management is available (in-cluster), the operator (Zaentrum CR) summary, and the
+// live instances.
+func (a *API) operatorGet(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{"available": false, "operator": map[string]any{"present": false}, "instances": []any{}}
+	if a.op == nil || !a.op.Available() {
+		out["operator"] = map[string]any{"present": false, "note": "instance management is unavailable (not running in a cluster)"}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	info, _ := a.op.OperatorInfo(r.Context())
+	instances, err := a.op.Instances(r.Context())
+	if err != nil {
+		out["available"] = true
+		out["operator"] = info
+		out["error"] = err.Error()
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"available": true, "operator": info, "instances": instances})
+}
+
+func (a *API) operatorPatch(w http.ResponseWriter, r *http.Request) {
+	if !a.operatorReady(w) {
+		return
+	}
+	var body struct {
+		Version    *string `json:"version"`
+		Channel    *string `json:"channel"`
+		UpdateMode *string `json:"updateMode"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if err := a.op.SetOperator(r.Context(), body.Version, body.Channel, body.UpdateMode); err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) operatorApplyUpdate(w http.ResponseWriter, r *http.Request) {
+	if !a.operatorReady(w) {
+		return
+	}
+	if err := a.op.ApplyUpdate(r.Context()); err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) instanceScale(w http.ResponseWriter, r *http.Request) {
+	if !a.operatorReady(w) {
+		return
+	}
+	var body struct {
+		Replicas int `json:"replicas"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if err := a.op.Scale(r.Context(), chi.URLParam(r, "name"), body.Replicas); err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) instanceRestart(w http.ResponseWriter, r *http.Request) {
+	if !a.operatorReady(w) {
+		return
+	}
+	if err := a.op.Restart(r.Context(), chi.URLParam(r, "name")); err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// operatorReady guards the write actions when instance management is unavailable.
+func (a *API) operatorReady(w http.ResponseWriter) bool {
+	if a.op == nil || !a.op.Available() {
+		http.Error(w, "instance management is unavailable (not running in a cluster)", http.StatusServiceUnavailable)
+		return false
+	}
+	return true
 }
 
 // ─── reads ───────────────────────────────────────────────────────────────────
