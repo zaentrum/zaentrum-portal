@@ -37,7 +37,7 @@ export function Launchpad({ isAdmin }: { isAdmin: boolean }) {
         <Text variant="muted">your spaces and apps</Text>
       </div>
 
-      {err && <p style={{ color: 'var(--danger, #f85149)' }}>couldn’t load your launchpad: {err}</p>}
+      {err && <p style={{ color: 'var(--signal-red, #F85149)' }}>couldn’t load your launchpad: {err}</p>}
       {!lp && !err && (
         <div className="lp__state">
           <Spinner /> <Text variant="muted">loading your launchpad…</Text>
