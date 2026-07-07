@@ -302,7 +302,7 @@ function TilesPanel() {
     <CrudPanel<Tile>
       singular="tile"
       path="/tiles"
-      keyHint="e.g. katalog.scan (app.action)"
+      keyHint="e.g. chino.open (app.action)"
       empty={() => ({
         key: '',
         appKey: apps[0]?.key ?? '',
