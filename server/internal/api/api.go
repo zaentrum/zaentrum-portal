@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -504,7 +505,12 @@ func (a *API) dbRows(w http.ResponseWriter, r *http.Request) {
 // the same ScrubSecrets as the live viewer) and once more over the final JSON as
 // a belt-and-braces net. Never includes DB credentials or bearer tokens.
 func (a *API) supportBundle(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	// Self-cap the whole assembly: the per-container log walk is sequential and
+	// each apiserver call can take up to the k8s client's timeout, so bound the
+	// total so a slow/large namespace can't hold the request (and its growing
+	// in-memory bundle) open indefinitely.
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
 	q := r.URL.Query()
 	// A section is included unless explicitly disabled (?x=0 / ?x=false).
 	on := func(k string) bool {
@@ -545,13 +551,29 @@ func (a *API) supportBundle(w http.ResponseWriter, r *http.Request) {
 			pods, _ := a.op.LogPods(ctx)
 			sections["pods"] = nonNil(pods)
 			if on("logs") {
+				// Each container is byte-capped by operator.Logs (maxLogBytes); this
+				// aggregate cap bounds the whole bundle so no combination of pods can
+				// exceed portal-api's memory budget.
+				const maxBundleLogBytes = 24 << 20 // 24 MiB
 				logs := map[string]string{}
+				total, truncated := 0, false
+			collect:
 				for _, p := range pods {
 					for _, c := range p.Containers {
-						if txt, err := a.op.Logs(ctx, p.Pod, c, 200, 0); err == nil {
-							logs[p.Pod+"/"+c] = txt
+						if total >= maxBundleLogBytes {
+							truncated = true
+							break collect
 						}
+						txt, err := a.op.Logs(ctx, p.Pod, c, 200, 0)
+						if err != nil {
+							continue
+						}
+						logs[p.Pod+"/"+c] = txt
+						total += len(txt)
 					}
+				}
+				if truncated {
+					logs["_note"] = "truncated: support-bundle log size cap reached"
 				}
 				sections["logs"] = logs
 			}

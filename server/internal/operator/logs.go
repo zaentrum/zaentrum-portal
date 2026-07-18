@@ -36,9 +36,16 @@ func (s *Service) LogPods(ctx context.Context) ([]PodLog, error) {
 	return out, nil
 }
 
+// maxLogBytes caps the response of a single container-log fetch (both the
+// interactive viewer and each per-container slice of the support bundle), so a
+// container that logs very long lines can't return an unbounded body regardless
+// of the line-count cap.
+const maxLogBytes = 2 << 20 // 2 MiB
+
 // Logs returns a pod container's recent logs with secrets redacted. tail caps the
 // number of lines (default 500, max 5000); since bounds age in seconds (0 =
-// unbounded). Names are validated before they reach the apiserver URL path.
+// unbounded); the response is byte-capped (maxLogBytes) server-side. Names are
+// validated before they reach the apiserver URL path.
 func (s *Service) Logs(ctx context.Context, pod, container string, tail, since int) (string, error) {
 	if err := validName(pod); err != nil {
 		return "", err
@@ -57,7 +64,7 @@ func (s *Service) Logs(ctx context.Context, pod, container string, tail, since i
 	if since < 0 {
 		since = 0
 	}
-	raw, err := s.k8s.PodLogs(ctx, pod, container, tail, since)
+	raw, err := s.k8s.PodLogs(ctx, pod, container, tail, since, maxLogBytes)
 	if err != nil {
 		return "", err
 	}

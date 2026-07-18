@@ -126,6 +126,10 @@ func run() error {
 		Addr:              ":" + cfg.Port,
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Bound response writes so a slow/large handler (e.g. the support bundle,
+		// which self-caps at 60s) can't hold a connection open indefinitely. All
+		// endpoints are request/response (no streaming), so this is safe.
+		WriteTimeout: 120 * time.Second,
 	}
 
 	go func() {
