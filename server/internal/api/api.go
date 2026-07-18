@@ -9,14 +9,17 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/zaentrum/zaentrum-portal/server/internal/auth"
 	"github.com/zaentrum/zaentrum-portal/server/internal/config"
+	"github.com/zaentrum/zaentrum-portal/server/internal/dbbrowse"
 	"github.com/zaentrum/zaentrum-portal/server/internal/eventtap"
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
 	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
+	"github.com/zaentrum/zaentrum-portal/server/internal/redact"
 	"github.com/zaentrum/zaentrum-portal/server/internal/store"
 )
 
@@ -25,10 +28,11 @@ type API struct {
 	cfg config.Config
 	op  *operator.Service
 	tap *eventtap.Tap
+	br  *dbbrowse.Browser
 }
 
-func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap) *API {
-	return &API{st: st, cfg: cfg, op: op, tap: tap}
+func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap, br *dbbrowse.Browser) *API {
+	return &API{st: st, cfg: cfg, op: op, tap: tap, br: br}
 }
 
 // Register mounts the registry routes under /api/portal. Authn is applied by the
@@ -73,6 +77,13 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 			// Debug: Kafka event tap — live topology + recent events (redacted).
 			ar.Get("/debug/kafka/topology", a.kafkaTopology)
 			ar.Get("/debug/kafka/events", a.kafkaEvents)
+
+			// Debug: curated read-only DB browser (whitelisted tables, masked).
+			ar.Get("/debug/db/tables", a.dbTables)
+			ar.Get("/debug/db/rows", a.dbRows)
+
+			// Debug: downloadable support bundle (all sections secret-scrubbed).
+			ar.Get("/debug/support-bundle", a.supportBundle)
 		})
 	})
 }
@@ -446,6 +457,136 @@ func (a *API) kafkaEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	writeJSON(w, http.StatusOK, nonNil(a.tap.Events(q.Get("topic"), limit)))
+}
+
+// ─── debug: curated read-only db browser ───────────────────────────────────────
+
+// dbTables lists the curated (whitelisted) tables/views with live row counts.
+func (a *API) dbTables(w http.ResponseWriter, r *http.Request) {
+	if a.br == nil || !a.br.Available() {
+		writeJSON(w, http.StatusOK, []dbbrowse.Table{})
+		return
+	}
+	writeJSON(w, http.StatusOK, a.br.Tables(r.Context()))
+}
+
+// dbRows returns a page of a curated table (read-only, secrets masked). Query:
+// table (required, must be whitelisted), limit, offset.
+func (a *API) dbRows(w http.ResponseWriter, r *http.Request) {
+	if a.br == nil || !a.br.Available() {
+		http.Error(w, "db browser is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	q := r.URL.Query()
+	if strings.TrimSpace(q.Get("table")) == "" {
+		badRequest(w, "table is required")
+		return
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	page, err := a.br.Rows(r.Context(), q.Get("table"), limit, offset)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "unknown table") {
+			badRequest(w, err.Error())
+			return
+		}
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+// ─── debug: support bundle ─────────────────────────────────────────────────────
+
+// supportBundle assembles a downloadable diagnostic bundle from the sections the
+// caller opted into (?logs=&instances=&kafka=&registry=&config=, each default on,
+// set to 0 to omit). Everything is secret-scrubbed twice: per-section (logs use
+// the same ScrubSecrets as the live viewer) and once more over the final JSON as
+// a belt-and-braces net. Never includes DB credentials or bearer tokens.
+func (a *API) supportBundle(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	// A section is included unless explicitly disabled (?x=0 / ?x=false).
+	on := func(k string) bool {
+		v := strings.ToLower(strings.TrimSpace(q.Get(k)))
+		return v != "0" && v != "false" && v != "off"
+	}
+
+	bundle := map[string]any{
+		"kind":        "zaentrum-support-bundle",
+		"version":     1,
+		"generatedAt": time.Now().UTC().Format(time.RFC3339),
+	}
+	sections := map[string]any{}
+
+	if on("config") {
+		sections["config"] = a.configSummary()
+	}
+	if on("registry") {
+		apps, _ := a.st.ListApps(ctx)
+		spaces, _ := a.st.ListSpaces(ctx)
+		tiles, _ := a.st.ListTiles(ctx)
+		sections["registry"] = map[string]any{
+			"apps": nonNil(apps), "spaces": nonNil(spaces), "tiles": nonNil(tiles),
+		}
+	}
+	if on("kafka") && a.tap != nil && a.tap.Available() {
+		sections["kafka"] = a.tap.Topology(ctx)
+	}
+	if a.op != nil && a.op.Available() {
+		bundle["namespace"] = a.op.Namespace()
+		if on("instances") {
+			info, _ := a.op.OperatorInfo(ctx)
+			inst, _ := a.op.Instances(ctx)
+			sections["operator"] = info
+			sections["instances"] = nonNil(inst)
+		}
+		if on("logs") || on("pods") {
+			pods, _ := a.op.LogPods(ctx)
+			sections["pods"] = nonNil(pods)
+			if on("logs") {
+				logs := map[string]string{}
+				for _, p := range pods {
+					for _, c := range p.Containers {
+						if txt, err := a.op.Logs(ctx, p.Pod, c, 200, 0); err == nil {
+							logs[p.Pod+"/"+c] = txt
+						}
+					}
+				}
+				sections["logs"] = logs
+			}
+		}
+	}
+	bundle["sections"] = sections
+
+	raw, err := json.MarshalIndent(bundle, "", "  ")
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	// Final safety net: scrub the whole serialized document once more.
+	safe := redact.Secrets(string(raw))
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="zaentrum-support-bundle.json"`)
+	_, _ = w.Write([]byte(safe))
+}
+
+// configSummary returns non-secret runtime configuration for the bundle — never
+// the DB user/password or any credential.
+func (a *API) configSummary() map[string]any {
+	return map[string]any{
+		"oidcIssuer":       a.cfg.OIDCIssuer,
+		"audience":         a.cfg.Audience,
+		"audienceRequired": a.cfg.AudienceRequired,
+		"adminRole":        a.cfg.AdminRole,
+		"instanceSelector": a.cfg.InstanceSelector,
+		"protectedNames":   a.cfg.ProtectedNames,
+		"operatorGroup":    a.cfg.OperatorGroup,
+		"operatorVersion":  a.cfg.OperatorVersion,
+		"operatorPlural":   a.cfg.OperatorPlural,
+		"kafkaBrokers":     a.cfg.KafkaBrokers,
+		"kafkaTopicPrefix": a.cfg.KafkaTopicPrefix,
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

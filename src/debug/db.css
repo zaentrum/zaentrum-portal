@@ -1,0 +1,117 @@
+/* Curated DB browser — matches the logs/operator chrome (dark, square, mono). */
+
+.db {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5, 24px);
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--s-6, 32px) var(--s-5, 24px);
+}
+
+.db__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-4, 16px);
+  flex-wrap: wrap;
+}
+
+.db__bar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-3, 12px);
+  flex-wrap: wrap;
+  padding: var(--s-4, 16px);
+  border-bottom: 1px solid var(--border, #1f2633);
+}
+.db__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1, 4px);
+  min-width: 160px;
+}
+.db__field--sm {
+  min-width: 100px;
+}
+.db__field--grow {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+.db__actions {
+  display: flex;
+  gap: var(--s-2, 8px);
+  align-items: center;
+}
+
+.db__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3, 12px);
+  padding: var(--s-2, 8px) var(--s-4, 16px);
+  min-height: 20px;
+  flex-wrap: wrap;
+}
+.db__pager {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2, 8px);
+  margin-left: auto;
+}
+.db__err {
+  padding: 0 var(--s-4, 16px);
+  color: var(--signal-amber, #f2b233);
+}
+
+.db__tablewrap {
+  overflow: auto;
+  max-height: 62vh;
+  border-top: 1px solid var(--border, #1f2633);
+}
+
+.db__table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--ff-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--fg-2, #c9d1d9);
+}
+.db__table th,
+.db__table td {
+  text-align: left;
+  padding: var(--s-2, 8px) var(--s-3, 12px);
+  border-bottom: 1px solid var(--border, #1f2633);
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+.db__table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-2, #0d1117);
+  color: var(--fg-3, #8b949e);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.db__table tbody tr:hover {
+  background: var(--bg-2, #0d1117);
+}
+.db__num {
+  color: var(--fg-3, #8b949e);
+  text-align: right;
+  width: 1%;
+}
+.db__null {
+  color: var(--fg-3, #5b6472);
+}
+
+.db__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2, 8px);
+  padding: var(--s-6, 32px) var(--s-4, 16px);
+}

@@ -1,0 +1,64 @@
+/* Support-bundle export — matches the logs/operator chrome (dark, square, mono). */
+
+.exp {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5, 24px);
+  max-width: 820px;
+  margin: 0 auto;
+  padding: var(--s-6, 32px) var(--s-5, 24px);
+}
+
+.exp__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-4, 16px);
+  flex-wrap: wrap;
+}
+
+.exp__privacy {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3, 12px);
+  padding: var(--s-4, 16px);
+  border-bottom: 1px solid var(--border, #1f2633);
+  color: var(--signal-green, #3fb950);
+}
+.exp__privacy > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1, 4px);
+}
+
+.exp__sections {
+  display: flex;
+  flex-direction: column;
+  padding: var(--s-2, 8px) 0;
+}
+.exp__row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3, 12px);
+  padding: var(--s-3, 12px) var(--s-4, 16px);
+  cursor: pointer;
+}
+.exp__row:hover {
+  background: var(--bg-2, #0d1117);
+}
+.exp__rowtext {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.exp__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3, 12px);
+  padding: var(--s-4, 16px);
+  border-top: 1px solid var(--border, #1f2633);
+  flex-wrap: wrap;
+}
+.exp__err {
+  color: var(--signal-amber, #f2b233);
+}

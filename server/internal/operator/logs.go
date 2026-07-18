@@ -14,6 +14,9 @@ type PodLog struct {
 	Containers []string `json:"containers"`
 }
 
+// Namespace is the namespace the console operates in (empty when not in-cluster).
+func (s *Service) Namespace() string { return s.k8s.Namespace() }
+
 // LogPods lists the namespace's pods with their container names + phase, so the
 // log viewer can offer a pod/container selector. Admin-gated at the router.
 func (s *Service) LogPods(ctx context.Context) ([]PodLog, error) {

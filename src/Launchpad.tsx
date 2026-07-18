@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { TileGroup, Tile, Heading, Text, Spinner } from '@nalet/design-system';
 import type { TileBadgeTone, TileStatus } from '@nalet/design-system';
-import { Settings, Boxes, ScrollText, Radio } from 'lucide-react';
+import { Settings, Boxes, ScrollText, Radio, Database, LifeBuoy } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { usePortalApi, type Launchpad as LaunchpadData } from './lib/api';
 import { resolveIcon } from './lib/icons';
@@ -102,6 +102,24 @@ export function Launchpad({ isAdmin }: { isAdmin: boolean }) {
             badge="admin"
             badgeTone="info"
             onClick={() => nav('/events')}
+          />
+          <Tile
+            variant="app"
+            title="database"
+            description="curated tables · read-only"
+            icon={Database}
+            badge="admin"
+            badgeTone="info"
+            onClick={() => nav('/database')}
+          />
+          <Tile
+            variant="app"
+            title="export"
+            description="support bundle · redacted"
+            icon={LifeBuoy}
+            badge="admin"
+            badgeTone="info"
+            onClick={() => nav('/export')}
           />
         </TileGroup>
       )}
