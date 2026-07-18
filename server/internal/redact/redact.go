@@ -8,7 +8,10 @@
 // identically.
 package redact
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 var (
 	// key: value / key=value / "key":"value" where the KEY looks like a credential.
@@ -28,4 +31,22 @@ func Secrets(s string) string {
 	s = reJWT.ReplaceAllString(s, `***REDACTED-JWT***`)
 	s = reURICreds.ReplaceAllString(s, `${1}***REDACTED***${2}`)
 	return s
+}
+
+var secretKeyParts = []string{
+	"password", "passwd", "secret", "token", "apikey", "api_key",
+	"accesskey", "access_key", "privatekey", "private_key",
+	"clientsecret", "client_secret", "credential",
+}
+
+// LooksSecretKey reports whether a column/field name looks like it holds a
+// credential, so the DB browser can mask the whole value rather than print it.
+func LooksSecretKey(name string) bool {
+	n := strings.ToLower(name)
+	for _, p := range secretKeyParts {
+		if strings.Contains(n, p) {
+			return true
+		}
+	}
+	return false
 }

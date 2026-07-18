@@ -22,6 +22,7 @@ import (
 	"github.com/zaentrum/zaentrum-portal/server/internal/api"
 	"github.com/zaentrum/zaentrum-portal/server/internal/auth"
 	"github.com/zaentrum/zaentrum-portal/server/internal/config"
+	"github.com/zaentrum/zaentrum-portal/server/internal/dbbrowse"
 	"github.com/zaentrum/zaentrum-portal/server/internal/eventtap"
 	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
 	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
@@ -95,6 +96,11 @@ func run() error {
 		log.Printf("kafka tap: KAFKA_BROKERS unset — event console will report unavailable")
 	}
 
+	// Curated read-only DB browser for the admin debug console. Opens a small
+	// read-only pool per database lazily, all derived from the portal DSN.
+	br := dbbrowse.New(cfg.DatabaseURL, cfg.DatabaseUser, cfg.DatabasePassword)
+	defer br.Close()
+
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
@@ -113,7 +119,7 @@ func run() error {
 	// Authenticated surface.
 	r.Group(func(pr chi.Router) {
 		pr.Use(authMW.Authn)
-		api.New(st, cfg, opSvc, tap).Register(pr, authMW)
+		api.New(st, cfg, opSvc, tap, br).Register(pr, authMW)
 	})
 
 	srv := &http.Server{

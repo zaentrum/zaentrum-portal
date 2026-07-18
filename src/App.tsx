@@ -9,6 +9,8 @@ import { SettingsConsole } from './settings/SettingsConsole';
 import { OperatorConsole } from './operator/OperatorConsole';
 import { LogsConsole } from './debug/LogsConsole';
 import { KafkaConsole } from './debug/KafkaConsole';
+import { DbConsole } from './debug/DbConsole';
+import { ExportConsole } from './debug/ExportConsole';
 import { useMe } from './lib/api';
 import { Splash } from './Splash';
 
@@ -69,6 +71,22 @@ function AuthedApp() {
           element={
             <RequireAdmin me={me}>
               <KafkaConsole />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="database/*"
+          element={
+            <RequireAdmin me={me}>
+              <DbConsole />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="export/*"
+          element={
+            <RequireAdmin me={me}>
+              <ExportConsole />
             </RequireAdmin>
           }
         />

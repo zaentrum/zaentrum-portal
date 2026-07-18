@@ -192,6 +192,25 @@ export interface KafkaEvent {
   size: number;
 }
 
+// ─── curated db browser (mirror server/internal/dbbrowse) ────────────────────
+
+export interface DbTable {
+  key: string;
+  db: string;
+  label: string;
+  description: string;
+  rows: number;
+}
+export interface DbPage {
+  table: string;
+  db: string;
+  columns: string[];
+  rows: string[][];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 // useMe resolves the caller's identity + admin flag from the portal-api.
 export function useMe(): Me | null {
   const api = usePortalApi();
