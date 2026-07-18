@@ -1,0 +1,79 @@
+/* Logs console — matches the operator console chrome (dark, square, mono). */
+
+.logs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5, 24px);
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--s-6, 32px) var(--s-5, 24px);
+}
+
+.logs__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-4, 16px);
+  flex-wrap: wrap;
+}
+
+.logs__bar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-3, 12px);
+  flex-wrap: wrap;
+  padding: var(--s-4, 16px);
+  border-bottom: 1px solid var(--border, #1f2633);
+}
+
+.logs__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1, 4px);
+  min-width: 160px;
+}
+.logs__field--sm {
+  min-width: 90px;
+}
+.logs__field--grow {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+
+.logs__actions {
+  display: flex;
+  gap: var(--s-2, 8px);
+  align-items: center;
+}
+
+.logs__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3, 12px);
+  padding: var(--s-2, 8px) var(--s-4, 16px);
+  min-height: 20px;
+}
+.logs__spin {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2, 8px);
+}
+
+.logs__err {
+  padding: 0 var(--s-4, 16px);
+  color: var(--signal-amber, #f2b233);
+}
+
+.logs__body {
+  margin: 0;
+  padding: var(--s-4, 16px);
+  height: 62vh;
+  overflow: auto;
+  background: var(--bg-2, #0d1117);
+  border-top: 1px solid var(--border, #1f2633);
+  font-family: var(--ff-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-2, #c9d1d9);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
