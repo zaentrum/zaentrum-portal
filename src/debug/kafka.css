@@ -1,0 +1,182 @@
+/* Kafka event console — matches the operator/logs chrome (dark, square, mono). */
+
+.kaf {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5, 24px);
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--s-6, 32px) var(--s-5, 24px);
+}
+
+.kaf__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-4, 16px);
+  flex-wrap: wrap;
+}
+
+.kaf__section {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-3, 12px);
+  padding: var(--s-4, 16px);
+  border-bottom: 1px solid var(--border, #1f2633);
+  flex-wrap: wrap;
+}
+.kaf__spin {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2, 8px);
+}
+
+/* ── topology table ── */
+.kaf__topics {
+  display: flex;
+  flex-direction: column;
+}
+.kaf__trow {
+  display: grid;
+  grid-template-columns: minmax(180px, 2fr) 56px minmax(160px, 2fr) 64px 96px;
+  align-items: center;
+  gap: var(--s-3, 12px);
+  padding: var(--s-2, 8px) var(--s-4, 16px);
+  border-bottom: 1px solid var(--border, #1f2633);
+  font-size: 13px;
+}
+.kaf__trow--head {
+  color: var(--fg-3, #8b949e);
+  font-family: var(--ff-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.kaf__topic {
+  font-family: var(--ff-mono, 'JetBrains Mono', ui-monospace, monospace);
+  color: var(--fg-2, #c9d1d9);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kaf__consumers {
+  display: flex;
+  gap: var(--s-1, 4px);
+  flex-wrap: wrap;
+}
+.kaf__rel {
+  color: var(--fg-3, #8b949e);
+  font-size: 12px;
+}
+
+/* ── event tail controls ── */
+.kaf__bar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-3, 12px);
+  flex-wrap: wrap;
+  padding: var(--s-4, 16px);
+  border-bottom: 1px solid var(--border, #1f2633);
+}
+.kaf__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1, 4px);
+  min-width: 160px;
+}
+.kaf__field--sm {
+  min-width: 90px;
+}
+.kaf__field--grow {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+.kaf__actions {
+  display: flex;
+  gap: var(--s-2, 8px);
+  align-items: center;
+}
+.kaf__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3, 12px);
+  padding: var(--s-2, 8px) var(--s-4, 16px);
+  min-height: 20px;
+}
+.kaf__err {
+  padding: 0 var(--s-4, 16px);
+  color: var(--signal-amber, #f2b233);
+}
+
+/* ── event rows ── */
+.kaf__events {
+  max-height: 56vh;
+  overflow: auto;
+  border-top: 1px solid var(--border, #1f2633);
+}
+.kaf__ev {
+  border-bottom: 1px solid var(--border, #1f2633);
+}
+.kaf__evhead {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2, 8px);
+  width: 100%;
+  padding: var(--s-2, 8px) var(--s-4, 16px);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  color: var(--fg-2, #c9d1d9);
+  font-family: var(--ff-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 12px;
+}
+.kaf__evhead:hover {
+  background: var(--bg-2, #0d1117);
+}
+.kaf__chev {
+  color: var(--fg-3, #8b949e);
+  transition: transform 0.12s ease;
+  flex: 0 0 auto;
+}
+.kaf__chev--open {
+  transform: rotate(90deg);
+}
+.kaf__time {
+  color: var(--fg-3, #8b949e);
+  flex: 0 0 auto;
+}
+.kaf__evtopic {
+  color: var(--fg-2, #c9d1d9);
+  flex: 0 0 auto;
+}
+.kaf__item {
+  color: var(--accent, #58a6ff);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.kaf__off {
+  color: var(--fg-3, #8b949e);
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+.kaf__payload {
+  margin: 0;
+  padding: var(--s-3, 12px) var(--s-6, 32px);
+  background: var(--bg-2, #0d1117);
+  font-family: var(--ff-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-2, #c9d1d9);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 40vh;
+  overflow: auto;
+}
+
+.kaf__empty {
+  padding: var(--s-5, 24px) var(--s-4, 16px);
+  text-align: center;
+}

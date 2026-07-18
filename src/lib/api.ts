@@ -163,6 +163,35 @@ export interface DebugPod {
   containers: string[];
 }
 
+// ─── kafka event tap (mirror server/internal/eventtap) ───────────────────────
+
+export interface KafkaTopic {
+  topic: string;
+  partitions: number;
+  consumers: string[];
+  seen: number;
+  lastEvent?: string;
+}
+export interface KafkaTopology {
+  available: boolean;
+  brokers?: string[];
+  topics?: KafkaTopic[];
+  groups?: string[];
+  note?: string;
+}
+export interface KafkaEvent {
+  seq: number;
+  topic: string;
+  partition: number;
+  offset: number;
+  key: string;
+  time: string;
+  type?: string;
+  itemId?: string;
+  payload: string;
+  size: number;
+}
+
 // useMe resolves the caller's identity + admin flag from the portal-api.
 export function useMe(): Me | null {
   const api = usePortalApi();
