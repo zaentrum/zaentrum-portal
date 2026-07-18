@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"log"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -23,12 +24,13 @@ import (
 )
 
 const (
-	defaultMax        = 500     // ring-buffer capacity
-	payloadCap        = 4000    // bytes of (scrubbed) payload kept per event
-	tapGroupID        = "portal-event-tap"
-	defaultPrefix     = "stube." // the platform's topic namespace
-	discoverEvery     = 15 * time.Second
-	discoverAttempts  = 40 // ~10 min of waiting for topics to appear
+	defaultMax       = 500     // ring-buffer capacity
+	payloadCap       = 4000    // bytes of (scrubbed) payload kept per event
+	tapGroupPrefix   = "portal-event-tap"
+	defaultPrefix    = "stube." // the platform's topic namespace
+	discoverEvery    = 15 * time.Second
+	discoverAttempts = 40 // ~10 min of waiting for topics to appear
+	commitEvery      = 10 * time.Second
 )
 
 // Config wires the tap to the bus. Brokers empty => the tap is inert (Available
@@ -115,12 +117,23 @@ func (t *Tap) Start(ctx context.Context) {
 	if t.cfg.TLS != nil {
 		dialer.TLS = t.cfg.TLS
 	}
+	// Group is UNIQUE PER POD (hostname suffix): every portal-api replica must get
+	// ALL partitions of every topic — a shared group would split partitions across
+	// replicas so each console showed only a partial event view. This never touches
+	// any pipeline consumer group. CommitInterval batches offset commits (vs. one
+	// synchronous commit per message) — the tail is ephemeral so commits barely
+	// matter, but batching avoids pointless __consumer_offsets write amplification.
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "unknown"
+	}
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:     t.cfg.Brokers,
-		GroupID:     tapGroupID,
-		GroupTopics: topics,
-		Dialer:      dialer,
-		StartOffset: kafka.LastOffset, // live tail (only applies on a fresh group)
+		Brokers:        t.cfg.Brokers,
+		GroupID:        tapGroupPrefix + "-" + host,
+		GroupTopics:    topics,
+		Dialer:         dialer,
+		StartOffset:    kafka.LastOffset, // live tail (fresh per-pod group => from now)
+		CommitInterval: commitEvery,
 	})
 	defer reader.Close()
 	log.Printf("kafka tap active on %d topics: %s", len(topics), strings.Join(topics, ","))

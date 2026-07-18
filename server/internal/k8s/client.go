@@ -26,6 +26,12 @@ const (
 	tokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	caPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	nsPath    = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+	// maxResponseBytes bounds how much of any single apiserver response body the
+	// client will buffer (defense against a runaway pod-log body OOM'ing the pod;
+	// normal list/get responses are KBs and pod logs are further capped via
+	// limitBytes on the request).
+	maxResponseBytes = 16 << 20 // 16 MiB
 )
 
 // APIError carries the apiserver's metav1.Status so callers can distinguish
@@ -124,7 +130,10 @@ func (c *Client) do(ctx context.Context, method, path, contentType string, body 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
+	// Backstop: never buffer more than maxResponseBytes from any single response
+	// (pod logs are additionally capped server-side via limitBytes; normal API
+	// responses are KBs). Bounds portal-api's memory against a runaway body.
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		ae := &APIError{Code: resp.StatusCode, Reason: resp.Status}
 		var st metaStatus
@@ -265,9 +274,11 @@ func (c *Client) RestartDeployment(ctx context.Context, name, ts string) error {
 }
 
 // PodLogs returns a pod container's recent logs (plain text, with timestamps).
-// tailLines caps the number of lines; sinceSeconds bounds the age (0 = no bound).
-// The log subresource returns text/plain, not JSON, so the body is returned raw.
-func (c *Client) PodLogs(ctx context.Context, pod, container string, tailLines, sinceSeconds int) ([]byte, error) {
+// tailLines caps the number of lines; sinceSeconds bounds the age (0 = no bound);
+// limitBytes caps the response size server-side (0 = no cap) so a container that
+// logs very long lines can't return an unbounded body. The log subresource
+// returns text/plain, not JSON, so the body is returned raw.
+func (c *Client) PodLogs(ctx context.Context, pod, container string, tailLines, sinceSeconds, limitBytes int) ([]byte, error) {
 	q := url.Values{}
 	if container != "" {
 		q.Set("container", container)
@@ -277,6 +288,9 @@ func (c *Client) PodLogs(ctx context.Context, pod, container string, tailLines, 
 	}
 	if sinceSeconds > 0 {
 		q.Set("sinceSeconds", strconv.Itoa(sinceSeconds))
+	}
+	if limitBytes > 0 {
+		q.Set("limitBytes", strconv.Itoa(limitBytes))
 	}
 	q.Set("timestamps", "true")
 	p := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log?%s", c.namespace, url.PathEscape(pod), q.Encode())
