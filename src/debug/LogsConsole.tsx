@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Card, Badge, Button, Select, Spinner, Text, Heading, Input } from '@nalet/design-system';
-import { RefreshCw, Download, Play, Pause, ScrollText } from 'lucide-react';
+import { RefreshCw, Download, Play, Pause } from 'lucide-react';
 import { usePortalApi, usePortalText, type DebugPod } from '../lib/api';
 import './logs.css';
 
