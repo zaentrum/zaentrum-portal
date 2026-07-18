@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { TileGroup, Tile, Heading, Text, Spinner } from '@nalet/design-system';
 import type { TileBadgeTone, TileStatus } from '@nalet/design-system';
-import { Settings, Boxes, ScrollText } from 'lucide-react';
+import { Settings, Boxes, ScrollText, Radio } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { usePortalApi, type Launchpad as LaunchpadData } from './lib/api';
 import { resolveIcon } from './lib/icons';
@@ -93,6 +93,15 @@ export function Launchpad({ isAdmin }: { isAdmin: boolean }) {
             badge="admin"
             badgeTone="info"
             onClick={() => nav('/logs')}
+          />
+          <Tile
+            variant="app"
+            title="events"
+            description="kafka topology · live tail"
+            icon={Radio}
+            badge="admin"
+            badgeTone="info"
+            onClick={() => nav('/events')}
           />
         </TileGroup>
       )}

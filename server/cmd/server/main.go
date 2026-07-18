@@ -22,6 +22,7 @@ import (
 	"github.com/zaentrum/zaentrum-portal/server/internal/api"
 	"github.com/zaentrum/zaentrum-portal/server/internal/auth"
 	"github.com/zaentrum/zaentrum-portal/server/internal/config"
+	"github.com/zaentrum/zaentrum-portal/server/internal/eventtap"
 	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
 	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
 	"github.com/zaentrum/zaentrum-portal/server/internal/store"
@@ -78,6 +79,22 @@ func run() error {
 	}
 	opSvc := operator.New(kc, cfg)
 
+	// Kafka event tap for the admin debug console. Best-effort: disabled when
+	// KAFKA_BROKERS is unset, and started in the background so a slow/absent bus
+	// never blocks boot. Runs for the server lifetime (stops with bgCtx).
+	var tap *eventtap.Tap
+	if brokers := eventtap.SplitBrokers(cfg.KafkaBrokers); len(brokers) > 0 {
+		tlsCfg, err := eventtap.MaybeTLS(cfg.KafkaCertDir)
+		if err != nil {
+			log.Printf("kafka tap: TLS material in %q unreadable (%v); tap disabled", cfg.KafkaCertDir, err)
+		} else {
+			tap = eventtap.New(eventtap.Config{Brokers: brokers, TLS: tlsCfg, TopicPrefix: cfg.KafkaTopicPrefix})
+			go tap.Start(bgCtx)
+		}
+	} else {
+		log.Printf("kafka tap: KAFKA_BROKERS unset — event console will report unavailable")
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
@@ -96,7 +113,7 @@ func run() error {
 	// Authenticated surface.
 	r.Group(func(pr chi.Router) {
 		pr.Use(authMW.Authn)
-		api.New(st, cfg, opSvc).Register(pr, authMW)
+		api.New(st, cfg, opSvc, tap).Register(pr, authMW)
 	})
 
 	srv := &http.Server{

@@ -14,6 +14,7 @@ import (
 
 	"github.com/zaentrum/zaentrum-portal/server/internal/auth"
 	"github.com/zaentrum/zaentrum-portal/server/internal/config"
+	"github.com/zaentrum/zaentrum-portal/server/internal/eventtap"
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
 	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
 	"github.com/zaentrum/zaentrum-portal/server/internal/store"
@@ -23,10 +24,11 @@ type API struct {
 	st  *store.Store
 	cfg config.Config
 	op  *operator.Service
+	tap *eventtap.Tap
 }
 
-func New(st *store.Store, cfg config.Config, op *operator.Service) *API {
-	return &API{st: st, cfg: cfg, op: op}
+func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap) *API {
+	return &API{st: st, cfg: cfg, op: op, tap: tap}
 }
 
 // Register mounts the registry routes under /api/portal. Authn is applied by the
@@ -67,6 +69,10 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 			// Debug: container logs (secrets redacted). Admin-only, read-only.
 			ar.Get("/debug/pods", a.debugPods)
 			ar.Get("/debug/logs", a.debugLogs)
+
+			// Debug: Kafka event tap — live topology + recent events (redacted).
+			ar.Get("/debug/kafka/topology", a.kafkaTopology)
+			ar.Get("/debug/kafka/events", a.kafkaEvents)
 		})
 	})
 }
@@ -415,6 +421,31 @@ func (a *API) debugLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(logs))
+}
+
+// ─── debug: kafka event tap ────────────────────────────────────────────────────
+
+// kafkaTopology returns the live bus view: prefixed topics, their partitions, the
+// consumer groups bound to each, and the tap's own observed activity. Degrades to
+// {available:false} when no bus is wired (dev / appliance).
+func (a *API) kafkaTopology(w http.ResponseWriter, r *http.Request) {
+	if a.tap == nil || !a.tap.Available() {
+		writeJSON(w, http.StatusOK, eventtap.Topology{Available: false, Note: "Kafka introspection is unavailable (KAFKA_BROKERS unset)"})
+		return
+	}
+	writeJSON(w, http.StatusOK, a.tap.Topology(r.Context()))
+}
+
+// kafkaEvents returns recent observed events (newest first, secrets redacted),
+// optionally filtered to ?topic= and capped by ?limit=.
+func (a *API) kafkaEvents(w http.ResponseWriter, r *http.Request) {
+	if a.tap == nil || !a.tap.Available() {
+		writeJSON(w, http.StatusOK, []eventtap.Event{})
+		return
+	}
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	writeJSON(w, http.StatusOK, nonNil(a.tap.Events(q.Get("topic"), limit)))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

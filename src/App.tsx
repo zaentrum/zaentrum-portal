@@ -8,6 +8,7 @@ import { Launchpad } from './Launchpad';
 import { SettingsConsole } from './settings/SettingsConsole';
 import { OperatorConsole } from './operator/OperatorConsole';
 import { LogsConsole } from './debug/LogsConsole';
+import { KafkaConsole } from './debug/KafkaConsole';
 import { useMe } from './lib/api';
 import { Splash } from './Splash';
 
@@ -60,6 +61,14 @@ function AuthedApp() {
           element={
             <RequireAdmin me={me}>
               <LogsConsole />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="events/*"
+          element={
+            <RequireAdmin me={me}>
+              <KafkaConsole />
             </RequireAdmin>
           }
         />
