@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -62,6 +63,10 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 			ar.Post("/operator/apply-update", a.operatorApplyUpdate)
 			ar.Post("/operator/instances/{name}/scale", a.instanceScale)
 			ar.Post("/operator/instances/{name}/restart", a.instanceRestart)
+
+			// Debug: container logs (secrets redacted). Admin-only, read-only.
+			ar.Get("/debug/pods", a.debugPods)
+			ar.Get("/debug/logs", a.debugLogs)
 		})
 	})
 }
@@ -369,6 +374,47 @@ func decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 		return false
 	}
 	return true
+}
+
+// ─── debug: container logs ─────────────────────────────────────────────────────
+
+// debugPods lists the namespace's pods + their container names for the log
+// viewer's selector. Empty list when not in-cluster (dev / appliance).
+func (a *API) debugPods(w http.ResponseWriter, r *http.Request) {
+	if !a.op.Available() {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	pods, err := a.op.LogPods(r.Context())
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, pods)
+}
+
+// debugLogs returns a pod container's recent logs (secrets redacted) as text.
+// Query: pod (required), container, tail (lines), since (seconds).
+func (a *API) debugLogs(w http.ResponseWriter, r *http.Request) {
+	if !a.op.Available() {
+		http.Error(w, "log viewer is unavailable (not running in a cluster)", http.StatusServiceUnavailable)
+		return
+	}
+	q := r.URL.Query()
+	pod := q.Get("pod")
+	if strings.TrimSpace(pod) == "" {
+		badRequest(w, "pod is required")
+		return
+	}
+	tail, _ := strconv.Atoi(q.Get("tail"))
+	since, _ := strconv.Atoi(q.Get("since"))
+	logs, err := a.op.Logs(r.Context(), pod, q.Get("container"), tail, since)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(logs))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

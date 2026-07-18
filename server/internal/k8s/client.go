@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -43,8 +44,11 @@ func (e *APIError) Error() string {
 }
 
 // NotFound / Forbidden helpers for callers.
-func IsNotFound(err error) bool  { a, ok := err.(*APIError); return ok && a.Code == http.StatusNotFound }
-func IsForbidden(err error) bool { a, ok := err.(*APIError); return ok && a.Code == http.StatusForbidden }
+func IsNotFound(err error) bool { a, ok := err.(*APIError); return ok && a.Code == http.StatusNotFound }
+func IsForbidden(err error) bool {
+	a, ok := err.(*APIError)
+	return ok && a.Code == http.StatusForbidden
+}
 
 // Client is a namespaced in-cluster apiserver client.
 type Client struct {
@@ -93,7 +97,7 @@ func New() (*Client, error) {
 // ErrNotInCluster is returned by API methods when not running in a cluster.
 var ErrNotInCluster = &APIError{Code: 0, Reason: "NotInCluster", Message: "portal-api is not running in a Kubernetes cluster"}
 
-func (c *Client) InCluster() bool  { return c.inCluster }
+func (c *Client) InCluster() bool   { return c.inCluster }
 func (c *Client) Namespace() string { return c.namespace }
 
 // do performs a request, re-reading the (rotating) SA token each time.
@@ -187,6 +191,11 @@ type Pod struct {
 		Name   string            `json:"name"`
 		Labels map[string]string `json:"labels"`
 	} `json:"metadata"`
+	Spec struct {
+		Containers []struct {
+			Name string `json:"name"`
+		} `json:"containers"`
+	} `json:"spec"`
 	Status struct {
 		Phase             string `json:"phase"`
 		ContainerStatuses []struct {
@@ -253,6 +262,25 @@ func (c *Client) RestartDeployment(ctx context.Context, name, ts string) error {
 		`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":%q}}}}}`, ts))
 	_, err := c.do(ctx, http.MethodPatch, p, "application/strategic-merge-patch+json", body)
 	return err
+}
+
+// PodLogs returns a pod container's recent logs (plain text, with timestamps).
+// tailLines caps the number of lines; sinceSeconds bounds the age (0 = no bound).
+// The log subresource returns text/plain, not JSON, so the body is returned raw.
+func (c *Client) PodLogs(ctx context.Context, pod, container string, tailLines, sinceSeconds int) ([]byte, error) {
+	q := url.Values{}
+	if container != "" {
+		q.Set("container", container)
+	}
+	if tailLines > 0 {
+		q.Set("tailLines", strconv.Itoa(tailLines))
+	}
+	if sinceSeconds > 0 {
+		q.Set("sinceSeconds", strconv.Itoa(sinceSeconds))
+	}
+	q.Set("timestamps", "true")
+	p := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log?%s", c.namespace, url.PathEscape(pod), q.Encode())
+	return c.do(ctx, http.MethodGet, p, "", nil)
 }
 
 // ListPods lists pods matching a labelSelector (a deployment's matchLabels).
