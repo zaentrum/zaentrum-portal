@@ -133,6 +133,36 @@ export function usePortalApi() {
   );
 }
 
+// usePortalText fetches a text/plain endpoint (container logs) with auth and
+// returns the raw body — usePortalApi always JSON-parses, which logs are not.
+export function usePortalText() {
+  const auth = useAuth();
+  const token = auth.user?.access_token;
+  return useCallback(
+    async function text(path: string, init?: RequestInit): Promise<string> {
+      const res = await fetch(`${PORTAL_API}${path}`, {
+        ...init,
+        headers: {
+          Accept: 'text/plain',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(init?.headers ?? {}),
+        },
+      });
+      const body = await res.text();
+      if (!res.ok) throw new Error(body.trim() || `portal-api ${res.status}`);
+      return body;
+    },
+    [token],
+  );
+}
+
+// DebugPod is one pod + its container names for the log-viewer selector.
+export interface DebugPod {
+  pod: string;
+  phase: string;
+  containers: string[];
+}
+
 // useMe resolves the caller's identity + admin flag from the portal-api.
 export function useMe(): Me | null {
   const api = usePortalApi();

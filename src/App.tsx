@@ -7,6 +7,7 @@ import { Shell } from './shell/Shell';
 import { Launchpad } from './Launchpad';
 import { SettingsConsole } from './settings/SettingsConsole';
 import { OperatorConsole } from './operator/OperatorConsole';
+import { LogsConsole } from './logs/LogsConsole';
 import { useMe } from './lib/api';
 import { Splash } from './Splash';
 
@@ -51,6 +52,14 @@ function AuthedApp() {
           element={
             <RequireAdmin me={me}>
               <OperatorConsole />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="logs/*"
+          element={
+            <RequireAdmin me={me}>
+              <LogsConsole />
             </RequireAdmin>
           }
         />
