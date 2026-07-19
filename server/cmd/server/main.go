@@ -53,6 +53,11 @@ func run() error {
 	if err := st.Migrate(bgCtx, db.Migrations); err != nil {
 		return err
 	}
+	// Subdomain-routed deployments: point the chino tile at its real origin
+	// (only while the registry still carries the seed default — admin edits win).
+	if err := st.ApplyChinoPublicURL(bgCtx, cfg.ChinoPublicURL); err != nil {
+		return err
+	}
 
 	jwt, err := auth.NewJWTVerifier(bgCtx, cfg.OIDCIssuer, cfg.Audience, cfg.AdminRole, cfg.AudienceRequired, cfg.AuthDisabled)
 	if err != nil {

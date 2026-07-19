@@ -38,6 +38,11 @@ type Config struct {
 	KafkaBrokers     string // KAFKA_BROKERS (comma-separated bootstrap list)
 	KafkaCertDir     string // KAFKA_TLS_DIR / KAFKA_CERT_DIR — optional mTLS material (user.crt/user.key/ca.crt)
 	KafkaTopicPrefix string // KAFKA_TOPIC_PREFIX (default "stube.")
+
+	// ChinoPublicURL, when set (subdomain-routed deployments), upgrades the
+	// chino app's seed-default base_url ("/chino/") to this absolute URL at
+	// boot. Registry values an admin already edited are never touched.
+	ChinoPublicURL string // CHINO_PUBLIC_URL
 }
 
 func env(keys ...string) string {
@@ -111,6 +116,8 @@ func Load() Config {
 		KafkaBrokers:     env("KAFKA_BROKERS"),
 		KafkaCertDir:     env("KAFKA_TLS_DIR", "KAFKA_CERT_DIR"),
 		KafkaTopicPrefix: envDefault("stube.", "KAFKA_TOPIC_PREFIX"),
+
+		ChinoPublicURL: env("CHINO_PUBLIC_URL"),
 	}
 }
 
