@@ -3,12 +3,14 @@ import { WebStorageStateStore } from 'oidc-client-ts';
 
 const env = import.meta.env;
 
-// The portal is its OWN OIDC client (zaentrum-web) — NOT chino's. It only borrows
-// the ISSUER from the server's /api/config so a single build is relocatable; the
+// The portal is its OWN OIDC client (zaentrum-web on the bundled realm) — NOT
+// chino's. It borrows the ISSUER from the server's /api/config so a single build
+// is relocatable, and since a SHARED realm registers per-instance clients, it
+// also adopts `oidcClientId.portal` from the same payload when present; the
 // products (chino/tv/musig) ride the same Keycloak SSO session on this origin.
 export let authority: string =
   env.VITE_OIDC_AUTHORITY ?? 'https://zaentrum.demo.nalet.cloud/auth/realms/zaentrum';
-export const clientId: string = env.VITE_OIDC_CLIENT_ID ?? 'zaentrum-web';
+export let clientId: string = env.VITE_OIDC_CLIENT_ID ?? 'zaentrum-web';
 
 // redirect_uri stays under /portal/ so it never collides with Keycloak's /auth route
 // (and the /portal route already serves this SPA).
@@ -32,8 +34,9 @@ function buildConfig(): AuthProviderProps {
   };
 }
 
-// Adopt the serving server's issuer from GET /api/config (self-host discovery).
-// Any failure keeps the build-time fallback. The client id is always the portal's.
+// Adopt the serving server's issuer (+ portal client id, when advertised) from
+// GET /api/config (self-host discovery). Any failure keeps the build-time
+// fallbacks.
 export async function initAuth(): Promise<AuthProviderProps> {
   try {
     const res = await fetch('/api/config', { headers: { Accept: 'application/json' } });
@@ -41,6 +44,8 @@ export async function initAuth(): Promise<AuthProviderProps> {
       const cfg: unknown = await res.json();
       const issuer = (cfg as { oidcIssuer?: unknown }).oidcIssuer;
       if (typeof issuer === 'string' && issuer) authority = issuer;
+      const ids = (cfg as { oidcClientId?: { portal?: unknown } }).oidcClientId;
+      if (ids && typeof ids.portal === 'string' && ids.portal) clientId = ids.portal;
     }
   } catch {
     /* keep fallback authority */
