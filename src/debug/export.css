@@ -62,3 +62,10 @@
 .exp__err {
   color: var(--signal-amber, #f2b233);
 }
+
+/* ── mobile ─────────────────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .exp {
+    padding: 16px 8px;
+  }
+}

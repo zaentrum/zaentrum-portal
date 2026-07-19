@@ -45,7 +45,9 @@ export function Launchpad({ isAdmin }: { isAdmin: boolean }) {
       )}
 
       {lp?.spaces.map((space) => (
-        <TileGroup key={space.key} legend={space.title} columns={3} gap="md">
+        // columns="auto" (the default) = a responsive auto-fill grid, so the
+        // launchpad collapses cleanly on phones instead of squeezing 3 columns.
+        <TileGroup key={space.key} legend={space.title} gap="md">
           {space.tiles.map((t) => (
             <Tile
               key={t.key}
@@ -58,14 +60,16 @@ export function Launchpad({ isAdmin }: { isAdmin: boolean }) {
               badgeTone={(t.badgeTone || undefined) as TileBadgeTone | undefined}
               disabled={t.disabled || undefined}
               href={t.href || undefined}
-              external={t.external || undefined}
+              // the tile's open mode (settings-editable): newtab renders a
+              // target=_blank link with the external glyph; inline navigates here.
+              external={t.open === 'newtab' || undefined}
             />
           ))}
         </TileGroup>
       ))}
 
       {isAdmin && (
-        <TileGroup legend="settings" columns={3} gap="md">
+        <TileGroup legend="settings" gap="md">
           <Tile
             variant="app"
             title="registry"

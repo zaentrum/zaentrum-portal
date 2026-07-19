@@ -19,6 +19,7 @@ export interface LaunchTile {
   badgeTone: string;
   status: string;
   external: boolean;
+  open: string; // inline|newtab (resolved server-side)
   disabled: boolean;
 }
 export interface LaunchSpace {
@@ -59,6 +60,7 @@ export interface Tile {
   badgeTone: string;
   status: string;
   external: boolean;
+  open: string; // inline|newtab|'' (unset -> external decides)
   enabled: boolean;
 }
 export interface Me {

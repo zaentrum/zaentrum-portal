@@ -180,3 +180,21 @@
   padding: var(--s-5, 24px) var(--s-4, 16px);
   text-align: center;
 }
+
+/* ── mobile ─────────────────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .kaf {
+    padding: 16px 8px;
+  }
+  /* topology rows keep their 5 columns but scroll sideways */
+  .kaf__topics {
+    overflow-x: auto;
+  }
+  .kaf__trow {
+    grid-template-columns: minmax(150px, 2fr) 44px minmax(130px, 2fr) 48px 80px;
+    min-width: 520px;
+  }
+  .kaf__item {
+    max-width: 110px;
+  }
+}

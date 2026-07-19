@@ -42,3 +42,16 @@
   gap: 16px;
   text-align: center;
 }
+
+/* ── mobile ─────────────────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .lp__bar {
+    padding: 12px 16px;
+  }
+  .lp__main {
+    padding: 28px 16px 32px;
+  }
+  .lp__head {
+    margin-bottom: 20px;
+  }
+}

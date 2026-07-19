@@ -316,6 +316,7 @@ function TilesPanel() {
         badgeTone: '',
         status: '',
         external: false,
+        open: 'inline',
         enabled: true,
       })}
       columns={[
@@ -324,6 +325,16 @@ function TilesPanel() {
         { key: 'appKey', header: 'app', render: (r) => <Badge tone="blue">{r.appKey}</Badge> },
         { key: 'spaceKey', header: 'space', render: (r) => <Badge tone="neutral">{r.spaceKey}</Badge> },
         { key: 'target', header: 'target', render: (r) => <span className="set__mono">{r.target || '—'}</span> },
+        {
+          key: 'open',
+          header: 'open',
+          render: (r) =>
+            (r.open || (r.external ? 'newtab' : 'inline')) === 'newtab' ? (
+              <Badge tone="blue">new tab</Badge>
+            ) : (
+              <Badge tone="neutral">inline</Badge>
+            ),
+        },
         {
           key: 'enabled',
           header: 'enabled',
@@ -362,7 +373,17 @@ function TilesPanel() {
           <Field label="order" hint="lower shows first">
             <Input type="number" value={String(d.order)} onChange={(e) => patch({ order: parseInt(e.target.value, 10) || 0 })} />
           </Field>
-          <Field label="external" hint="open in a new tab">
+          <Field label="open" hint="inline replaces the portal; new tab keeps it open">
+            <Select
+              value={d.open || (d.external ? 'newtab' : 'inline')}
+              onChange={(e) => patch({ open: e.target.value })}
+              options={[
+                { label: 'inline (same tab)', value: 'inline' },
+                { label: 'new tab', value: 'newtab' },
+              ]}
+            />
+          </Field>
+          <Field label="external" hint="external tool (shows the ↗ glyph; target used verbatim)">
             <Switch checked={d.external} onChange={(e) => patch({ external: e.target.checked })} />
           </Field>
           <Field label="enabled">

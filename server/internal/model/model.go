@@ -39,12 +39,14 @@ type Tile struct {
 	BadgeTone   string `json:"badgeTone"`
 	Status      string `json:"status"` // online|offline|""
 	External    bool   `json:"external"`
+	Open        string `json:"open"` // inline|newtab|"" (unset -> external decides, else inline)
 	Enabled     bool   `json:"enabled"`
 }
 
 // LaunchTile is a tile resolved for rendering: its href is computed from the
-// owning app's base_url + the tile target, and `disabled` folds in whether the
-// tile/app is enabled and whether a destination exists.
+// owning app's base_url + the tile target, `open` is the resolved open mode
+// (inline|newtab), and `disabled` folds in whether the tile/app is enabled and
+// whether a destination exists.
 type LaunchTile struct {
 	Key         string `json:"key"`
 	Title       string `json:"title"`
@@ -56,6 +58,7 @@ type LaunchTile struct {
 	BadgeTone   string `json:"badgeTone"`
 	Status      string `json:"status"`
 	External    bool   `json:"external"`
+	Open        string `json:"open"` // inline|newtab
 	Disabled    bool   `json:"disabled"`
 }
 

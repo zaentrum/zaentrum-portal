@@ -114,7 +114,7 @@ func (s *Store) DeleteApp(ctx context.Context, key string) error {
 func (s *Store) ListTiles(ctx context.Context) ([]model.Tile, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT key, app_key, space_key, title, description, icon, target, ord,
-		       badge, badge_tone, status, external, enabled
+		       badge, badge_tone, status, external, open_mode, enabled
 		FROM tiles ORDER BY ord, key`)
 	if err != nil {
 		return nil, err
@@ -134,7 +134,7 @@ func (s *Store) ListTiles(ctx context.Context) ([]model.Tile, error) {
 func (s *Store) GetTile(ctx context.Context, key string) (*model.Tile, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT key, app_key, space_key, title, description, icon, target, ord,
-		       badge, badge_tone, status, external, enabled
+		       badge, badge_tone, status, external, open_mode, enabled
 		FROM tiles WHERE key=$1`, key)
 	t, err := scanTile(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -149,15 +149,16 @@ func (s *Store) GetTile(ctx context.Context, key string) (*model.Tile, error) {
 func (s *Store) UpsertTile(ctx context.Context, t model.Tile) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO tiles (key, app_key, space_key, title, description, icon, target, ord,
-		                   badge, badge_tone, status, external, enabled)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		                   badge, badge_tone, status, external, open_mode, enabled)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (key) DO UPDATE SET
 			app_key=EXCLUDED.app_key, space_key=EXCLUDED.space_key, title=EXCLUDED.title,
 			description=EXCLUDED.description, icon=EXCLUDED.icon, target=EXCLUDED.target,
 			ord=EXCLUDED.ord, badge=EXCLUDED.badge, badge_tone=EXCLUDED.badge_tone,
-			status=EXCLUDED.status, external=EXCLUDED.external, enabled=EXCLUDED.enabled`,
+			status=EXCLUDED.status, external=EXCLUDED.external, open_mode=EXCLUDED.open_mode,
+			enabled=EXCLUDED.enabled`,
 		t.Key, t.AppKey, t.SpaceKey, t.Title, t.Description, t.Icon, t.Target, t.Order,
-		t.Badge, t.BadgeTone, t.Status, t.External, t.Enabled)
+		t.Badge, t.BadgeTone, t.Status, t.External, t.Open, t.Enabled)
 	if err != nil && strings.Contains(err.Error(), "violates foreign key") {
 		return fmt.Errorf("%w: app_key or space_key does not exist", err)
 	}
@@ -199,6 +200,16 @@ func (s *Store) Launchpad(ctx context.Context) (model.Launchpad, error) {
 			continue // orphan tile (shouldn't happen — FK) — skip
 		}
 		href := computeHref(app.BaseURL, t.Target, t.External)
+		// Resolve the open mode: an explicit choice wins; unset falls back to the
+		// legacy external flag (external tools always meant "new tab"), else inline.
+		open := t.Open
+		if open == "" {
+			if t.External {
+				open = "newtab"
+			} else {
+				open = "inline"
+			}
+		}
 		bySpace[t.SpaceKey] = append(bySpace[t.SpaceKey], model.LaunchTile{
 			Key:         t.Key,
 			Title:       t.Title,
@@ -210,6 +221,7 @@ func (s *Store) Launchpad(ctx context.Context) (model.Launchpad, error) {
 			BadgeTone:   t.BadgeTone,
 			Status:      t.Status,
 			External:    t.External,
+			Open:        open,
 			Disabled:    !t.Enabled || !app.Enabled || href == "",
 		})
 	}
@@ -264,7 +276,7 @@ func scanApp(r rowScanner) (model.App, error) {
 func scanTile(r rowScanner) (model.Tile, error) {
 	var t model.Tile
 	err := r.Scan(&t.Key, &t.AppKey, &t.SpaceKey, &t.Title, &t.Description, &t.Icon, &t.Target,
-		&t.Order, &t.Badge, &t.BadgeTone, &t.Status, &t.External, &t.Enabled)
+		&t.Order, &t.Badge, &t.BadgeTone, &t.Status, &t.External, &t.Open, &t.Enabled)
 	return t, err
 }
 
