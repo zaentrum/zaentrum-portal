@@ -39,3 +39,20 @@
   padding: 24px 20px 48px;
   box-sizing: border-box;
 }
+
+/* ── mobile ─────────────────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .sh__bar {
+    padding: 10px 12px;
+    gap: 10px;
+  }
+  .sh__main {
+    padding: 16px 12px 32px;
+  }
+  /* data tables scroll sideways instead of squeezing the layout */
+  .sh__main table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+}

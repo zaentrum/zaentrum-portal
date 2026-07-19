@@ -359,6 +359,10 @@ func (a *API) validTile(w http.ResponseWriter, t model.Tile, patch bool) bool {
 		badRequest(w, "tile requires title, appKey and spaceKey")
 		return false
 	}
+	if t.Open != "" && t.Open != "inline" && t.Open != "newtab" {
+		badRequest(w, `tile open must be "inline", "newtab", or empty`)
+		return false
+	}
 	return true
 }
 

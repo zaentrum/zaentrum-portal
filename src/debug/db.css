@@ -115,3 +115,16 @@
   gap: var(--s-2, 8px);
   padding: var(--s-6, 32px) var(--s-4, 16px);
 }
+
+/* ── mobile ─────────────────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .db {
+    padding: 16px 8px;
+  }
+  .db__field {
+    min-width: 130px;
+  }
+  .db__pager {
+    margin-left: 0;
+  }
+}
