@@ -63,6 +63,20 @@ export interface Tile {
   open: string; // inline|newtab|'' (unset -> external decides)
   enabled: boolean;
 }
+// Extension: an addon-contributed UI element for a named slot in a product app.
+export interface Extension {
+  key: string;
+  addon: string;
+  slot: string;
+  kind: string; // link|action
+  label: string;
+  icon: string;
+  url: string;
+  method: string; // for kind=action
+  statusUrl: string;
+  ord: number;
+  enabled: boolean;
+}
 export interface Me {
   username: string;
   roles: string[];

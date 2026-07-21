@@ -27,6 +27,11 @@ type Config struct {
 	// Realm role that authorizes registry writes (settings admin).
 	AdminRole string // PORTAL_ADMIN_ROLE (default "zaentrum-admin")
 
+	// Realm role an addon's service account carries to self-register its UI
+	// extensions (in addition to a human admin). Separate from AdminRole so an
+	// addon can manage only its extension seam, not the whole registry.
+	AddonRole string // PORTAL_ADDON_ROLE (default "zaentrum-addon")
+
 	// Operator / instances console.
 	InstanceSelector string   // PORTAL_INSTANCE_SELECTOR — label filter for listed deployments (default "" = all in ns)
 	ProtectedNames   []string // PORTAL_PROTECT — deployments the UI must not scale/restart (default postgres,kafka,valkey,keycloak)
@@ -106,6 +111,7 @@ func Load() Config {
 		AuthDisabled:     envBool(false, "AUTH_DISABLED"),
 
 		AdminRole: envDefault("zaentrum-admin", "PORTAL_ADMIN_ROLE"),
+		AddonRole: envDefault("zaentrum-addon", "PORTAL_ADDON_ROLE"),
 
 		InstanceSelector: env("PORTAL_INSTANCE_SELECTOR"),
 		ProtectedNames:   splitCSV(envDefault("postgres,kafka,valkey,keycloak", "PORTAL_PROTECT")),

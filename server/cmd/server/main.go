@@ -63,7 +63,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	authMW := auth.NewMiddleware(jwt, cfg.AdminRole)
+	authMW := auth.NewMiddleware(jwt, cfg.AdminRole, cfg.AddonRole)
 
 	// Operator / instances console. The k8s client is in-cluster; when not
 	// running in a cluster it reports Available()==false and the operator API

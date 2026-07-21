@@ -74,3 +74,21 @@ type LaunchSpace struct {
 type Launchpad struct {
 	Spaces []LaunchSpace `json:"spaces"`
 }
+
+// Extension is one addon-contributed UI element for a named slot in a product
+// app (e.g. a "request this" button in chino's empty-search slot). The core
+// renders it natively but knows nothing of what it does; an uninstalled addon
+// deletes its rows and leaves no trace.
+type Extension struct {
+	Key       string `json:"key"`
+	Addon     string `json:"addon"`
+	Slot      string `json:"slot"`
+	Kind      string `json:"kind"`  // link|action
+	Label     string `json:"label"`
+	Icon      string `json:"icon"`
+	URL       string `json:"url"`
+	Method    string `json:"method"` // for kind=action; default POST
+	StatusURL string `json:"statusUrl"`
+	Order     int    `json:"ord"`
+	Enabled   bool   `json:"enabled"`
+}

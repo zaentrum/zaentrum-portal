@@ -11,10 +11,11 @@ import (
 type Middleware struct {
 	jwt       *JWTVerifier
 	adminRole string
+	addonRole string
 }
 
-func NewMiddleware(jwt *JWTVerifier, adminRole string) *Middleware {
-	return &Middleware{jwt: jwt, adminRole: adminRole}
+func NewMiddleware(jwt *JWTVerifier, adminRole, addonRole string) *Middleware {
+	return &Middleware{jwt: jwt, adminRole: adminRole, addonRole: addonRole}
 }
 
 func isPublic(path string) bool {
@@ -50,6 +51,19 @@ func (m *Middleware) RequireAdmin(next http.Handler) http.Handler {
 		p, ok := PrincipalFrom(r.Context())
 		if !ok || !p.HasRole(m.adminRole) {
 			http.Error(w, "forbidden: requires the "+m.adminRole+" role", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RequireAdminOrAddon gates a handler on EITHER the admin role (human console)
+// OR the addon role (an addon's service account self-managing its extensions).
+func (m *Middleware) RequireAdminOrAddon(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, ok := PrincipalFrom(r.Context())
+		if !ok || (!p.HasRole(m.adminRole) && !p.HasRole(m.addonRole)) {
+			http.Error(w, "forbidden: requires the "+m.adminRole+" or "+m.addonRole+" role", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)

@@ -290,3 +290,68 @@ func (s *Store) execDelete(ctx context.Context, sql, key string) error {
 	}
 	return nil
 }
+
+// ─── UI extensions ─────────────────────────────────────────────────────────
+
+const extCols = `key, addon, slot, kind, label, icon, url, method, status_url, ord, enabled`
+
+func scanExtension(r rowScanner) (model.Extension, error) {
+	var e model.Extension
+	err := r.Scan(&e.Key, &e.Addon, &e.Slot, &e.Kind, &e.Label, &e.Icon, &e.URL,
+		&e.Method, &e.StatusURL, &e.Order, &e.Enabled)
+	return e, err
+}
+
+// ListExtensions returns every contribution (admin console view).
+func (s *Store) ListExtensions(ctx context.Context) ([]model.Extension, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+extCols+` FROM ui_extensions ORDER BY slot, ord, key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Extension
+	for rows.Next() {
+		e, err := scanExtension(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// ListExtensionsForSlot returns the ENABLED contributions for one slot (the
+// product-app read path).
+func (s *Store) ListExtensionsForSlot(ctx context.Context, slot string) ([]model.Extension, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+extCols+` FROM ui_extensions WHERE slot=$1 AND enabled ORDER BY ord, key`, slot)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Extension
+	for rows.Next() {
+		e, err := scanExtension(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpsertExtension(ctx context.Context, e model.Extension) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO ui_extensions (key, addon, slot, kind, label, icon, url, method, status_url, ord, enabled)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		ON CONFLICT (key) DO UPDATE SET
+			addon=EXCLUDED.addon, slot=EXCLUDED.slot, kind=EXCLUDED.kind, label=EXCLUDED.label,
+			icon=EXCLUDED.icon, url=EXCLUDED.url, method=EXCLUDED.method, status_url=EXCLUDED.status_url,
+			ord=EXCLUDED.ord, enabled=EXCLUDED.enabled`,
+		e.Key, e.Addon, e.Slot, e.Kind, e.Label, e.Icon, e.URL, e.Method, e.StatusURL, e.Order, e.Enabled)
+	return err
+}
+
+func (s *Store) DeleteExtension(ctx context.Context, key string) error {
+	return s.execDelete(ctx, `DELETE FROM ui_extensions WHERE key=$1`, key)
+}
