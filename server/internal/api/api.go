@@ -43,6 +43,9 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 		// Reads for any signed-in user.
 		r.Get("/launchpad", a.launchpad)
 		r.Get("/me", a.me)
+		// Product apps read the enabled extension contributions for a slot
+		// (chino forwards the user's bearer here). Any signed-in user.
+		r.Get("/slots/{slot}", a.slotExtensions)
 
 		// Registry administration (settings console).
 		r.Group(func(ar chi.Router) {
@@ -85,6 +88,16 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 
 			// Debug: downloadable support bundle (all sections secret-scrubbed).
 			ar.Get("/debug/support-bundle", a.supportBundle)
+		})
+
+		// UI extension registry — writable by a human admin OR an addon's
+		// service account (so an addon self-registers its own seam on install).
+		r.Group(func(er chi.Router) {
+			er.Use(mw.RequireAdminOrAddon)
+			er.Get("/extensions", a.listExtensions)
+			er.Post("/extensions", a.upsertExtension)
+			er.Patch("/extensions/{key}", a.patchExtension)
+			er.Delete("/extensions/{key}", a.deleteExtension)
 		})
 	})
 }
@@ -254,6 +267,92 @@ func (a *API) patchApp(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) deleteApp(w http.ResponseWriter, r *http.Request) {
 	a.handleDelete(w, a.st.DeleteApp(r.Context(), chi.URLParam(r, "key")))
+}
+
+// ─── UI extensions ─────────────────────────────────────────────────────────
+
+// slotExtensions serves the enabled contributions for one slot (product-app
+// read path — any signed-in user).
+func (a *API) slotExtensions(w http.ResponseWriter, r *http.Request) {
+	exts, err := a.st.ListExtensionsForSlot(r.Context(), chi.URLParam(r, "slot"))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, nonNil(exts))
+}
+
+func (a *API) listExtensions(w http.ResponseWriter, r *http.Request) {
+	exts, err := a.st.ListExtensions(r.Context())
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, nonNil(exts))
+}
+
+func (a *API) upsertExtension(w http.ResponseWriter, r *http.Request) {
+	var e model.Extension
+	if !decode(w, r, &e) {
+		return
+	}
+	if !validExtension(w, e, true) {
+		return
+	}
+	if err := a.st.UpsertExtension(r.Context(), normExtension(e)); err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, normExtension(e))
+}
+
+func (a *API) patchExtension(w http.ResponseWriter, r *http.Request) {
+	var e model.Extension
+	if !decode(w, r, &e) {
+		return
+	}
+	e.Key = chi.URLParam(r, "key")
+	if !validExtension(w, e, false) {
+		return
+	}
+	if err := a.st.UpsertExtension(r.Context(), normExtension(e)); err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, normExtension(e))
+}
+
+func (a *API) deleteExtension(w http.ResponseWriter, r *http.Request) {
+	a.handleDelete(w, a.st.DeleteExtension(r.Context(), chi.URLParam(r, "key")))
+}
+
+// validExtension enforces the required fields and the kind enum. requireKey is
+// true on create (POST) — PATCH takes the key from the path.
+func validExtension(w http.ResponseWriter, e model.Extension, requireKey bool) bool {
+	if requireKey && strings.TrimSpace(e.Key) == "" {
+		badRequest(w, "extension requires key")
+		return false
+	}
+	if strings.TrimSpace(e.Slot) == "" {
+		badRequest(w, "extension requires slot")
+		return false
+	}
+	if e.Kind != "" && e.Kind != "link" && e.Kind != "action" {
+		badRequest(w, "extension kind must be 'link' or 'action'")
+		return false
+	}
+	return true
+}
+
+// normExtension fills defaults (kind=link, method=POST).
+func normExtension(e model.Extension) model.Extension {
+	if e.Kind == "" {
+		e.Kind = "link"
+	}
+	if e.Method == "" {
+		e.Method = "POST"
+	}
+	return e
 }
 
 // ─── spaces ──────────────────────────────────────────────────────────────────

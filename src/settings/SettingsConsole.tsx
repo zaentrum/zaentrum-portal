@@ -16,7 +16,7 @@ import {
 } from '@nalet/design-system';
 import type { TableColumn } from '@nalet/design-system';
 import { Plus, Pencil, Trash2 } from 'lucide-react';
-import { usePortalApi, type App, type Space, type Tile } from '../lib/api';
+import { usePortalApi, type App, type Space, type Tile, type Extension } from '../lib/api';
 import { ICON_CHOICES } from '../lib/icons';
 import { useResource } from './useResource';
 import './settings.css';
@@ -24,6 +24,7 @@ import './settings.css';
 const KINDS = ['product', 'manage', 'tool', 'external'];
 const BADGE_TONES = ['', 'info', 'success', 'warning', 'danger', 'neutral'];
 const STATUSES = ['', 'online', 'offline', 'degraded', 'unknown'];
+const EXT_KINDS = ['link', 'action'];
 
 function opts(values: string[], noneLabel?: string) {
   return values.map((v) => ({ label: v === '' ? (noneLabel ?? '(none)') : v, value: v }));
@@ -47,6 +48,7 @@ export function SettingsConsole() {
           { value: 'apps', label: 'apps' },
           { value: 'spaces', label: 'spaces' },
           { value: 'tiles', label: 'tiles' },
+          { value: 'extensions', label: 'extensions' },
         ]}
         value={tab}
         onChange={setTab}
@@ -55,6 +57,7 @@ export function SettingsConsole() {
         {tab === 'apps' && <AppsPanel />}
         {tab === 'spaces' && <SpacesPanel />}
         {tab === 'tiles' && <TilesPanel />}
+        {tab === 'extensions' && <ExtensionsPanel />}
       </div>
     </div>
   );
@@ -241,6 +244,74 @@ function AppsPanel() {
           </Field>
           <Field label="health url" hint="optional">
             <Input value={d.healthUrl} onChange={(e) => patch({ healthUrl: e.target.value })} />
+          </Field>
+          <Field label="enabled">
+            <Switch checked={d.enabled} onChange={(e) => patch({ enabled: e.target.checked })} />
+          </Field>
+        </>
+      )}
+    />
+  );
+}
+
+// ─── extensions ──────────────────────────────────────────────────────────────
+
+// ExtensionsPanel — the addon UI seam. Rows are usually written by an addon's
+// service account on install (e.g. laedeli/acquire adds a "request" button to
+// chino's search-empty slot); admins can view/toggle/remove them here.
+function ExtensionsPanel() {
+  return (
+    <CrudPanel<Extension>
+      singular="extension"
+      path="/extensions"
+      keyHint="e.g. acquire.search-request"
+      empty={() => ({
+        key: '', addon: '', slot: 'search.empty', kind: 'link', label: '', icon: '',
+        url: '', method: 'POST', statusUrl: '', ord: 0, enabled: true,
+      })}
+      columns={[
+        { key: 'label', header: 'label', render: (r) => <b>{r.label || '—'}</b> },
+        { key: 'slot', header: 'slot', render: (r) => <span className="set__mono">{r.slot}</span> },
+        { key: 'kind', header: 'kind', render: (r) => <Badge tone="neutral">{r.kind}</Badge> },
+        { key: 'addon', header: 'addon', render: (r) => <span className="set__mono">{r.addon || '—'}</span> },
+        {
+          key: 'enabled',
+          header: 'enabled',
+          render: (r) => (r.enabled ? <Badge tone="green" dot>on</Badge> : <Badge tone="neutral">off</Badge>),
+        },
+      ]}
+      renderForm={(d, patch) => (
+        <>
+          <Field label="label">
+            <Input value={d.label} onChange={(e) => patch({ label: e.target.value })} />
+          </Field>
+          <Field label="slot" hint="e.g. search.empty, item.detail.actions">
+            <Input value={d.slot} onChange={(e) => patch({ slot: e.target.value })} />
+          </Field>
+          <Field label="kind">
+            <Select value={d.kind} onChange={(e) => patch({ kind: e.target.value })} options={opts(EXT_KINDS)} />
+          </Field>
+          <Field label="url" hint="{q} is replaced with the current query">
+            <Input value={d.url} onChange={(e) => patch({ url: e.target.value })} />
+          </Field>
+          <Field label="method" hint="for kind=action">
+            <Input value={d.method} onChange={(e) => patch({ method: e.target.value })} />
+          </Field>
+          <Field label="status url" hint="optional live-status feed">
+            <Input value={d.statusUrl} onChange={(e) => patch({ statusUrl: e.target.value })} />
+          </Field>
+          <Field label="icon">
+            <Select value={d.icon} onChange={(e) => patch({ icon: e.target.value })} options={opts(['', ...ICON_CHOICES])} />
+          </Field>
+          <Field label="addon" hint="owning addon id (for bulk uninstall)">
+            <Input value={d.addon} onChange={(e) => patch({ addon: e.target.value })} />
+          </Field>
+          <Field label="order" hint="lower shows first">
+            <Input
+              type="number"
+              value={String(d.ord)}
+              onChange={(e) => patch({ ord: Number(e.target.value) || 0 })}
+            />
           </Field>
           <Field label="enabled">
             <Switch checked={d.enabled} onChange={(e) => patch({ enabled: e.target.checked })} />
