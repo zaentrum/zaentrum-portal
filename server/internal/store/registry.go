@@ -62,7 +62,7 @@ func (s *Store) DeleteSpace(ctx context.Context, key string) error {
 
 func (s *Store) ListApps(ctx context.Context) ([]model.App, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT key, title, description, base_url, kind, health_url, icon, enabled
+		SELECT key, title, description, base_url, kind, health_url, icon, enabled, proxy_url
 		FROM apps ORDER BY key`)
 	if err != nil {
 		return nil, err
@@ -81,7 +81,7 @@ func (s *Store) ListApps(ctx context.Context) ([]model.App, error) {
 
 func (s *Store) GetApp(ctx context.Context, key string) (*model.App, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT key, title, description, base_url, kind, health_url, icon, enabled
+		SELECT key, title, description, base_url, kind, health_url, icon, enabled, proxy_url
 		FROM apps WHERE key=$1`, key)
 	a, err := scanApp(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -95,12 +95,13 @@ func (s *Store) GetApp(ctx context.Context, key string) (*model.App, error) {
 
 func (s *Store) UpsertApp(ctx context.Context, a model.App) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO apps (key, title, description, base_url, kind, health_url, icon, enabled)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		INSERT INTO apps (key, title, description, base_url, kind, health_url, icon, enabled, proxy_url)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		ON CONFLICT (key) DO UPDATE SET
 			title=EXCLUDED.title, description=EXCLUDED.description, base_url=EXCLUDED.base_url,
-			kind=EXCLUDED.kind, health_url=EXCLUDED.health_url, icon=EXCLUDED.icon, enabled=EXCLUDED.enabled`,
-		a.Key, a.Title, a.Description, a.BaseURL, a.Kind, a.HealthURL, a.Icon, a.Enabled)
+			kind=EXCLUDED.kind, health_url=EXCLUDED.health_url, icon=EXCLUDED.icon,
+			enabled=EXCLUDED.enabled, proxy_url=EXCLUDED.proxy_url`,
+		a.Key, a.Title, a.Description, a.BaseURL, a.Kind, a.HealthURL, a.Icon, a.Enabled, a.ProxyURL)
 	return err
 }
 
@@ -269,7 +270,8 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 func scanApp(r rowScanner) (model.App, error) {
 	var a model.App
-	err := r.Scan(&a.Key, &a.Title, &a.Description, &a.BaseURL, &a.Kind, &a.HealthURL, &a.Icon, &a.Enabled)
+	err := r.Scan(&a.Key, &a.Title, &a.Description, &a.BaseURL, &a.Kind, &a.HealthURL,
+		&a.Icon, &a.Enabled, &a.ProxyURL)
 	return a, err
 }
 
