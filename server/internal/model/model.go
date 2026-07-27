@@ -16,6 +16,10 @@ type App struct {
 	HealthURL   string `json:"healthUrl"` // optional
 	Icon        string `json:"icon"`      // lucide name, or "glyph:c" for a brand mark
 	Enabled     bool   `json:"enabled"`
+	// ProxyURL is the in-cluster address the shell proxies to when this app is
+	// embedded (e.g. "http://acquire"). Empty means the app is link-out only —
+	// the portal will not proxy to it.
+	ProxyURL string `json:"proxyUrl"`
 }
 
 // Space is a launchpad section.

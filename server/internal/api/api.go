@@ -47,6 +47,12 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 		// (chino forwards the user's bearer here). Any signed-in user.
 		r.Get("/slots/{slot}", a.slotExtensions)
 
+		// Embedded apps: the shell hosts an app in its own page and everything
+		// that app loads comes back through here, so the portal stays the single
+		// front door. The caller's identity is forwarded, so the app applies its
+		// own authorisation. Any signed-in user — the app decides the rest.
+		r.Handle("/apps/{key}/*", http.HandlerFunc(a.appProxy))
+
 		// Registry administration (settings console).
 		r.Group(func(ar chi.Router) {
 			ar.Use(mw.RequireAdmin)
