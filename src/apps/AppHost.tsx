@@ -1,100 +1,135 @@
 // Hosts a registered app inside the launchpad shell.
 //
-// The app is loaded as a plain ES module through the portal's own proxy and
-// mounted into this page — no iframe, and no second origin. The shell stays the
-// only thing that talks to the identity provider: it hands the app the proxied
-// API base and the signed-in user's token, and keeps that token fresh.
-import { useEffect, useRef, useState } from 'react';
+// The app is a federated remote: its bundle is fetched through the portal's own
+// proxy and its component is rendered directly in THIS React tree. One DOM, one
+// React instance (react/react-dom are shared), no iframe, no second origin.
+//
+// Remotes are attached at runtime rather than declared at build time, because
+// which apps exist is a registry decision, not a build-time one.
+import { Component, Suspense, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAuth } from 'react-oidc-context';
 import { Heading, Spinner, Text } from '@nalet/design-system';
+import {
+  __federation_method_getRemote,
+  __federation_method_setRemote,
+} from 'virtual:__federation__';
 import { PORTAL_API } from '../lib/api';
 import './apphost.css';
 
-/** What an embeddable app must export. */
-interface MountHandle {
-  update(opts: Record<string, unknown>): void;
-  unmount(): void;
+/** What an embeddable app's exposed console accepts from its host. */
+interface ConsoleProps {
+  apiBase: string;
+  token: string | undefined;
+  onUnauthorized?: () => void;
 }
-type MountFn = (el: HTMLElement, opts: Record<string, unknown>) => MountHandle;
+type ConsoleComponent = (props: ConsoleProps) => ReactNode;
+
+/** A federated module can fail long after render starts; keep it contained. */
+class RemoteBoundary extends Component<{ children: ReactNode }, { error?: Error }> {
+  state: { error?: Error } = {};
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) return <Failure message={this.state.error.message} />;
+    return this.props.children;
+  }
+}
+
+function Failure({ message }: { message: string }) {
+  return (
+    <div className="apphost__state">
+      <Heading level={2}>this app could not be loaded</Heading>
+      <Text variant="muted" as="p">
+        {message}
+      </Text>
+      <Text variant="muted" as="p">
+        An app is embeddable only once it has been given a proxy address in the registry.
+      </Text>
+    </div>
+  );
+}
 
 export function AppHost() {
   const { key = '' } = useParams();
   const auth = useAuth();
   const token = auth.user?.access_token;
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const handleRef = useRef<MountHandle | null>(null);
+  const [Remote, setRemote] = useState<ConsoleComponent | null>(null);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(true);
 
-  // Everything the app loads — its module and its API — goes through the
+  // Everything the app loads — its bundle and its API — goes through the
   // portal, so the app never needs an origin or a session of its own.
-  const base = `${PORTAL_API}/apps/${encodeURIComponent(key)}/`;
+  const base = useMemo(() => `${PORTAL_API}/apps/${encodeURIComponent(key)}/`, [key]);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    setRemote(null);
     setError('');
 
-    // The module URL is absolute so a relative import inside the bundle (its
-    // stylesheet) resolves against the proxy, not this route.
-    const moduleUrl = new URL(`${base}embed/console.js`, window.location.origin).href;
+    const entry = new URL(`${base}embed/assets/remoteEntry.js`, window.location.origin).href;
+    __federation_method_setRemote(key, {
+      url: () => Promise.resolve(entry),
+      format: 'esm',
+      from: 'vite',
+    });
 
-    import(/* @vite-ignore */ moduleUrl)
-      .then((mod: { mount?: MountFn; default?: MountFn }) => {
+    __federation_method_getRemote(key, './Console')
+      .then((mod) => {
         if (cancelled) return;
-        const mount = mod.mount ?? mod.default;
-        if (typeof mount !== 'function') {
-          throw new Error('the app does not export a mount() function');
+        const Console = (mod as { Console?: ConsoleComponent; default?: ConsoleComponent })
+          .Console;
+        if (typeof Console !== 'function') {
+          throw new Error('the app does not expose a Console component');
         }
-        if (!hostRef.current) return;
-        handleRef.current = mount(hostRef.current, {
-          apiBase: base,
-          token,
-          onUnauthorized: () => void auth.signinRedirect(),
-        });
-        setLoading(false);
+        // Store the component itself — setState would otherwise call it.
+        setRemote(() => Console);
       })
       .catch((e: unknown) => {
-        if (cancelled) return;
-        setError(e instanceof Error ? e.message : String(e));
-        setLoading(false);
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       });
 
     return () => {
       cancelled = true;
-      handleRef.current?.unmount();
-      handleRef.current = null;
     };
-    // Re-mounting on every token refresh would throw the user's place away;
-    // the token is pushed through update() instead.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base]);
+  }, [base, key]);
 
-  // Silent renew replaces the token — hand the new one over without remounting.
+  // The app's stylesheet ships beside its bundle; the shell links it once.
   useEffect(() => {
-    handleRef.current?.update({ token });
-  }, [token]);
+    const href = `${base}embed/assets/console.css`;
+    if (document.querySelector(`link[data-app="${key}"]`)) return;
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.dataset.app = key;
+    document.head.appendChild(link);
+  }, [base, key]);
+
+  if (error) return <Failure message={error} />;
 
   return (
     <section className="apphost">
-      {loading && (
-        <div className="apphost__state">
-          <Spinner />
-        </div>
-      )}
-      {error && (
-        <div className="apphost__state">
-          <Heading level={2}>this app could not be loaded</Heading>
-          <Text variant="muted" as="p">
-            {error}
-          </Text>
-          <Text variant="muted" as="p">
-            An app is embeddable only once it has been given a proxy address in the registry.
-          </Text>
-        </div>
-      )}
-      <div ref={hostRef} hidden={!!error} />
+      <RemoteBoundary>
+        <Suspense
+          fallback={
+            <div className="apphost__state">
+              <Spinner />
+            </div>
+          }
+        >
+          {Remote ? (
+            <Remote
+              apiBase={base}
+              token={token}
+              onUnauthorized={() => void auth.signinRedirect()}
+            />
+          ) : (
+            <div className="apphost__state">
+              <Spinner />
+            </div>
+          )}
+        </Suspense>
+      </RemoteBoundary>
     </section>
   );
 }
