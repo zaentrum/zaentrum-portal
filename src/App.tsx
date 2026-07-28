@@ -5,6 +5,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { Spinner, Text } from '@nalet/design-system';
 import { Shell } from './shell/Shell';
 import { Launchpad } from './Launchpad';
+import { AppHost } from './apps/AppHost';
 import { SettingsConsole } from './settings/SettingsConsole';
 import { OperatorConsole } from './operator/OperatorConsole';
 import { LogsConsole } from './debug/LogsConsole';
@@ -42,6 +43,8 @@ function AuthedApp() {
     <Routes>
       <Route element={<Shell />}>
         <Route index element={<Launchpad isAdmin={isAdmin} />} />
+        {/* A registered app, hosted inside this shell (see AppHost). */}
+        <Route path="app/:key" element={<AppHost />} />
         <Route
           path="settings/*"
           element={
