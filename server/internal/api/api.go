@@ -36,74 +36,87 @@ func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap
 	return &API{st: st, cfg: cfg, op: op, tap: tap, br: br}
 }
 
-// Register mounts the registry routes under /api/portal. Authn is applied by the
-// caller's group; admin writes are additionally gated here via mw.RequireAdmin.
+// Register mounts the registry routes under /api/portal. Authn is applied here
+// per-route: the embedded-app proxy is deliberately open (a browser cannot
+// attach a bearer to a module import() or a stylesheet <link>), and everything
+// else requires a signed-in user. Admin writes are additionally gated via
+// mw.RequireAdmin.
 func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 	r.Route("/api/portal", func(r chi.Router) {
-		// Reads for any signed-in user.
-		r.Get("/launchpad", a.launchpad)
-		r.Get("/me", a.me)
-		// Product apps read the enabled extension contributions for a slot
-		// (chino forwards the user's bearer here). Any signed-in user.
-		r.Get("/slots/{slot}", a.slotExtensions)
-
 		// Embedded apps: the shell hosts an app in its own page and everything
-		// that app loads comes back through here, so the portal stays the single
-		// front door. The caller's identity is forwarded, so the app applies its
-		// own authorisation. Any signed-in user — the app decides the rest.
+		// that app loads — its module bundle and its API — comes back through
+		// here, so the portal stays the single front door. This route is NOT
+		// behind Authn: the browser fetches the app's bundle with a plain
+		// import()/<link> that carries no bearer. It is still safe — the proxy
+		// forwards whatever Authorization header the request does carry, and the
+		// downstream app authenticates its own API, so the app's static bundle is
+		// public while its data stays protected. The SSRF guard already limits the
+		// destination to a registered in-cluster app.
 		r.Handle("/apps/{key}/*", http.HandlerFunc(a.appProxy))
 
-		// Registry administration (settings console).
-		r.Group(func(ar chi.Router) {
-			ar.Use(mw.RequireAdmin)
+		// Everything below needs a signed-in user.
+		r.Group(func(r chi.Router) {
+			r.Use(mw.Authn)
 
-			ar.Get("/apps", a.listApps)
-			ar.Post("/apps", a.upsertApp)
-			ar.Patch("/apps/{key}", a.patchApp)
-			ar.Delete("/apps/{key}", a.deleteApp)
+			// Reads for any signed-in user.
+			r.Get("/launchpad", a.launchpad)
+			r.Get("/me", a.me)
+			// Product apps read the enabled extension contributions for a slot
+			// (chino forwards the user's bearer here). Any signed-in user.
+			r.Get("/slots/{slot}", a.slotExtensions)
 
-			ar.Get("/spaces", a.listSpaces)
-			ar.Post("/spaces", a.upsertSpace)
-			ar.Patch("/spaces/{key}", a.patchSpace)
-			ar.Delete("/spaces/{key}", a.deleteSpace)
+			// Registry administration (settings console).
+			r.Group(func(ar chi.Router) {
+				ar.Use(mw.RequireAdmin)
 
-			ar.Get("/tiles", a.listTiles)
-			ar.Post("/tiles", a.upsertTile)
-			ar.Patch("/tiles/{key}", a.patchTile)
-			ar.Delete("/tiles/{key}", a.deleteTile)
+				ar.Get("/apps", a.listApps)
+				ar.Post("/apps", a.upsertApp)
+				ar.Patch("/apps/{key}", a.patchApp)
+				ar.Delete("/apps/{key}", a.deleteApp)
 
-			// Operator / instances console (view running services, scale, update,
-			// monitor). Admin-only — it manages the platform's Deployments / CR.
-			ar.Get("/operator", a.operatorGet)
-			ar.Patch("/operator", a.operatorPatch)
-			ar.Post("/operator/apply-update", a.operatorApplyUpdate)
-			ar.Post("/operator/instances/{name}/scale", a.instanceScale)
-			ar.Post("/operator/instances/{name}/restart", a.instanceRestart)
+				ar.Get("/spaces", a.listSpaces)
+				ar.Post("/spaces", a.upsertSpace)
+				ar.Patch("/spaces/{key}", a.patchSpace)
+				ar.Delete("/spaces/{key}", a.deleteSpace)
 
-			// Debug: container logs (secrets redacted). Admin-only, read-only.
-			ar.Get("/debug/pods", a.debugPods)
-			ar.Get("/debug/logs", a.debugLogs)
+				ar.Get("/tiles", a.listTiles)
+				ar.Post("/tiles", a.upsertTile)
+				ar.Patch("/tiles/{key}", a.patchTile)
+				ar.Delete("/tiles/{key}", a.deleteTile)
 
-			// Debug: Kafka event tap — live topology + recent events (redacted).
-			ar.Get("/debug/kafka/topology", a.kafkaTopology)
-			ar.Get("/debug/kafka/events", a.kafkaEvents)
+				// Operator / instances console (view running services, scale, update,
+				// monitor). Admin-only — it manages the platform's Deployments / CR.
+				ar.Get("/operator", a.operatorGet)
+				ar.Patch("/operator", a.operatorPatch)
+				ar.Post("/operator/apply-update", a.operatorApplyUpdate)
+				ar.Post("/operator/instances/{name}/scale", a.instanceScale)
+				ar.Post("/operator/instances/{name}/restart", a.instanceRestart)
 
-			// Debug: curated read-only DB browser (whitelisted tables, masked).
-			ar.Get("/debug/db/tables", a.dbTables)
-			ar.Get("/debug/db/rows", a.dbRows)
+				// Debug: container logs (secrets redacted). Admin-only, read-only.
+				ar.Get("/debug/pods", a.debugPods)
+				ar.Get("/debug/logs", a.debugLogs)
 
-			// Debug: downloadable support bundle (all sections secret-scrubbed).
-			ar.Get("/debug/support-bundle", a.supportBundle)
-		})
+				// Debug: Kafka event tap — live topology + recent events (redacted).
+				ar.Get("/debug/kafka/topology", a.kafkaTopology)
+				ar.Get("/debug/kafka/events", a.kafkaEvents)
 
-		// UI extension registry — writable by a human admin OR an addon's
-		// service account (so an addon self-registers its own seam on install).
-		r.Group(func(er chi.Router) {
-			er.Use(mw.RequireAdminOrAddon)
-			er.Get("/extensions", a.listExtensions)
-			er.Post("/extensions", a.upsertExtension)
-			er.Patch("/extensions/{key}", a.patchExtension)
-			er.Delete("/extensions/{key}", a.deleteExtension)
+				// Debug: curated read-only DB browser (whitelisted tables, masked).
+				ar.Get("/debug/db/tables", a.dbTables)
+				ar.Get("/debug/db/rows", a.dbRows)
+
+				// Debug: downloadable support bundle (all sections secret-scrubbed).
+				ar.Get("/debug/support-bundle", a.supportBundle)
+			})
+
+			// UI extension registry — writable by a human admin OR an addon's
+			// service account (so an addon self-registers its own seam on install).
+			r.Group(func(er chi.Router) {
+				er.Use(mw.RequireAdminOrAddon)
+				er.Get("/extensions", a.listExtensions)
+				er.Post("/extensions", a.upsertExtension)
+				er.Patch("/extensions/{key}", a.patchExtension)
+				er.Delete("/extensions/{key}", a.deleteExtension)
+			})
 		})
 	})
 }
