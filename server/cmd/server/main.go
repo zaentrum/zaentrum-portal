@@ -121,11 +121,10 @@ func run() error {
 		writeText(w, `{"status":"UP"}`)
 	})
 
-	// Authenticated surface.
-	r.Group(func(pr chi.Router) {
-		pr.Use(authMW.Authn)
-		api.New(st, cfg, opSvc, tap, br).Register(pr, authMW)
-	})
+	// Registry surface. Register applies Authn per-route: the embedded-app proxy
+	// is open (a browser cannot attach a bearer to a module import / <link>),
+	// everything else requires a signed-in user.
+	api.New(st, cfg, opSvc, tap, br).Register(r, authMW)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
