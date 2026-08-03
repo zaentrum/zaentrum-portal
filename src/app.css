@@ -24,9 +24,21 @@
   max-width: 960px;
   margin: 0 auto;
   padding: 56px 24px 40px;
+
+  /* Groups are siblings here, and a TileGroup carries no outer margin of its
+     own — so without this every group legend sat flush against the tiles of the
+     group above it and the whole launchpad read as one continuous block. The
+     gap belongs to the container, not to per-element margins that collapse or
+     double depending on what happens to be adjacent. */
+  display: flex;
+  flex-direction: column;
+  gap: 44px;
 }
 
-.lp__head { margin-bottom: 32px; display: flex; flex-direction: column; gap: 4px; }
+/* The heading owns no bottom margin: the container gap above provides the
+   separation, and having both would make the first group sit further from the
+   title than the groups sit from each other. */
+.lp__head { display: flex; flex-direction: column; gap: 4px; }
 
 .lp__foot {
   padding: 16px 24px;
@@ -50,8 +62,8 @@
   }
   .lp__main {
     padding: 28px 16px 32px;
-  }
-  .lp__head {
-    margin-bottom: 20px;
+    /* Tighter on a phone, where the groups stack one tile wide and 44px of
+       dead space between them costs a lot of scrolling. */
+    gap: 32px;
   }
 }
