@@ -3,6 +3,14 @@
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+
+  /* The launchpad renders its heading, every TileGroup and the footer as direct
+     children here. A TileGroup carries no outer margin of its own, so without
+     this gap each group's legend sat flush against the tiles of the group above
+     and the whole page read as one continuous block instead of sections.
+     Spacing belongs to the container — per-element margins collapse or double
+     depending on what happens to be adjacent. */
+  gap: 44px;
   background:
     radial-gradient(1100px 520px at 50% -8%, color-mix(in srgb, var(--cloud-blue) 9%, transparent), transparent 60%),
     var(--bg);
@@ -24,15 +32,6 @@
   max-width: 960px;
   margin: 0 auto;
   padding: 56px 24px 40px;
-
-  /* Groups are siblings here, and a TileGroup carries no outer margin of its
-     own — so without this every group legend sat flush against the tiles of the
-     group above it and the whole launchpad read as one continuous block. The
-     gap belongs to the container, not to per-element margins that collapse or
-     double depending on what happens to be adjacent. */
-  display: flex;
-  flex-direction: column;
-  gap: 44px;
 }
 
 /* The heading owns no bottom margin: the container gap above provides the
@@ -62,8 +61,8 @@
   }
   .lp__main {
     padding: 28px 16px 32px;
-    /* Tighter on a phone, where the groups stack one tile wide and 44px of
-       dead space between them costs a lot of scrolling. */
+  }
+  .lp {
     gap: 32px;
   }
 }
