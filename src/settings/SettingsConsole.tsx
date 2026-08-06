@@ -213,12 +213,22 @@ function AppsPanel() {
       singular="app"
       path="/apps"
       keyHint="e.g. katalog, chino, my-tool"
-      empty={() => ({ key: '', title: '', description: '', baseUrl: '', kind: 'tool', healthUrl: '', icon: '', enabled: true })}
+      empty={() => ({ key: '', title: '', description: '', baseUrl: '', kind: 'tool', healthUrl: '', icon: '', enabled: true, proxyUrl: '' })}
       columns={[
         { key: 'title', header: 'title', render: (r) => <b>{r.title}</b> },
         { key: 'key', header: 'key', render: (r) => <span className="set__mono">{r.key}</span> },
         { key: 'kind', header: 'kind', render: (r) => <Badge tone="neutral">{r.kind}</Badge> },
         { key: 'baseUrl', header: 'base', render: (r) => <span className="set__mono">{r.baseUrl || '—'}</span> },
+        {
+          key: 'proxyUrl',
+          header: 'embeddable',
+          render: (r) =>
+            r.proxyUrl ? (
+              <span className="set__mono">{r.proxyUrl}</span>
+            ) : (
+              <Text variant="dim">no — opens standalone</Text>
+            ),
+        },
         {
           key: 'enabled',
           header: 'enabled',
@@ -244,6 +254,12 @@ function AppsPanel() {
           </Field>
           <Field label="health url" hint="optional">
             <Input value={d.healthUrl} onChange={(e) => patch({ healthUrl: e.target.value })} />
+          </Field>
+          <Field
+            label="proxy url"
+            hint="in-cluster address, e.g. http://acquire — required to host this app inside the portal"
+          >
+            <Input value={d.proxyUrl} onChange={(e) => patch({ proxyUrl: e.target.value })} />
           </Field>
           <Field label="enabled">
             <Switch checked={d.enabled} onChange={(e) => patch({ enabled: e.target.checked })} />

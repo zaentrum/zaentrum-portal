@@ -89,3 +89,16 @@
 .op :global(.card) {
   margin-bottom: 20px;
 }
+
+/* Instance groups. Platform, addons and unclaimed are three different things an
+   operator reasons about differently, so they are three sections rather than
+   one table with a badge column you have to scan. */
+.op__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 28px;
+}
+.op__group:first-of-type {
+  margin-top: 16px;
+}
