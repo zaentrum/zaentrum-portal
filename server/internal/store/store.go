@@ -82,7 +82,7 @@ func (s *Store) Migrate(ctx context.Context, fsys fs.FS) error {
 
 // ApplyChinoPublicURL upgrades the chino app's SEED-DEFAULT base_url
 // ("/chino/") to the deployment's public URL — a subdomain-routed instance
-// (e.g. https://chino.beta.nalet.cloud/) wants the tile to open the real
+// (e.g. https://chino.example.com/) wants the tile to open the real
 // origin, not the portal-host path. Guarded on the seed default so a value an
 // admin edited in the registry console is never clobbered (same contract as
 // the tile open_mode default). No-op when url is blank or already applied.

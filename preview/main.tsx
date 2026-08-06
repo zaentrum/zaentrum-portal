@@ -61,10 +61,10 @@ function mock(query: string): unknown {
   if (query.includes('downloadJobs'))
     return {
       downloadJobs: [
-        { id: 'd1', adapter: 'odownloader', clientJobId: 'p1', title: 'sintel 1080p', state: 'downloading', progressPct: 62, sizeBytes: 734003200, lastEventAt: '2026-06-28T10:05:00Z' },
-        { id: 'd2', adapter: 'odownloader', clientJobId: 'p2', title: 'cosmos laundromat', state: 'completed', progressPct: 100, sizeBytes: 1073741824, lastEventAt: '2026-06-28T09:00:00Z' },
+        { id: 'd1', adapter: 'sample-adapter', clientJobId: 'p1', title: 'sintel 1080p', state: 'downloading', progressPct: 62, sizeBytes: 734003200, lastEventAt: '2026-06-28T10:05:00Z' },
+        { id: 'd2', adapter: 'sample-adapter', clientJobId: 'p2', title: 'cosmos laundromat', state: 'completed', progressPct: 100, sizeBytes: 1073741824, lastEventAt: '2026-06-28T09:00:00Z' },
       ],
-      downloadClients: '["odownloader"]',
+      downloadClients: '["sample-adapter"]',
     };
   if (query.includes('settings'))
     return {

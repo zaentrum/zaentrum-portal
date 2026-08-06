@@ -12,12 +12,12 @@ func TestEnvSuffix(t *testing.T) {
 	}{
 		{
 			"beta",
-			"postgres://u:p@postgres.nalet.cloud:5432/portal_beta?sslmode=require",
+			"postgres://u:p@postgres.example.com:5432/portal_beta?sslmode=require",
 			"_beta",
 		},
 		{
 			"production is unsuffixed",
-			"postgres://u:p@postgres.nalet.cloud:5432/portal?sslmode=require",
+			"postgres://u:p@postgres.example.com:5432/portal?sslmode=require",
 			"",
 		},
 		{
