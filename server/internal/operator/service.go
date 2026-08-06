@@ -70,6 +70,9 @@ type Instance struct {
 	//   other    — running here, claimed by neither; worth seeing precisely
 	//              because nothing owns it
 	Group string `json:"group"`
+	// Reason is why the workload is not healthy, in the words the cluster
+	// used. Empty when it is fine.
+	Reason string `json:"reason"`
 	AlwaysPull        bool   `json:"alwaysPull"` // image re-pulls on restart
 }
 
@@ -125,6 +128,7 @@ func (s *Service) Instances(ctx context.Context) ([]Instance, error) {
 			Protected:         s.protected[d.Metadata.Name],
 			OperatorManaged:   ownedByZaentrum(d),
 			Group:             groupOf(d),
+			Reason:            unhealthyReason(pods, d),
 			AlwaysPull:        strings.EqualFold(pull, "Always") || strings.HasSuffix(img, ":latest"),
 		})
 	}
@@ -317,6 +321,41 @@ func ownedByZaentrum(d k8s.Deployment) bool {
 // The suffix is matched rather than the full value because the prefix is the
 // environment name — beta stamps `zaentrum-beta-addons`, and hardcoding that
 // would silently classify every addon as "other" in any other install.
+// unhealthyReason reports why a deployment's pods are not running, taken from
+// the container state the cluster itself set.
+//
+// This exists because "degraded" alone is not actionable. Beta sat in
+// ImagePullBackOff for 30 hours across 13 services; the console showed
+// "degraded" for every one of them and never said the four words —
+// "cannot pull the image" — that point at the fix.
+//
+// Waiting beats terminated: a container that crashed and is now waiting to be
+// restarted reports both, and the waiting reason is the current state.
+func unhealthyReason(pods []k8s.Pod, d k8s.Deployment) string {
+	for _, p := range pods {
+		if !podMatches(p, d) {
+			continue
+		}
+		for _, cs := range p.Status.ContainerStatuses {
+			if cs.Ready {
+				continue
+			}
+			if w := cs.State.Waiting; w != nil && w.Reason != "" {
+				// ContainerCreating and PodInitializing are the normal path
+				// through a rollout, not a fault to report.
+				if w.Reason == "ContainerCreating" || w.Reason == "PodInitializing" {
+					continue
+				}
+				return w.Reason
+			}
+			if t := cs.State.Terminated; t != nil && t.Reason != "" && t.Reason != "Completed" {
+				return fmt.Sprintf("%s (exit %d)", t.Reason, t.ExitCode)
+			}
+		}
+	}
+	return ""
+}
+
 func groupOf(d k8s.Deployment) string {
 	if ownedByZaentrum(d) {
 		return "platform"
