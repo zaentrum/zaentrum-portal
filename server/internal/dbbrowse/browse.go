@@ -139,10 +139,20 @@ const portalLogical = "portal"
 // This is a correctness fix with teeth. The curated list names databases
 // logically ("katalog", "portal"), and those names were used verbatim as
 // physical database names. Beta runs portal_beta / katalog_beta / acquire_beta,
-// while `katalog` without a suffix is PRODUCTION's catalog database. So the
-// beta admin console was pointed at production data; the only thing that
-// stopped it returning prod rows was a missing grant, which is luck, not
-// design.
+// while `katalog` without a suffix is PRODUCTION's catalog database, on the same
+// cluster. So the beta admin console was pointed at production data.
+//
+// Measured, not assumed, on 2026-08-06:
+//
+//	has_database_privilege('zaentrum_beta','katalog','CONNECT')          -> true
+//	has_table_privilege('zaentrum_beta','com_nalet_katalog_items','SELECT') -> false
+//	SELECT count(*) FROM com_nalet_katalog_items (prod)                  -> 77776
+//
+// The beta role opens a connection to the production database successfully and
+// is refused only at the table. One GRANT — or one curated entry pointing at a
+// table with laxer privileges — turns a 500 into 77,776 production rows
+// rendered in a beta admin screen, looking entirely correct. Table privileges
+// are not an access-control design; they are what happened to be set.
 //
 // Deriving the suffix rather than configuring it means the two can never drift
 // apart: whatever database the portal itself is connected to decides the
