@@ -216,3 +216,29 @@ func TestUnhealthyReason(t *testing.T) {
 		})
 	}
 }
+
+// A stuck rollout reports ready=1 and updated=1 for two DIFFERENT pods, so the
+// arithmetic says "ready" while nothing new can start. Beta showed a green
+// "ready" badge beside "ErrImagePull" on the same row.
+func TestPhaseWithReason(t *testing.T) {
+	cases := []struct {
+		name           string
+		phase, reason  string
+		expect         string
+	}{
+		{"ready with a broken pod is degraded", "ready", "ImagePullBackOff", "degraded"},
+		{"ready with nothing wrong stays ready", "ready", "", "ready"},
+		// Never upgrade: a reason must not make a stopped or degraded workload
+		// look better than it is.
+		{"stopped stays stopped", "stopped", "ImagePullBackOff", "stopped"},
+		{"degraded stays degraded", "degraded", "CrashLoopBackOff", "degraded"},
+		{"progressing is left alone — that is a normal rollout", "progressing", "ContainerCreating", "progressing"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := phaseWithReason(c.phase, c.reason); got != c.expect {
+				t.Fatalf("phaseWithReason(%q,%q) = %q, want %q", c.phase, c.reason, got, c.expect)
+			}
+		})
+	}
+}
