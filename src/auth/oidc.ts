@@ -8,8 +8,14 @@ const env = import.meta.env;
 // is relocatable, and since a SHARED realm registers per-instance clients, it
 // also adopts `oidcClientId.portal` from the same payload when present; the
 // products (chino/tv/musig) ride the same Keycloak SSO session on this origin.
+// The fallback is SAME-ORIGIN on purpose. It used to be a specific deployment's
+// Keycloak, which meant any install whose /api/config lookup failed would send
+// its users to authenticate against somebody else's identity provider. Falling
+// back to this origin matches the default single-origin deployment profile and
+// cannot point anywhere but the server that served this page.
 export let authority: string =
-  env.VITE_OIDC_AUTHORITY ?? 'https://zaentrum.demo.nalet.cloud/auth/realms/zaentrum';
+  env.VITE_OIDC_AUTHORITY ??
+  `${typeof window === 'undefined' ? '' : window.location.origin}/auth/realms/zaentrum`;
 export let clientId: string = env.VITE_OIDC_CLIENT_ID ?? 'zaentrum-web';
 
 // redirect_uri stays under /portal/ so it never collides with Keycloak's /auth route

@@ -8,7 +8,9 @@ const platform = [
   'katalog-manage-ui','katalog-manager-api','katalog-manager-ui','packager',
   'portal-api','transcoder','valkey','zaentrum-portal',
 ];
-const addons = ['acquire','download-gateway','nzbget','prowlarr','qbittorrent'];
+// Names are deliberately generic: the harness exercises the GROUPING, not
+// any particular addon, and this repo is public.
+const addons = ['addon-alpha','addon-beta','addon-gamma','addon-delta','addon-epsilon'];
 
 // 13 of the 14 platform services are in ImagePullBackOff right now; valkey is
 // the one still up. Reproduced faithfully so the reason column is exercised.
@@ -44,7 +46,7 @@ const body = JSON.stringify({
 // an EMPTY proxyUrl, which is the state that made the "embeddable" column worth
 // adding: nothing in a fresh install can be hosted inside the portal shell.
 const apps = [
-  { key: 'chino', title: 'chino', description: 'films & series', baseUrl: 'https://chino.beta.nalet.cloud',
+  { key: 'chino', title: 'chino', description: 'films & series', baseUrl: 'https://chino.example.com',
     kind: 'product', healthUrl: '', icon: 'film', enabled: true, proxyUrl: '' },
   { key: 'katalog', title: 'katalog', description: 'browse the catalog', baseUrl: '/katalog',
     kind: 'admin', healthUrl: '', icon: 'library', enabled: true, proxyUrl: '' },

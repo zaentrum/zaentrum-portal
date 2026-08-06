@@ -112,9 +112,9 @@ func TestOwnedByStube(t *testing.T) {
 }
 
 // A deployment with no owner ref but the addons part-of label is an addon.
-// This is the case the console exists to show: five addon workloads in beta
-// (acquire, download-gateway, nzbget, prowlarr, qbittorrent) carry no owner
-// reference at all, so owner-refs alone put every one of them in "other".
+// This is the case the console exists to show: every addon workload in beta
+// carries no owner reference at all, so owner-refs alone would put all five of
+// them in "other".
 func TestGroupOf(t *testing.T) {
 	dep := func(owner string, partOf string) k8s.Deployment {
 		var d k8s.Deployment
