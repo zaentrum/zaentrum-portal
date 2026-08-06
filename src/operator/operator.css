@@ -102,3 +102,11 @@
 .op__group:first-of-type {
   margin-top: 16px;
 }
+
+/* Status cell: phase badge plus the reason it is in that phase. */
+.op__status {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}

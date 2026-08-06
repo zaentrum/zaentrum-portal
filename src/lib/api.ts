@@ -104,6 +104,9 @@ export interface Instance {
   operatorManaged: boolean;
   // platform | addon | other — see groupOf() in server/internal/operator.
   group: string;
+  // Why it is unhealthy, in the cluster's own words (ImagePullBackOff,
+  // CrashLoopBackOff, OOMKilled …). Empty when it is fine.
+  reason: string;
   alwaysPull: boolean;
 }
 export interface OperatorComponent {

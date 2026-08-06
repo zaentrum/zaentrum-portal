@@ -210,6 +210,20 @@ type Pod struct {
 		ContainerStatuses []struct {
 			RestartCount int32 `json:"restartCount"`
 			Ready        bool  `json:"ready"`
+			// State carries WHY a container is not running. Without it the
+			// console can say "degraded" but not "cannot pull the image",
+			// which is the only part an operator can act on.
+			State struct {
+				Waiting *struct {
+					Reason  string `json:"reason"`
+					Message string `json:"message"`
+				} `json:"waiting"`
+				Terminated *struct {
+					Reason   string `json:"reason"`
+					Message  string `json:"message"`
+					ExitCode int    `json:"exitCode"`
+				} `json:"terminated"`
+			} `json:"state"`
 		} `json:"containerStatuses"`
 	} `json:"status"`
 }

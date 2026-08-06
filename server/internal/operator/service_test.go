@@ -150,3 +150,69 @@ func TestGroupOf(t *testing.T) {
 		})
 	}
 }
+
+// The 30-hour beta outage in one test: 13 services degraded, and the console
+// said only "degraded". The reason has to reach the screen.
+func TestUnhealthyReason(t *testing.T) {
+	var d k8s.Deployment
+	d.Metadata.Name = "transcoder"
+	d.Spec.Selector.MatchLabels = map[string]string{"app": "transcoder"}
+
+	pod := func(ready bool, waiting, terminated string, exit int) k8s.Pod {
+		var p k8s.Pod
+		p.Metadata.Labels = map[string]string{"app": "transcoder"}
+		var cs struct {
+			RestartCount int32 `json:"restartCount"`
+			Ready        bool  `json:"ready"`
+			State        struct {
+				Waiting *struct {
+					Reason  string `json:"reason"`
+					Message string `json:"message"`
+				} `json:"waiting"`
+				Terminated *struct {
+					Reason   string `json:"reason"`
+					Message  string `json:"message"`
+					ExitCode int    `json:"exitCode"`
+				} `json:"terminated"`
+			} `json:"state"`
+		}
+		cs.Ready = ready
+		if waiting != "" {
+			cs.State.Waiting = &struct {
+				Reason  string `json:"reason"`
+				Message string `json:"message"`
+			}{Reason: waiting}
+		}
+		if terminated != "" {
+			cs.State.Terminated = &struct {
+				Reason   string `json:"reason"`
+				Message  string `json:"message"`
+				ExitCode int    `json:"exitCode"`
+			}{Reason: terminated, ExitCode: exit}
+		}
+		p.Status.ContainerStatuses = append(p.Status.ContainerStatuses, cs)
+		return p
+	}
+
+	cases := []struct {
+		name   string
+		pods   []k8s.Pod
+		expect string
+	}{
+		{"the actual outage", []k8s.Pod{pod(false, "ImagePullBackOff", "", 0)}, "ImagePullBackOff"},
+		{"crashloop", []k8s.Pod{pod(false, "CrashLoopBackOff", "Error", 1)}, "CrashLoopBackOff"},
+		{"terminated with no waiting state", []k8s.Pod{pod(false, "", "OOMKilled", 137)}, "OOMKilled (exit 137)"},
+		{"healthy pods report nothing", []k8s.Pod{pod(true, "", "", 0)}, ""},
+		// A rollout in progress is not a fault; reporting it would make the
+		// field noise and train people to ignore it.
+		{"mid-rollout is not a reason", []k8s.Pod{pod(false, "ContainerCreating", "", 0)}, ""},
+		{"no pods at all", nil, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := unhealthyReason(c.pods, d); got != c.expect {
+				t.Fatalf("unhealthyReason() = %q, want %q", got, c.expect)
+			}
+		})
+	}
+}

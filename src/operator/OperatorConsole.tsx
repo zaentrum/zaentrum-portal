@@ -168,7 +168,20 @@ export function OperatorConsole() {
         </span>
       ),
     },
-    { key: 'phase', header: 'status', render: (i) => <Badge tone={phaseTone(i.phase)} dot>{i.phase}</Badge> },
+    {
+      key: 'phase',
+      header: 'status',
+      // The reason sits next to the phase, not in its own column: "degraded"
+      // on its own is not actionable, and the two are one fact.
+      render: (i) => (
+        <span className="op__status">
+          <Badge tone={phaseTone(i.phase)} dot>
+            {i.phase}
+          </Badge>
+          {i.reason && <Text variant="dim">{i.reason}</Text>}
+        </span>
+      ),
+    },
     { key: 'restarts', header: 'restarts', align: 'right', render: (i) => (i.restarts > 0 ? i.restarts : '—') },
     {
       key: 'updatedReplicas',
