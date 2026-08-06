@@ -8,8 +8,11 @@ behind OIDC and a namespace-scoped API, so the only previous way to look at a
 change was to deploy it. When the registry credential died (2026-08-05) that
 became impossible for 36 hours, and several UI changes piled up unseen.
 
-    node harness/mock-server.mjs &          # fake portal-api on :8791
+    node harness/mock-server.mjs &           # fake portal-api on :8791
     npx vite --config harness/vite.config.ts # the real component on :8792
+
+    http://localhost:8792/                   # operator console
+    http://localhost:8792/?view=settings     # app registry console
 
 `oidc-stub.tsx` stands in for `react-oidc-context` via a Vite alias, so
 `usePortalApi` still runs its real fetch path — only the token is fabricated.
@@ -23,3 +26,11 @@ independently auto-sized tables whose columns did not line up.
 `mock-server.mjs` mirrors live `zaentrum-beta` — 14 platform services, 5
 addons, one deliberately unclaimed workload so every group renders, and the
 ImagePullBackOff state the estate was actually in.
+
+The registry fixture mirrors what migrations 002/003/004 actually seed — every
+seeded app has an **empty** `proxyUrl`, which is the state that made the
+`embeddable` column worth adding: nothing in a fresh install can be hosted
+inside the portal shell, and before this the console could not even show that,
+let alone set it. One app carries a `proxyUrl` so both states render.
+
+Add a view by importing it in `main.tsx` and giving it a `?view=` key.

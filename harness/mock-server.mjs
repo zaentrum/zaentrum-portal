@@ -40,8 +40,33 @@ const body = JSON.stringify({
   instances,
 });
 
+// The registry, as seeded by migrations 002/003/004 — note every seeded app has
+// an EMPTY proxyUrl, which is the state that made the "embeddable" column worth
+// adding: nothing in a fresh install can be hosted inside the portal shell.
+const apps = [
+  { key: 'chino', title: 'chino', description: 'films & series', baseUrl: 'https://chino.beta.nalet.cloud',
+    kind: 'product', healthUrl: '', icon: 'film', enabled: true, proxyUrl: '' },
+  { key: 'katalog', title: 'katalog', description: 'browse the catalog', baseUrl: '/katalog',
+    kind: 'admin', healthUrl: '', icon: 'library', enabled: true, proxyUrl: '' },
+  { key: 'katalog-manage', title: 'katalog-manage', description: 'manage the catalog', baseUrl: '/katalog-manage',
+    kind: 'admin', healthUrl: '', icon: 'settings', enabled: true, proxyUrl: '' },
+  // One app WITH a proxyUrl, so the embeddable column shows both states.
+  { key: 'acquire', title: 'acquire', description: 'requests & acquisition', baseUrl: '/acquire',
+    kind: 'admin', healthUrl: 'http://acquire/readyz', icon: 'download', enabled: true,
+    proxyUrl: 'http://acquire' },
+];
+const spaces = [{ key: 'default', title: 'default', apps: apps.map((a) => a.key) }];
+
 createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
+  if (req.url.startsWith('/api/portal/apps')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(apps));
+  }
+  if (req.url.startsWith('/api/portal/spaces')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(spaces));
+  }
   if (req.url.startsWith('/api/portal/operator')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(body);
