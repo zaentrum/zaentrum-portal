@@ -124,7 +124,9 @@ func (s *Service) Instances(ctx context.Context) ([]Instance, error) {
 			UpdatedReplicas:   int(d.Status.UpdatedReplicas),
 			AvailableReplicas: int(d.Status.AvailableReplicas),
 			Restarts:          restarts,
-			Phase:             phaseOf(desired, int(d.Status.ReadyReplicas), int(d.Status.UpdatedReplicas)),
+			Phase: phaseWithReason(
+				phaseOf(desired, int(d.Status.ReadyReplicas), int(d.Status.UpdatedReplicas)),
+				unhealthyReason(pods, d)),
 			Protected:         s.protected[d.Metadata.Name],
 			OperatorManaged:   ownedByZaentrum(d),
 			Group:             groupOf(d),
@@ -364,6 +366,29 @@ func groupOf(d k8s.Deployment) string {
 		return "addon"
 	}
 	return "other"
+}
+
+// phaseWithReason refuses to call a workload "ready" while one of its pods is
+// failing.
+//
+// This is the exact mechanism that hid a 36-hour outage, reproduced inside the
+// console meant to reveal it. During a stuck rollout the counters describe two
+// DIFFERENT pods:
+//
+//	readyReplicas=1    the old pod, still serving, days old
+//	updatedReplicas=1  the new pod, in ImagePullBackOff
+//
+// phaseOf() sees 1/1/1 and says "ready" — every field it looks at is true, and
+// the conclusion is false. Beta rendered a green "ready" badge next to
+// "ErrImagePull" on the same row.
+//
+// So the reason is authoritative over the counters: if a pod is broken, the
+// deployment is not ready, whatever the arithmetic says.
+func phaseWithReason(phase, reason string) string {
+	if reason != "" && phase == "ready" {
+		return "degraded"
+	}
+	return phase
 }
 
 func phaseOf(desired, ready, updated int) string {
