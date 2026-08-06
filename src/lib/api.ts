@@ -41,6 +41,12 @@ export interface App {
   healthUrl: string;
   icon: string;
   enabled: boolean;
+  // The in-cluster address the shell proxies to when hosting this app inside
+  // the portal. The server has always stored and returned it; the client type
+  // omitted it, so the registry console could not set it and every app an admin
+  // created was permanently non-embeddable — while the error told them to set a
+  // field the form did not have.
+  proxyUrl: string;
 }
 export interface Space {
   key: string;
