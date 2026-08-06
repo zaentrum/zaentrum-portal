@@ -121,11 +121,10 @@ export function OperatorConsole() {
     {
       key: 'name',
       header: 'service',
+      width: 260,
       render: (i) => (
         <span className="op__svc">
           <b>{i.name}</b>
-          {i.group === 'platform' && <Badge tone="blue">platform</Badge>}
-          {i.group === 'addon' && <Badge tone="green">addon</Badge>}
           {i.protected && (
             <span className="op__lock" title="protected — not scalable here">
               <Lock size={12} />
@@ -134,10 +133,16 @@ export function OperatorConsole() {
         </span>
       ),
     },
-    { key: 'image', header: 'image', render: (i) => <span className="op__mono">{shortImage(i.image)}</span> },
+    {
+      key: 'image',
+      header: 'image',
+      width: 260,
+      render: (i) => <span className="op__mono">{shortImage(i.image)}</span>,
+    },
     {
       key: 'readyReplicas',
       header: 'replicas',
+      width: 130,
       render: (i) => (
         <span className="op__scale">
           {!i.protected && (
@@ -171,6 +176,7 @@ export function OperatorConsole() {
     {
       key: 'phase',
       header: 'status',
+      width: 260,
       // The reason sits next to the phase, not in its own column: "degraded"
       // on its own is not actionable, and the two are one fact.
       render: (i) => (
@@ -182,11 +188,18 @@ export function OperatorConsole() {
         </span>
       ),
     },
-    { key: 'restarts', header: 'restarts', align: 'right', render: (i) => (i.restarts > 0 ? i.restarts : '—') },
+    {
+      key: 'restarts',
+      header: 'restarts',
+      align: 'right',
+      width: 90,
+      render: (i) => (i.restarts > 0 ? i.restarts : '—'),
+    },
     {
       key: 'updatedReplicas',
       header: '',
       align: 'right',
+      width: 120,
       render: (i) =>
         i.protected ? (
           <Badge tone="neutral">protected</Badge>
@@ -279,7 +292,7 @@ export function OperatorConsole() {
         state && (
           <>
             <InstanceGroup
-              title="platform"
+              title="platform services"
               hint="rendered by the operator from the platform chart — these upgrade with it"
               rows={inGroup('platform')}
               columns={columns}
