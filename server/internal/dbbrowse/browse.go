@@ -8,6 +8,8 @@ package dbbrowse
 import (
 	"context"
 	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -108,6 +110,9 @@ type Browser struct {
 	baseDSN string
 	user    string
 	pass    string
+	// suffix turns a curated table's logical database name into this
+	// environment's physical one ("" in production, "_beta" on beta).
+	suffix  string
 	mu      sync.Mutex
 	pools   map[string]*pgxpool.Pool
 }
@@ -115,8 +120,62 @@ type Browser struct {
 // New constructs a browser from the portal-api's datasource config. The DSN must
 // be non-empty (the portal always has one).
 func New(dsn, user, pass string) *Browser {
-	return &Browser{baseDSN: dsn, user: user, pass: pass, pools: map[string]*pgxpool.Pool{}}
+	return &Browser{
+		baseDSN: dsn, user: user, pass: pass,
+		suffix: envSuffix(dsn),
+		pools:  map[string]*pgxpool.Pool{},
+	}
 }
+
+// portalLogical is the logical name of the portal's own database — the one
+// database this service is always pointed at, and so the reference point for
+// working out which environment we are in.
+const portalLogical = "portal"
+
+// envSuffix derives the per-environment database suffix from the portal's own
+// DSN, so a curated table's LOGICAL database name can be resolved to the
+// PHYSICAL one for this environment.
+//
+// This is a correctness fix with teeth. The curated list names databases
+// logically ("katalog", "portal"), and those names were used verbatim as
+// physical database names. Beta runs portal_beta / katalog_beta / acquire_beta,
+// while `katalog` without a suffix is PRODUCTION's catalog database. So the
+// beta admin console was pointed at production data; the only thing that
+// stopped it returning prod rows was a missing grant, which is luck, not
+// design.
+//
+// Deriving the suffix rather than configuring it means the two can never drift
+// apart: whatever database the portal itself is connected to decides the
+// environment for every other lookup.
+func envSuffix(dsn string) string {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil || cfg.ConnConfig == nil {
+		return ""
+	}
+	name := cfg.ConnConfig.Database
+	switch {
+	case name == portalLogical:
+		return "" // production: unsuffixed
+	case strings.HasPrefix(name, portalLogical+"_"):
+		return name[len(portalLogical):] // "portal_beta" -> "_beta"
+	default:
+		// An unrecognised portal database name. Returning "" would silently
+		// resolve to the unsuffixed (production) databases, which is the exact
+		// failure being fixed — so refuse to guess and say so.
+		log.Printf("dbbrowse: portal database %q does not match %q or %q_<env>; "+
+			"curated tables in other databases will be unavailable",
+			name, portalLogical, portalLogical)
+		return unknownSuffix
+	}
+}
+
+// unknownSuffix is a sentinel that cannot be a real database name, so every
+// pool() call fails closed instead of reaching another environment.
+const unknownSuffix = "\x00unknown"
+
+// physical maps a curated table's logical database to this environment's actual
+// one.
+func (b *Browser) physical(logical string) string { return logical + b.suffix }
 
 // Available reports whether a base DSN is configured.
 func (b *Browser) Available() bool { return b != nil && b.baseDSN != "" }
@@ -227,7 +286,7 @@ func (b *Browser) pool(ctx context.Context, db string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
-	cfg.ConnConfig.Database = db
+	cfg.ConnConfig.Database = b.physical(db)
 	if b.user != "" {
 		cfg.ConnConfig.User = b.user
 	}
@@ -242,7 +301,7 @@ func (b *Browser) pool(ctx context.Context, db string) (*pgxpool.Pool, error) {
 	cfg.MaxConns = 2
 	p, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("open pool for %q: %w", db, err)
+		return nil, fmt.Errorf("open pool for %q: %w", b.physical(db), err)
 	}
 	b.pools[db] = p
 	return p, nil
