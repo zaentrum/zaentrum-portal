@@ -110,3 +110,43 @@ func TestOwnedByStube(t *testing.T) {
 		t.Error("Stube owner ref → operator-managed")
 	}
 }
+
+// A deployment with no owner ref but the addons part-of label is an addon.
+// This is the case the console exists to show: five addon workloads in beta
+// (acquire, download-gateway, nzbget, prowlarr, qbittorrent) carry no owner
+// reference at all, so owner-refs alone put every one of them in "other".
+func TestGroupOf(t *testing.T) {
+	dep := func(owner string, partOf string) k8s.Deployment {
+		var d k8s.Deployment
+		d.Metadata.Labels = map[string]string{}
+		if partOf != "" {
+			d.Metadata.Labels["app.kubernetes.io/part-of"] = partOf
+		}
+		if owner != "" {
+			d.Metadata.OwnerReferences = []k8s.OwnerRef{{Kind: owner}}
+		}
+		return d
+	}
+	cases := []struct {
+		name   string
+		d      k8s.Deployment
+		expect string
+	}{
+		{"operator-owned is platform", dep("Zaentrum", "zaentrum-beta"), "platform"},
+		{"addons label is an addon", dep("", "zaentrum-beta-addons"), "addon"},
+		// The prefix is the environment name, so the suffix must be what matches.
+		{"any environment's addons label", dep("", "zaentrum-prod-addons"), "addon"},
+		{"platform label without owner is not an addon", dep("", "zaentrum-beta"), "other"},
+		{"no labels at all", dep("", ""), "other"},
+		// Ownership wins: if the operator reconciles it, a stale label must not
+		// move it out of the group whose upgrades it actually follows.
+		{"owner ref beats a stale addons label", dep("Zaentrum", "zaentrum-beta-addons"), "platform"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := groupOf(c.d); got != c.expect {
+				t.Fatalf("groupOf() = %q, want %q", got, c.expect)
+			}
+		})
+	}
+}

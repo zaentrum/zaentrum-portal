@@ -64,6 +64,12 @@ type Instance struct {
 	Phase             string `json:"phase"` // ready|progressing|degraded|stopped
 	Protected         bool   `json:"protected"`
 	OperatorManaged   bool   `json:"operatorManaged"`
+	// Group is how an operator has to reason about this workload:
+	//   platform — the operator renders it from the chart; it upgrades with it
+	//   addon    — deployed alongside, with its own repo, lifecycle and version
+	//   other    — running here, claimed by neither; worth seeing precisely
+	//              because nothing owns it
+	Group string `json:"group"`
 	AlwaysPull        bool   `json:"alwaysPull"` // image re-pulls on restart
 }
 
@@ -118,6 +124,7 @@ func (s *Service) Instances(ctx context.Context) ([]Instance, error) {
 			Phase:             phaseOf(desired, int(d.Status.ReadyReplicas), int(d.Status.UpdatedReplicas)),
 			Protected:         s.protected[d.Metadata.Name],
 			OperatorManaged:   ownedByZaentrum(d),
+			Group:             groupOf(d),
 			AlwaysPull:        strings.EqualFold(pull, "Always") || strings.HasSuffix(img, ":latest"),
 		})
 	}
@@ -297,6 +304,27 @@ func ownedByZaentrum(d k8s.Deployment) bool {
 		}
 	}
 	return false
+}
+
+// groupOf classifies a workload.
+//
+// Owner references are the authority for "platform": the operator sets them, so
+// they cannot drift from what it actually reconciles. Addons have no owner ref
+// (nothing owns them — that IS the distinction), so they are identified by the
+// part-of label the addons kustomization stamps on every workload it applies:
+// `app.kubernetes.io/part-of: <namespace>-addons`.
+//
+// The suffix is matched rather than the full value because the prefix is the
+// environment name — beta stamps `zaentrum-beta-addons`, and hardcoding that
+// would silently classify every addon as "other" in any other install.
+func groupOf(d k8s.Deployment) string {
+	if ownedByZaentrum(d) {
+		return "platform"
+	}
+	if strings.HasSuffix(d.Metadata.Labels["app.kubernetes.io/part-of"], "-addons") {
+		return "addon"
+	}
+	return "other"
 }
 
 func phaseOf(desired, ready, updated int) string {

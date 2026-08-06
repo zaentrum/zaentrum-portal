@@ -12,7 +12,7 @@ import {
 } from '@nalet/design-system';
 import type { TableColumn } from '@nalet/design-system';
 import { Minus, Plus, RotateCw, RefreshCw, Lock, ArrowUpCircle } from 'lucide-react';
-import { usePortalApi, type OperatorState, type Instance, type App } from '../lib/api';
+import { usePortalApi, type OperatorState, type Instance } from '../lib/api';
 import './operator.css';
 
 const REFRESH_MS = 5000;
@@ -41,11 +41,6 @@ const shortImage = (img: string) => img.replace(/^.*\//, '') || img;
 // and surfaces the zaentrum-operator (Zaentrum CR) when one is present. Admin-only.
 export function OperatorConsole() {
   const api = usePortalApi();
-  // The registry tells us which running services belong to a registered addon.
-  // An app's proxyUrl is its in-cluster address, so its host IS the Deployment
-  // name — that is the only honest link between "an app exists" and "something
-  // is running for it".
-  const [apps, setApps] = useState<App[]>([]);
   const [state, setState] = useState<OperatorState | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -81,16 +76,6 @@ export function OperatorConsole() {
     const t = setInterval(() => load(true), REFRESH_MS);
     return () => clearInterval(t);
   }, [load]);
-
-  // The registry changes far less often than instance state, so it is fetched
-  // once rather than on the 5 s poll. A failure here degrades the grouping to
-  // "unclaimed" — it must never take the console down, which is the one screen
-  // you need when something is wrong.
-  useEffect(() => {
-    api('/apps')
-      .then((r) => setApps(Array.isArray(r) ? (r as App[]) : []))
-      .catch(() => setApps([]));
-  }, [api]);
 
   async function act(key: string, fn: () => Promise<unknown>, label: string) {
     setBusy(key);
@@ -128,21 +113,9 @@ export function OperatorConsole() {
 
   const op = state?.operator;
 
-  // service name -> the addon that owns it
-  const addonBy = new Map<string, App>();
-  for (const a of apps) {
-    const host = hostOf(a.proxyUrl);
-    if (host) addonBy.set(host, a);
-  }
-
-  // Three groups, because they are three different things an operator has to
-  // reason about differently:
-  //   platform — rendered by the operator from the chart; upgrades with it
-  //   addons   — installed alongside; own lifecycle, own repo, own version
-  //   other    — running here but claimed by neither, which is worth seeing
-  const platform = (state?.instances ?? []).filter((i) => i.operatorManaged);
-  const addons = (state?.instances ?? []).filter((i) => !i.operatorManaged && addonBy.has(i.name));
-  const other = (state?.instances ?? []).filter((i) => !i.operatorManaged && !addonBy.has(i.name));
+  // The server classifies each workload (owner refs for platform, the addons
+  // part-of label for addons); the console just renders the groups.
+  const inGroup = (g: string) => (state?.instances ?? []).filter((i) => i.group === g);
 
   const columns: TableColumn<Instance>[] = [
     {
@@ -151,10 +124,8 @@ export function OperatorConsole() {
       render: (i) => (
         <span className="op__svc">
           <b>{i.name}</b>
-          {i.operatorManaged && <Badge tone="blue">platform</Badge>}
-          {!i.operatorManaged && addonBy.has(i.name) && (
-            <Badge tone="green">{addonBy.get(i.name)!.title}</Badge>
-          )}
+          {i.group === 'platform' && <Badge tone="blue">platform</Badge>}
+          {i.group === 'addon' && <Badge tone="green">addon</Badge>}
           {i.protected && (
             <span className="op__lock" title="protected — not scalable here">
               <Lock size={12} />
@@ -297,20 +268,20 @@ export function OperatorConsole() {
             <InstanceGroup
               title="platform"
               hint="rendered by the operator from the platform chart — these upgrade with it"
-              rows={platform}
+              rows={inGroup('platform')}
               columns={columns}
             />
             <InstanceGroup
               title="addons"
               hint="installed alongside the platform, each with its own lifecycle and version"
-              rows={addons}
+              rows={inGroup('addon')}
               columns={columns}
               emptyText="no addons are running."
             />
             <InstanceGroup
               title="unclaimed"
-              hint="running in this namespace but owned by neither the operator nor a registered addon"
-              rows={other}
+              hint="running in this namespace but claimed by neither the platform chart nor the addons kustomization"
+              rows={inGroup('other')}
               columns={columns}
               emptyText=""
             />
@@ -329,17 +300,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </label>
   );
-}
-
-// hostOf extracts the service name from an app's in-cluster proxy address.
-// http://acquire -> acquire, http://acquire:8080/x -> acquire.
-function hostOf(proxyUrl: string): string {
-  if (!proxyUrl) return '';
-  try {
-    return new URL(proxyUrl).hostname;
-  } catch {
-    return '';
-  }
 }
 
 // InstanceGroup renders one section. A group with nothing in it is HIDDEN when

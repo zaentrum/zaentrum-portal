@@ -102,6 +102,8 @@ export interface Instance {
   phase: string; // ready|progressing|degraded|stopped
   protected: boolean;
   operatorManaged: boolean;
+  // platform | addon | other — see groupOf() in server/internal/operator.
+  group: string;
   alwaysPull: boolean;
 }
 export interface OperatorComponent {
