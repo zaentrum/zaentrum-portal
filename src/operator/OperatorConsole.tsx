@@ -33,7 +33,18 @@ function phaseTone(phase: string): BadgeTone {
 }
 
 // shorten ghcr.io/zaentrum/chino-api:latest -> chino-api:latest
-const shortImage = (img: string) => img.replace(/^.*\//, '') || img;
+// ghcr.io/zaentrum/chino-api:latest              -> chino-api:latest
+// ghcr.io/zaentrum/analyzer@sha256:56268318f11a…  -> analyzer@5626831…
+//
+// The operator pins images by digest, so a live row carries a 71-character
+// hash. Rendered whole it tells you nothing you can act on and it blew the
+// column width apart — the three tables were meant to line up as one grid and
+// did not, because the widths are minimums that long content overrides. Twelve
+// hex characters is enough to tell two builds apart by eye.
+const shortImage = (img: string) => {
+  const tail = img.replace(/^.*\//, '') || img;
+  return tail.replace(/@sha256:([0-9a-f]{12})[0-9a-f]+$/, '@$1…');
+};
 
 // The operator / instances console: monitor the running services, scale them,
 // and update the platform — from inside the portal. Works against a plain-manifest

@@ -110,3 +110,15 @@
   gap: 8px;
   flex-wrap: wrap;
 }
+
+/* The three group tables must read as ONE grid, so their columns have to agree.
+   The design system treats a column width as a MINIMUM, which long content
+   overrides — live, the platform table carried digest-pinned image names and
+   pushed its columns 130px out of step with the addons table. Fixed layout
+   makes the declared widths authoritative. */
+.op__group table {
+  table-layout: fixed;
+}
+.op__group .op__mono {
+  overflow-wrap: anywhere;
+}

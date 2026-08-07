@@ -16,7 +16,13 @@ const addons = ['addon-alpha','addon-beta','addon-gamma','addon-delta','addon-ep
 // the one still up. Reproduced faithfully so the reason column is exercised.
 const inst = (name, group, broken) => ({
   name,
-  image: `ghcr.io/zaentrum/${name}:latest`,
+  // Platform images are digest-pinned by the operator; addons run tags.
+  // Mirroring that is the point — a fixture where everything is a short
+  // tag hides the column-width problem that digests cause.
+  image:
+    group === 'platform'
+      ? `ghcr.io/zaentrum/${name}@sha256:56268318f11a2083bc3f03da3b7720ead6e1bdfb0f86da7de5746b1bcad3a7dd`
+      : `ghcr.io/zaentrum/${name}:latest`,
   desiredReplicas: 1,
   readyReplicas: broken ? 0 : 1,
   updatedReplicas: 1,
