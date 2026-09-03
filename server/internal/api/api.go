@@ -54,6 +54,13 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 		// destination to a registered in-cluster app.
 		r.Handle("/apps/{key}/*", http.HandlerFunc(a.appProxy))
 
+		// CLI capability discovery — also deliberately unauthenticated: the
+		// zae CLI probes it before any login flow exists, and it aggregates
+		// route METADATA of an open-source platform, not data. See
+		// clidiscovery.go for the SSRF reasoning (candidates come only from
+		// the platform's own registries, never from the request).
+		r.Get("/cli/discovery", a.cliDiscovery)
+
 		// Everything below needs a signed-in user.
 		r.Group(func(r chi.Router) {
 			r.Use(mw.Authn)
