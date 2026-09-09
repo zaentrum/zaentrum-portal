@@ -55,6 +55,9 @@ type Descriptor struct {
 		Path string `json:"path"`
 	} `json:"checks,omitempty"`
 	Topics []string `json:"topics,omitempty"`
+	// UI is what the addon contributes to the portal and product apps; the
+	// platform materialises it into registry rows on install (addons.go).
+	UI *ManifestUI `json:"ui,omitempty"`
 }
 
 // discoveryCache: descriptors change on deploys, not per request, and zae may

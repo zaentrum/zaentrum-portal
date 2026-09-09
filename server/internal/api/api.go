@@ -76,6 +76,12 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 			r.Group(func(ar chi.Router) {
 				ar.Use(mw.RequireAdmin)
 
+				// Addon installation: pull the addon's manifest and materialise
+				// its app, tile and slot rows — see addons.go.
+				ar.Get("/addons", a.listAddons)
+				ar.Post("/addons", a.installAddon)
+				ar.Delete("/addons/{key}", a.removeAddon)
+
 				ar.Get("/apps", a.listApps)
 				ar.Post("/apps", a.upsertApp)
 				ar.Patch("/apps/{key}", a.patchApp)

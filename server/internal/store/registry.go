@@ -357,3 +357,10 @@ func (s *Store) UpsertExtension(ctx context.Context, e model.Extension) error {
 func (s *Store) DeleteExtension(ctx context.Context, key string) error {
 	return s.execDelete(ctx, `DELETE FROM ui_extensions WHERE key=$1`, key)
 }
+
+// DeleteExtensionsByAddon removes every contribution an addon owns. Ownership
+// is the `addon` column — the reason it exists is exactly this call.
+func (s *Store) DeleteExtensionsByAddon(ctx context.Context, addon string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM ui_extensions WHERE addon=$1`, addon)
+	return err
+}
