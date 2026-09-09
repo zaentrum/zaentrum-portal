@@ -55,6 +55,11 @@ func TestPlanAddonWithConsole(t *testing.T) {
 	if plan.Tile.Key != "addon.sample" || plan.Tile.AppKey != "sample" || plan.Tile.SpaceKey != "apps" || plan.Tile.Target != "/portal/app/sample" {
 		t.Errorf("tile = %+v", *plan.Tile)
 	}
+	// The launchpad dims a tile that is not enabled — an installed console
+	// must be clickable without a second admin action.
+	if !plan.Tile.Enabled || plan.Tile.Open != "inline" {
+		t.Errorf("tile must be enabled and open inline: %+v", *plan.Tile)
+	}
 	// Two valid slot rows; the two malformed ones (no slot, no label) are dropped.
 	if len(plan.Rows) != 2 {
 		t.Fatalf("rows = %d, want 2: %+v", len(plan.Rows), plan.Rows)

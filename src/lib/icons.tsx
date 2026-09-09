@@ -18,6 +18,7 @@ import {
   Users,
   Gauge,
   Database,
+  Puzzle,
 } from 'lucide-react';
 import { CGlyph, TGlyph, MGlyph, ZGlyph } from '../glyphs';
 
@@ -45,6 +46,7 @@ const MAP: Record<string, LucideIcon> = {
   users: Users,
   gauge: Gauge,
   database: Database,
+  puzzle: Puzzle, // the default icon for installed addons
 };
 
 // resolveIcon turns a stored icon name into a renderable icon component, with a

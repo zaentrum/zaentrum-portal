@@ -105,7 +105,7 @@ func planAddon(proxyURL string, d Descriptor, spaceKey, origin string) (addonPla
 		plan.Tile = &model.Tile{
 			Key: addonTilePrefix + key, AppKey: key, SpaceKey: spaceKey,
 			Title: title, Description: desc, Icon: icon,
-			Target: "/portal/app/" + key, Order: 900,
+			Target: "/portal/app/" + key, Order: 900, Open: "inline", Enabled: true,
 		}
 	}
 	if ui != nil {
