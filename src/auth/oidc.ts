@@ -30,12 +30,19 @@ function buildConfig(): AuthProviderProps {
     scope: 'openid profile email',
     automaticSilentRenew: true,
     userStore: new WebStorageStateStore({ store: window.localStorage }),
-    onSigninCallback: () => {
-      window.history.replaceState(
-        null,
-        '',
-        window.location.pathname.replace(/\/auth\/callback$/, '/') || '/portal/',
-      );
+    // After the round trip, land where the user was going. The deep link is
+    // carried in OIDC state (see returnTo in App.tsx) — a product's slot button
+    // pointing at /portal/app/<addon>?q=… must arrive there, not at the
+    // launchpad. Same-origin paths only: state is client-controlled.
+    onSigninCallback: (user) => {
+      const st = user?.state as { returnTo?: unknown } | undefined;
+      const wanted = typeof st?.returnTo === 'string' ? st.returnTo : '';
+      const target =
+        wanted.startsWith('/portal/') && !wanted.startsWith('//') ? wanted : '/portal/';
+      window.history.replaceState(null, '', target);
+      // The router is already mounted and listens to popstate, not to
+      // replaceState; tell it the location changed.
+      window.dispatchEvent(new PopStateEvent('popstate'));
     },
   };
 }

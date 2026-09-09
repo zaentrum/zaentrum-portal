@@ -22,7 +22,10 @@ export function App() {
 
   useEffect(() => {
     if (!auth.isLoading && !auth.isAuthenticated && !auth.activeNavigator && !auth.error) {
-      void auth.signinRedirect();
+      // Remember where the user was going; onSigninCallback restores it.
+      const { pathname, search, hash } = window.location;
+      const returnTo = pathname.startsWith('/portal/auth/') ? '/portal/' : pathname + search + hash;
+      void auth.signinRedirect({ state: { returnTo } });
     }
   }, [auth.isLoading, auth.isAuthenticated, auth.activeNavigator, auth.error]);
 
