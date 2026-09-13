@@ -213,15 +213,28 @@ interface InstalledAddon {
   key: string;
   title: string;
   proxyUrl: string;
+  tiles: number;
   slots: number;
 }
 
 interface InstallResult {
   key: string;
+  tiles: number;
   slots: number;
   commands: number;
   checks: number;
-  tile: unknown | null;
+  space: { key: string; title: string } | null;
+}
+
+// What an install created, in the order it matters to the admin.
+function summarise(r: InstallResult) {
+  const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+  const parts = [];
+  if (r.space) parts.push(`space "${r.space.title || r.space.key}"`);
+  if (r.tiles) parts.push(n(r.tiles, 'tile', 'tiles'));
+  if (r.slots) parts.push(n(r.slots, 'slot row', 'slot rows'));
+  if (r.commands) parts.push(n(r.commands, 'CLI command', 'CLI commands'));
+  return parts.length ? parts.join(', ') : 'nothing to show — the addon declares no UI';
 }
 
 // AddonsPanel is the install path. The admin types the addon's in-cluster
@@ -262,9 +275,7 @@ function AddonsPanel() {
         method: 'POST',
         body: JSON.stringify({ proxyUrl, ...(space ? { space } : {}) }),
       });
-      setMsg(
-        `installed ${r.key}: ${r.tile ? 'console tile, ' : ''}${r.slots} slot ${r.slots === 1 ? 'row' : 'rows'}, ${r.commands} CLI ${r.commands === 1 ? 'command' : 'commands'}`,
-      );
+      setMsg(`installed ${r.key}: ${summarise(r)}`);
       setUrl('');
       reload();
     } catch (e) {
@@ -275,7 +286,12 @@ function AddonsPanel() {
   }
 
   async function remove(row: InstalledAddon) {
-    if (!confirm(`remove addon "${row.key}"? Its app, tile and slot rows are deleted; the workload is yours to remove.`)) return;
+    if (
+      !confirm(
+        `remove addon "${row.key}"? Its app, tiles, slot rows and any space it brought are deleted; the workload is yours to remove.`,
+      )
+    )
+      return;
     setMsg(null);
     setErr(null);
     try {
@@ -297,7 +313,7 @@ function AddonsPanel() {
         method: 'POST',
         body: JSON.stringify({ proxyUrl: row.proxyUrl }),
       });
-      setMsg(`refreshed ${r.key}: ${r.slots} slot ${r.slots === 1 ? 'row' : 'rows'}, ${r.commands} CLI ${r.commands === 1 ? 'command' : 'commands'}`);
+      setMsg(`refreshed ${r.key}: ${summarise(r)}`);
       reload();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -308,6 +324,7 @@ function AddonsPanel() {
     { key: 'title', header: 'addon', render: (r) => <b>{r.title || r.key}</b> },
     { key: 'key', header: 'key', render: (r) => <span className="set__mono">{r.key}</span> },
     { key: 'proxyUrl', header: 'address', render: (r) => <span className="set__mono">{r.proxyUrl}</span> },
+    { key: 'tiles', header: 'tiles', align: 'right', render: (r) => r.tiles },
     { key: 'slots', header: 'slot rows', align: 'right', render: (r) => r.slots },
     {
       key: '__act',
@@ -341,7 +358,10 @@ function AddonsPanel() {
           />
         </Field>
         {spaces.length > 0 && (
-          <Field label="space" hint="where a console tile is placed; default is the first space">
+          <Field
+            label="space"
+            hint="where tiles are placed, unless the addon brings its own section; default is the first space"
+          >
             <Select
               value={space}
               onChange={(e) => setSpace(e.target.value)}

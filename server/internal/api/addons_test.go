@@ -49,16 +49,20 @@ func TestPlanAddonWithConsole(t *testing.T) {
 	if app.BaseURL != "/portal/app/sample" {
 		t.Errorf("app.BaseURL = %q — the portal route is derived from the key", app.BaseURL)
 	}
-	if plan.Tile == nil {
-		t.Fatal("console:true must produce a tile")
+	if len(plan.Tiles) != 1 {
+		t.Fatalf("console:true must produce exactly one tile, got %d", len(plan.Tiles))
 	}
-	if plan.Tile.Key != "addon.sample" || plan.Tile.AppKey != "sample" || plan.Tile.SpaceKey != "apps" || plan.Tile.Target != "/portal/app/sample" {
-		t.Errorf("tile = %+v", *plan.Tile)
+	tile := plan.Tiles[0]
+	if tile.Key != "addon.sample" || tile.AppKey != "sample" || tile.SpaceKey != "apps" || tile.Target != "/portal/app/sample" {
+		t.Errorf("tile = %+v", tile)
 	}
 	// The launchpad dims a tile that is not enabled — an installed console
 	// must be clickable without a second admin action.
-	if !plan.Tile.Enabled || plan.Tile.Open != "inline" {
-		t.Errorf("tile must be enabled and open inline: %+v", *plan.Tile)
+	if !tile.Enabled || tile.Open != "inline" {
+		t.Errorf("tile must be enabled and open inline: %+v", tile)
+	}
+	if plan.Space != nil {
+		t.Errorf("no space declared ⇒ none planned, got %+v", *plan.Space)
 	}
 	// Two valid slot rows; the two malformed ones (no slot, no label) are dropped.
 	if len(plan.Rows) != 2 {
@@ -94,8 +98,8 @@ func TestPlanAddonWithoutUI(t *testing.T) {
 	if plan.App.Key != "tool" || plan.App.Title != "tool" || plan.App.Icon != "puzzle" {
 		t.Errorf("app = %+v", plan.App)
 	}
-	if plan.Tile != nil || len(plan.Rows) != 0 {
-		t.Errorf("no ui ⇒ no tile, no rows; got tile=%v rows=%d", plan.Tile != nil, len(plan.Rows))
+	if len(plan.Tiles) != 0 || len(plan.Rows) != 0 {
+		t.Errorf("no ui ⇒ no tiles, no rows; got tiles=%d rows=%d", len(plan.Tiles), len(plan.Rows))
 	}
 }
 
@@ -163,5 +167,98 @@ func TestRequestOrigin(t *testing.T) {
 	r.Header.Set("X-Forwarded-Host", "media.example.org, router.internal")
 	if got := requestOrigin(r); got != "https://media.example.org" {
 		t.Errorf("forwarded request: %q", got)
+	}
+}
+
+// An addon with real internal structure declares its own launchpad section and
+// several entry points into its console. This is what makes a curated layout
+// reproducible from the manifest instead of hand-built per instance.
+const richManifest = `{
+  "service": "acquire", "kind": "addon",
+  "ui": {
+    "app": {"title": "acquire", "description": "requests and downloads", "icon": "download"},
+    "console": true,
+    "space": {"key": "acquire", "title": "acquire", "ord": 30},
+    "tiles": [
+      {"key": "requests",  "title": "requests",  "icon": "inbox",    "target": "#/requests",  "ord": 10},
+      {"key": "downloads", "title": "downloads", "target": "#/downloads", "ord": 20},
+      {"key": "settings",  "title": "quality profiles", "target": "settings", "ord": 50},
+      {"key": "", "title": "no key"},
+      {"key": "nameless", "title": ""}
+    ]
+  }
+}`
+
+func TestPlanAddonWithSpaceAndTiles(t *testing.T) {
+	plan, err := planAddon("http://acquire", decodeManifest(t, richManifest), "apps", "https://media.example.org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Space == nil || plan.Space.Key != "acquire" || plan.Space.Title != "acquire" || plan.Space.Order != 30 {
+		t.Fatalf("space = %+v", plan.Space)
+	}
+	// Explicit tiles replace the implicit console one, and the two malformed
+	// entries are dropped.
+	if len(plan.Tiles) != 3 {
+		t.Fatalf("tiles = %d, want 3: %+v", len(plan.Tiles), plan.Tiles)
+	}
+	for _, tl := range plan.Tiles {
+		if tl.SpaceKey != "acquire" {
+			t.Errorf("tile %q must land in the addon's own space, got %q", tl.Key, tl.SpaceKey)
+		}
+		if !ownsTile(tl.Key, "acquire") {
+			t.Errorf("tile %q is not owned by the addon key", tl.Key)
+		}
+		if !tl.Enabled {
+			t.Errorf("tile %q must be enabled", tl.Key)
+		}
+	}
+	if plan.Tiles[0].Key != "addon.acquire.requests" || plan.Tiles[0].Target != "/portal/app/acquire#/requests" {
+		t.Errorf("hash target: %+v", plan.Tiles[0])
+	}
+	if plan.Tiles[0].Icon != "inbox" {
+		t.Errorf("tile icon should be its own: %+v", plan.Tiles[0])
+	}
+	// A tile without its own icon inherits the app's.
+	if plan.Tiles[1].Icon != "download" {
+		t.Errorf("tile icon should fall back to the app icon: %+v", plan.Tiles[1])
+	}
+	// A path target is joined with a slash; a hash target is not.
+	if plan.Tiles[2].Target != "/portal/app/acquire/settings" {
+		t.Errorf("path target: %q", plan.Tiles[2].Target)
+	}
+	// console:true is ignored once explicit tiles exist — no duplicate card.
+	for _, tl := range plan.Tiles {
+		if tl.Key == "addon.acquire" {
+			t.Error("explicit tiles must replace the implicit console tile, not add to it")
+		}
+	}
+}
+
+func TestOwnsTile(t *testing.T) {
+	cases := []struct {
+		tile, addon string
+		want        bool
+	}{
+		{"addon.acquire", "acquire", true},
+		{"addon.acquire.requests", "acquire", true},
+		{"addon.acquire2", "acquire", false},          // the dot matters
+		{"addon.acquire2.requests", "acquire", false}, // …in both directions
+		{"acquire.requests", "acquire", false},        // a hand-made tile is not ours
+		{"chino.open", "acquire", false},
+	}
+	for _, c := range cases {
+		if got := ownsTile(c.tile, c.addon); got != c.want {
+			t.Errorf("ownsTile(%q, %q) = %v, want %v", c.tile, c.addon, got, c.want)
+		}
+	}
+	for tile, want := range map[string]string{
+		"addon.acquire":          "acquire",
+		"addon.acquire.requests": "acquire",
+		"chino.open":             "",
+	} {
+		if got := addonOfTile(tile); got != want {
+			t.Errorf("addonOfTile(%q) = %q, want %q", tile, got, want)
+		}
 	}
 }
