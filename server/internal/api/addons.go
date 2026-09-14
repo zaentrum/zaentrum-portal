@@ -198,7 +198,11 @@ func validTarget(target string) error {
 	if i := strings.IndexAny(path, "?#"); i >= 0 {
 		path = path[:i]
 	}
-	for _, seg := range strings.Split(path, "/") {
+	decoded, err := decodePath(path)
+	if err != nil {
+		return err
+	}
+	for _, seg := range strings.Split(decoded, "/") {
 		if seg == ".." {
 			return errors.New("must not contain '..'")
 		}
@@ -221,7 +225,36 @@ func validSetupPath(p string) error {
 	case hasControl(p) || strings.ContainsAny(p, "\\# "):
 		return errors.New("must not contain spaces, fragments, backslashes or control characters")
 	}
+	path := p
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	decoded, err := decodePath(path)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(decoded, "..") {
+		return errors.New("must not contain '..'")
+	}
 	return nil
+}
+
+// decodePath is the path part of a target or setup path as a browser resolves
+// it. A browser treats "%2e%2e", ".%2e" and "%2E." as "..", so a path that
+// only spells its dots encoded still climbs out of /portal/app/<key> — or out
+// of the app proxy, with the admin's bearer attached. Callers check the
+// decoded form. An encoded '/' or '\' is refused outright: a proxy may turn
+// it back into a separator.
+func decodePath(path string) (string, error) {
+	lower := strings.ToLower(path)
+	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
+		return "", errors.New("must not contain an encoded '/' or '\\'")
+	}
+	decoded, err := url.PathUnescape(path)
+	if err != nil {
+		return "", errors.New("contains an invalid percent-escape")
+	}
+	return decoded, nil
 }
 
 func hasControl(s string) bool {

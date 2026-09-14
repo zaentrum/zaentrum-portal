@@ -162,6 +162,15 @@ func TestPlanAddonRejectsInvalidSetup(t *testing.T) {
 		{"double slash", `{"path":"//other/api/setup"}`, "'//'"},
 		{"double slash inside", `{"path":"/api//setup"}`, "'//'"},
 		{"dot dot", `{"path":"/api/../setup"}`, "'..'"},
+		// Through the proxy with the admin's bearer, a browser resolves these
+		// to /api/portal/debug/logs — out of the addon.
+		{"encoded dot dot", `{"path":"/%2e%2e/%2e%2e/debug/logs"}`, "'..'"},
+		{"half-encoded dot dot", `{"path":"/api/.%2e/setup"}`, "'..'"},
+		{"upper-case encoded dot dot", `{"path":"/api/%2E./setup"}`, "'..'"},
+		{"encoded slash", `{"path":"/api%2fsetup"}`, "encoded '/'"},
+		{"encoded backslash", `{"path":"/api%5Csetup"}`, "encoded '/'"},
+		{"invalid escape", `{"path":"/api/%zz"}`, "percent-escape"},
+		{"target with encoded dots", `{"path":"/s","sections":[` + section(`,"target":"/%2e%2e/%2e%2e/settings"`) + `]}`, "'..'"},
 		{"scheme", `{"path":"https://elsewhere/api/setup"}`, "start with '/'"},
 		{"scheme after the slash", `{"path":"/redirect?to=https://elsewhere"}`, "'//'"},
 		{"fragment", `{"path":"/api/setup#x"}`, "fragments"},
@@ -197,7 +206,17 @@ func TestValidTarget(t *testing.T) {
 			t.Errorf("validTarget(%q) = %v, want ok", ok, err)
 		}
 	}
-	for _, bad := range []string{"https://elsewhere", "//elsewhere", "javascript:alert(1)", "../up", "/a/../../b", "a\\b", "#/x\ny"} {
+	for _, ok := range []string{"/v%2e1/items", "#/%2e%2e/x", "items?back=%2e%2e"} {
+		if err := validTarget(ok); err != nil {
+			t.Errorf("validTarget(%q) = %v, want ok — an encoded dot that is no segment climbs nowhere", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"https://elsewhere", "//elsewhere", "javascript:alert(1)", "../up", "/a/../../b", "a\\b", "#/x\ny",
+		// A browser resolves these exactly like "..".
+		"/%2e%2e/%2e%2e/settings", "/a/.%2e/b", "%2E./x", "/%2E%2E",
+		"/a%2fb", "/a%2Fb", "/a%5cb", "/bad%zz",
+	} {
 		if err := validTarget(bad); err == nil {
 			t.Errorf("validTarget(%q) accepted, want rejected", bad)
 		}
