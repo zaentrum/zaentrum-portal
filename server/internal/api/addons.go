@@ -286,6 +286,28 @@ func installHost(proxyURL string) string {
 	return host
 }
 
+// sameAddress answers whether two install addresses reach the same place:
+// scheme and host compared without case, an explicit default port equal to
+// none, a trailing slash ignored.
+func sameAddress(a, b string) bool {
+	norm := func(s string) string {
+		s = strings.TrimSpace(s)
+		u, err := url.Parse(s)
+		if err != nil || u.Host == "" {
+			return strings.TrimRight(s, "/")
+		}
+		scheme, host, port := strings.ToLower(u.Scheme), strings.ToLower(u.Hostname()), u.Port()
+		if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+			port = ""
+		}
+		if port != "" {
+			host = net.JoinHostPort(host, port)
+		}
+		return scheme + "://" + host + strings.TrimRight(u.Path, "/")
+	}
+	return norm(a) == norm(b)
+}
+
 // planComponents validates the declared components, or synthesises the
 // implicit one: an addon that declares none is exactly its primary workload,
 // the one the admin typed the address of. The implicit component obeys the
@@ -556,11 +578,40 @@ type conflictError struct{ msg string }
 
 func (e *conflictError) Error() string { return e.msg }
 
-// installConflict checks the three things an install must never take:
+// registered is what the registry already holds under a plan's key.
+type registered struct {
+	app   *model.App   // nil when no app has the key
+	addon *model.Addon // nil when the key was never installed as an addon
+}
+
+// adopts answers whether an install takes over an existing app that has no
+// addon record: an addon installed before the addons table that left no tile
+// and no slot row to backfill it by. It is recognisable by what an install
+// wrote — the same proxy address and the addon base URL — so installing it
+// again at that address refreshes it, as it always did. Any other app of that
+// key was registered by hand and stays a conflict.
+func (r registered) adopts(p addonPlan) bool {
+	return r.app != nil && r.addon == nil &&
+		sameAddress(r.app.ProxyURL, p.App.ProxyURL) && r.app.BaseURL == p.App.BaseURL
+}
+
+// movedFrom is the address an installed addon is recorded at when the plan
+// installs it from a different one; "" when nothing moves.
+func (r registered) movedFrom(p addonPlan) string {
+	if r.addon == nil || r.addon.Address == "" || sameAddress(r.addon.Address, p.App.ProxyURL) {
+		return ""
+	}
+	return r.addon.Address
+}
+
+// installConflict checks the four things an install must never take:
 //
 //   - an app of the same key that was not installed as an addon — installing
 //     would silently turn a hand-registered app into an addon and let removal
 //     delete it;
+//   - an installed addon's address, unless the admin confirmed the move — any
+//     address serving a manifest with the same service would otherwise
+//     redirect the addon's proxy, and every bearer it forwards, elsewhere;
 //   - a platform workload — an addon declaring the platform's own Deployment
 //     as its component would make the console, and its removal notice, lie;
 //   - a workload another addon already declared — one Deployment cannot be
@@ -568,10 +619,15 @@ func (e *conflictError) Error() string { return e.msg }
 //
 // platform is the set of platform-owned workload names (empty when the
 // platform cannot see workloads); claims maps workload → owning addon key.
-func installConflict(p addonPlan, appExists, installed bool, platform map[string]bool, claims map[string]string) error {
-	if appExists && !installed {
+func installConflict(p addonPlan, reg registered, replaceAddress bool, platform map[string]bool, claims map[string]string) error {
+	if reg.app != nil && reg.addon == nil && !reg.adopts(p) {
 		return &conflictError{msg: fmt.Sprintf(
 			"an app with key %q is already registered and was not installed as an addon — remove or rename that app first", p.App.Key)}
+	}
+	if from := reg.movedFrom(p); from != "" && !replaceAddress {
+		return &conflictError{msg: fmt.Sprintf(
+			"addon %q is installed from %s — installing it from %s moves it there; check shows the move, and installing must confirm it with replaceAddress",
+			p.App.Key, from, p.App.ProxyURL)}
 	}
 	for _, c := range p.Components {
 		if platform[c.Workload] {
@@ -711,18 +767,21 @@ func platformWorkloads(live map[string]operator.Instance) map[string]bool {
 
 // ─── handlers ────────────────────────────────────────────────────────────────
 
-// installAddon handles POST /api/portal/addons {proxyUrl, space?, publicBase?, dryRun?}.
+// installAddon handles POST /api/portal/addons {proxyUrl, space?, publicBase?, dryRun?, replaceAddress?}.
 //
 // dryRun answers "what would installing this do" — the plan, the live state of
-// each declared workload and any conflict — and writes nothing. A real install
-// writes the app, space, tiles, rows, the addon and its components in one
-// transaction.
+// each declared workload and any conflict — and writes nothing. A move to
+// another address is not refused by a dry run but reported as previousAddress,
+// so the admin sees it before confirming it with replaceAddress. A real
+// install writes the app, space, tiles, rows, the addon and its components in
+// one transaction.
 func (a *API) installAddon(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ProxyURL   string `json:"proxyUrl"`
-		Space      string `json:"space"`
-		PublicBase string `json:"publicBase"`
-		DryRun     bool   `json:"dryRun"`
+		ProxyURL       string `json:"proxyUrl"`
+		Space          string `json:"space"`
+		PublicBase     string `json:"publicBase"`
+		DryRun         bool   `json:"dryRun"`
+		ReplaceAddress bool   `json:"replaceAddress"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.ProxyURL) == "" {
 		http.Error(w, "proxyUrl is required (the addon's in-cluster address, e.g. http://example)", http.StatusBadRequest)
@@ -749,16 +808,16 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	appExists, installed := false, false
-	if _, err := a.addons.GetApp(ctx, plan.App.Key); err == nil {
-		appExists = true
-	} else if !errors.Is(err, store.ErrNotFound) {
+	var reg registered
+	if reg.app, err = a.addons.GetApp(ctx, plan.App.Key); errors.Is(err, store.ErrNotFound) {
+		reg.app = nil
+	} else if err != nil {
 		serverError(w, err)
 		return
 	}
-	if _, err := a.addons.GetAddon(ctx, plan.App.Key); err == nil {
-		installed = true
-	} else if !errors.Is(err, store.ErrNotFound) {
+	if reg.addon, err = a.addons.GetAddon(ctx, plan.App.Key); errors.Is(err, store.ErrNotFound) {
+		reg.addon = nil
+	} else if err != nil {
 		serverError(w, err)
 		return
 	}
@@ -768,7 +827,7 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	live, known := a.liveWorkloads(ctx)
-	if err := installConflict(plan, appExists, installed, platformWorkloads(live), claims); err != nil {
+	if err := installConflict(plan, reg, body.ReplaceAddress || body.DryRun, platformWorkloads(live), claims); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -777,11 +836,13 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request) {
 		"key": plan.App.Key, "app": plan.App, "space": plan.Space,
 		"tiles": len(plan.Tiles), "slots": len(plan.Rows),
 		"commands": len(d.Commands), "checks": len(d.Checks),
-		"version":    plan.Version,
-		"components": componentViews(plan.Components, plan.Topics, live, known),
-		"setup":      plan.Setup,
-		"refresh":    installed,
-		"dryRun":     body.DryRun,
+		"version":         plan.Version,
+		"components":      componentViews(plan.Components, plan.Topics, live, known),
+		"setup":           plan.Setup,
+		"refresh":         reg.addon != nil || reg.adopts(plan),
+		"adopt":           reg.adopts(plan),
+		"previousAddress": reg.movedFrom(plan),
+		"dryRun":          body.DryRun,
 	}
 	if body.DryRun {
 		writeJSON(w, http.StatusOK, out)

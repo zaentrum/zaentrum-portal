@@ -143,7 +143,9 @@ export function AddonsPanel() {
     }
   }
 
-  async function install() {
+  // install writes what check showed. confirmMove is the admin's consent,
+  // given in the check preview, to move an installed addon to this address.
+  async function install(confirmMove = false) {
     const proxyUrl = url.trim();
     if (!proxyUrl) {
       setErr('the addon address is required');
@@ -153,7 +155,7 @@ export function AddonsPanel() {
     setErr(null);
     setMsg(null);
     try {
-      const r = await post(proxyUrl, {});
+      const r = await post(proxyUrl, confirmMove ? { replaceAddress: true } : {});
       setMsg(`${r.refresh ? 'refreshed' : 'installed'} ${r.key}: ${summarise(r)}`);
       setUrl('');
       setPreview(null);
@@ -241,7 +243,7 @@ export function AddonsPanel() {
           <Button variant="default" leading={<Search size={15} />} loading={busy === 'check'} onClick={check}>
             check
           </Button>
-          <Button leading={<Puzzle size={15} />} loading={busy === 'install'} onClick={install}>
+          <Button leading={<Puzzle size={15} />} loading={busy === 'install'} onClick={() => install()}>
             install
           </Button>
           {msg && <span className="set__ok">{msg}</span>}
@@ -364,8 +366,13 @@ export function AddonsPanel() {
               <Button variant="ghost" size="sm" onClick={() => setPreview(null)}>
                 cancel
               </Button>
-              <Button size="sm" loading={busy === 'install'} onClick={install}>
-                {preview.refresh ? 'refresh' : 'install'}
+              <Button
+                size="sm"
+                variant={preview.previousAddress ? 'danger' : undefined}
+                loading={busy === 'install'}
+                onClick={() => install(!!preview.previousAddress)}
+              >
+                {preview.previousAddress ? 'move and refresh' : preview.refresh ? 'refresh' : 'install'}
               </Button>
             </>
           }
@@ -374,8 +381,19 @@ export function AddonsPanel() {
             <Text as="p">
               <b>{preview.app?.title || preview.key}</b>
               {preview.version ? ` ${preview.version}` : ''} —{' '}
-              {preview.refresh ? 'already installed; installing again refreshes it.' : 'not installed yet.'}
+              {preview.adopt
+                ? 'registered at this address before addons were recorded; installing records it as an addon.'
+                : preview.refresh
+                  ? 'already installed; installing again refreshes it.'
+                  : 'not installed yet.'}
             </Text>
+            {preview.previousAddress && (
+              <span className="set__err">
+                installed from <span className="set__mono">{preview.previousAddress}</span>. Installing from{' '}
+                <span className="set__mono">{preview.app?.proxyUrl || url.trim()}</span> moves it: the portal proxy
+                then sends every request for {preview.key}, with the caller&apos;s token, to the new address.
+              </span>
+            )}
             <Text variant="muted" as="p">
               creates: {summarise(preview)}
             </Text>

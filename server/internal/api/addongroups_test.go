@@ -134,6 +134,28 @@ func TestPlanAddonRejectsAnAddressThatNamesNoService(t *testing.T) {
 	}
 }
 
+func TestSameAddress(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		same bool
+	}{
+		{"http://example", "http://example", true},
+		{"http://example", " HTTP://Example/ ", true},
+		{"http://example", "http://example:80", true},
+		{"https://example:443", "https://example", true},
+		{"http://example:8080", "http://example:8080/", true},
+		{"http://example", "http://example:8080", false},
+		{"http://example", "https://example", false},
+		{"http://example", "http://other", false},
+		{"http://example.ns.svc", "http://example", false},
+		{"http://example/base", "http://example", false},
+	} {
+		if got := sameAddress(c.a, c.b); got != c.same {
+			t.Errorf("sameAddress(%q, %q) = %v, want %v", c.a, c.b, got, c.same)
+		}
+	}
+}
+
 func TestPlanAddonRejectsInvalidComponents(t *testing.T) {
 	primary := `{"name":"example","workload":"example","role":"primary"}`
 	many := make([]string, 0, 17)
@@ -263,23 +285,37 @@ func TestInstallConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	installedApp := &model.App{Key: "example", BaseURL: "/portal/app/example", ProxyURL: "http://example"}
+	installedAt := func(addr string) registered {
+		return registered{app: installedApp, addon: &model.Addon{Key: "example", Address: addr}}
+	}
 	cases := []struct {
-		name                 string
-		appExists, installed bool
-		platform             map[string]bool
-		claims               map[string]string
-		want                 string // "" = no conflict
+		name           string
+		reg            registered
+		replaceAddress bool
+		platform       map[string]bool
+		claims         map[string]string
+		want           string // "" = no conflict
 	}{
-		{"fresh install", false, false, nil, nil, ""},
-		{"refresh of an installed addon", true, true, nil, map[string]string{"example": "example", "example-worker": "example"}, ""},
-		{"key taken by a hand-registered app", true, false, nil, nil, "not installed as an addon"},
-		{"workload is a platform deployment", false, false, map[string]bool{"example-worker": true}, nil, "platform deployment"},
-		{"workload claimed by another addon", false, false, nil, map[string]string{"example-worker": "other"}, `addon "other"`},
-		{"unrelated claims do not conflict", false, false, map[string]bool{"portal-api": true}, map[string]string{"other-worker": "other"}, ""},
+		{"fresh install", registered{}, false, nil, nil, ""},
+		{"refresh of an installed addon", installedAt("http://example"), false, nil, map[string]string{"example": "example", "example-worker": "example"}, ""},
+		{"refresh with the address spelled differently", installedAt("HTTP://Example:80/"), false, nil, nil, ""},
+		{"key taken by a hand-registered app", registered{app: &model.App{Key: "example"}}, false, nil, nil, "not installed as an addon"},
+		{"hand-registered app at the same address but another base", registered{app: &model.App{Key: "example", ProxyURL: "http://example", BaseURL: "/tools/example"}}, false, nil, nil, "not installed as an addon"},
+		{"hand-registered app with the addon base at another address", registered{app: &model.App{Key: "example", ProxyURL: "http://other", BaseURL: "/portal/app/example"}}, false, nil, nil, "not installed as an addon"},
+		// Installed before the addons table, with no tile and no slot row to
+		// backfill it by: what the old install wrote, at the same address.
+		{"tile-less addon from before the addons table is adopted", registered{app: installedApp}, false, nil, nil, ""},
+		{"an installed addon moving to another address", installedAt("http://other"), false, nil, nil, "replaceAddress"},
+		{"a confirmed move", installedAt("http://other"), true, nil, nil, ""},
+		{"an addon recorded without an address has nothing to move", installedAt(""), false, nil, nil, ""},
+		{"workload is a platform deployment", registered{}, false, map[string]bool{"example-worker": true}, nil, "platform deployment"},
+		{"workload claimed by another addon", registered{}, false, nil, map[string]string{"example-worker": "other"}, `addon "other"`},
+		{"unrelated claims do not conflict", registered{}, false, map[string]bool{"portal-api": true}, map[string]string{"other-worker": "other"}, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := installConflict(plan, c.appExists, c.installed, c.platform, c.claims)
+			err := installConflict(plan, c.reg, c.replaceAddress, c.platform, c.claims)
 			if c.want == "" {
 				if err != nil {
 					t.Fatalf("want no conflict, got %v", err)
@@ -527,6 +563,13 @@ func TestInstallAddonRefusals(t *testing.T) {
 		}, "", http.StatusOK},
 		{"invalid manifest", func(*fakeAddonStore) {},
 			`{"service":"example","components":[{"name":"x","workload":"x","role":"required"}]}`, http.StatusUnprocessableEntity},
+		{"tile-less addon installed before the addons table is adopted", func(f *fakeAddonStore) {
+			f.apps["example"] = model.App{Key: "example", Title: "example", BaseURL: "/portal/app/example", ProxyURL: addr}
+		}, "", http.StatusOK},
+		{"moving an installed addon to another address", func(f *fakeAddonStore) {
+			f.apps["example"] = model.App{Key: "example", BaseURL: "/portal/app/example", ProxyURL: "http://example"}
+			f.addons["example"] = model.Addon{Key: "example", Address: "http://example"}
+		}, "", http.StatusConflict},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -544,6 +587,74 @@ func TestInstallAddonRefusals(t *testing.T) {
 				t.Fatal("a refused install must write nothing")
 			}
 		})
+	}
+}
+
+// installResult is the part of an install answer these tests read.
+type installResult struct {
+	Refresh         bool            `json:"refresh"`
+	Adopt           bool            `json:"adopt"`
+	PreviousAddress string          `json:"previousAddress"`
+	Components      []componentView `json:"components"`
+}
+
+func decodeInstall(t *testing.T, rec *httptest.ResponseRecorder) installResult {
+	t.Helper()
+	var got installResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("%v: %s", err, rec.Body)
+	}
+	return got
+}
+
+// A move to another address is shown by check and must be confirmed: any
+// address serving a manifest with the same service would otherwise take over
+// the addon's proxy, and the bearers it forwards.
+func TestInstallAddonMoveNeedsConfirmation(t *testing.T) {
+	addr := manifestServer(t, localhostManifest)
+	fake := newFakeStore()
+	fake.apps["example"] = model.App{Key: "example", BaseURL: "/portal/app/example", ProxyURL: "http://example"}
+	fake.addons["example"] = model.Addon{Key: "example", Address: "http://example"}
+	a := &API{addons: fake}
+
+	rec := postInstall(t, a, map[string]any{"proxyUrl": addr, "dryRun": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("check of a move = %d %s — check shows it rather than refusing it", rec.Code, rec.Body)
+	}
+	if got := decodeInstall(t, rec); got.PreviousAddress != "http://example" || !got.Refresh {
+		t.Errorf("check must name the address the addon moves from: %+v", got)
+	}
+
+	rec = postInstall(t, a, map[string]any{"proxyUrl": addr})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "replaceAddress") {
+		t.Fatalf("unconfirmed move = %d %s, want 409 naming replaceAddress", rec.Code, rec.Body)
+	}
+	if len(fake.installs) != 0 {
+		t.Fatal("an unconfirmed move must write nothing")
+	}
+
+	rec = postInstall(t, a, map[string]any{"proxyUrl": addr, "replaceAddress": true})
+	if rec.Code != http.StatusOK || len(fake.installs) != 1 || fake.installs[0].Addon.Address != addr {
+		t.Fatalf("confirmed move = %d %s, installs=%d", rec.Code, rec.Body, len(fake.installs))
+	}
+
+	// Refreshing from the recorded address needs no confirmation.
+	fake.addons["example"] = model.Addon{Key: "example", Address: addr}
+	if rec := postInstall(t, a, map[string]any{"proxyUrl": addr}); rec.Code != http.StatusOK {
+		t.Errorf("refresh from the recorded address = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestInstallAddonAdoptionIsReported(t *testing.T) {
+	addr := manifestServer(t, localhostManifest)
+	fake := newFakeStore()
+	fake.apps["example"] = model.App{Key: "example", BaseURL: "/portal/app/example", ProxyURL: addr + "/"}
+	rec := postInstall(t, &API{addons: fake}, map[string]any{"proxyUrl": addr, "dryRun": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("check = %d %s", rec.Code, rec.Body)
+	}
+	if got := decodeInstall(t, rec); !got.Adopt || !got.Refresh || got.PreviousAddress != "" {
+		t.Errorf("an adopted app must read as adopt and refresh: %+v", got)
 	}
 }
 

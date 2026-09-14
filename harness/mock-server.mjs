@@ -154,9 +154,17 @@ createServer(async (req, res) => {
   if (url.startsWith('/api/portal/addons') && req.method === 'POST') {
     const body = await readBody(req);
     const a = addons[0];
+    // Every address serves example's manifest here, so any other address is a
+    // move: check reports it, install refuses it until it is confirmed.
+    const moved = body.proxyUrl !== a.proxyUrl;
+    if (moved && !body.dryRun && !body.replaceAddress) {
+      res.writeHead(409, { 'Content-Type': 'text/plain' });
+      return res.end(`addon "example" is installed from ${a.proxyUrl} — installing it from ${body.proxyUrl} moves it there; check shows the move, and installing must confirm it with replaceAddress`);
+    }
     return json(res, 200, {
-      key: a.key, app: apps[3], space: null, tiles: a.tiles, slots: a.slots, commands: 2, checks: 1,
-      version: a.version, components: a.components, setup, refresh: body.proxyUrl === a.proxyUrl, dryRun: !!body.dryRun,
+      key: a.key, app: { ...apps[3], proxyUrl: body.proxyUrl }, space: null, tiles: a.tiles, slots: a.slots, commands: 2, checks: 1,
+      version: a.version, components: a.components, setup, refresh: true, adopt: false,
+      previousAddress: moved ? a.proxyUrl : '', dryRun: !!body.dryRun,
     });
   }
   if (url.startsWith('/api/portal/addons/') && req.method === 'DELETE') {

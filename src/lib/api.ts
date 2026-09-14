@@ -197,6 +197,13 @@ export interface InstallResult {
   components: AddonComponent[];
   setup: AddonSetup | null;
   refresh: boolean;
+  // adopt: an app of this key exists at this address without an addon record
+  // (installed before component groups, with no tile or slot row); installing
+  // records it as the addon.
+  adopt?: boolean;
+  // previousAddress: the addon is installed from another address; installing
+  // from this one moves it and must be confirmed with replaceAddress.
+  previousAddress?: string;
   dryRun: boolean;
 }
 export interface RemoveResult {
