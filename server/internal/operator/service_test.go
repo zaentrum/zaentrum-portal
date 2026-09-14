@@ -141,6 +141,11 @@ func TestGroupOf(t *testing.T) {
 		// Ownership wins: if the operator reconciles it, a stale label must not
 		// move it out of the group whose upgrades it actually follows.
 		{"owner ref beats a stale addons label", dep("Zaentrum", "zaentrum-beta-addons"), "platform"},
+		// The addon label alone is enough; an addon deployed without the
+		// kustomization's part-of label still belongs to its addon.
+		{"addon label is an addon", withLabel(dep("", ""), LabelAddon, "example"), "addon"},
+		{"blank addon label is not", withLabel(dep("", ""), LabelAddon, " "), "other"},
+		{"owner ref beats an addon label", withLabel(dep("Zaentrum", ""), LabelAddon, "example"), "platform"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -222,9 +227,9 @@ func TestUnhealthyReason(t *testing.T) {
 // "ready" badge beside "ErrImagePull" on the same row.
 func TestPhaseWithReason(t *testing.T) {
 	cases := []struct {
-		name           string
-		phase, reason  string
-		expect         string
+		name          string
+		phase, reason string
+		expect        string
 	}{
 		{"ready with a broken pod is degraded", "ready", "ImagePullBackOff", "degraded"},
 		{"ready with nothing wrong stays ready", "ready", "", "ready"},
@@ -238,6 +243,39 @@ func TestPhaseWithReason(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := phaseWithReason(c.phase, c.reason); got != c.expect {
 				t.Fatalf("phaseWithReason(%q,%q) = %q, want %q", c.phase, c.reason, got, c.expect)
+			}
+		})
+	}
+}
+
+func withLabel(d k8s.Deployment, k, v string) k8s.Deployment {
+	labels := map[string]string{}
+	for lk, lv := range d.Metadata.Labels {
+		labels[lk] = lv
+	}
+	labels[k] = v
+	d.Metadata.Labels = labels
+	return d
+}
+
+func TestAddonLabels(t *testing.T) {
+	var d k8s.Deployment
+	cases := []struct {
+		name                     string
+		labels                   map[string]string
+		wantAddon, wantComponent string
+	}{
+		{"both labels", map[string]string{LabelAddon: "example", LabelComponent: "worker"}, "example", "worker"},
+		{"addon only", map[string]string{LabelAddon: "example"}, "example", ""},
+		{"component without addon names nothing", map[string]string{LabelComponent: "worker"}, "", ""},
+		{"no labels", nil, "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d.Metadata.Labels = c.labels
+			addon, component := addonLabels(d)
+			if addon != c.wantAddon || component != c.wantComponent {
+				t.Fatalf("addonLabels() = (%q, %q), want (%q, %q)", addon, component, c.wantAddon, c.wantComponent)
 			}
 		})
 	}

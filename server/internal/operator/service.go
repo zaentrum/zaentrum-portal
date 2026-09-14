@@ -72,9 +72,23 @@ type Instance struct {
 	Group string `json:"group"`
 	// Reason is why the workload is not healthy, in the words the cluster
 	// used. Empty when it is fine.
-	Reason string `json:"reason"`
-	AlwaysPull        bool   `json:"alwaysPull"` // image re-pulls on restart
+	Reason     string `json:"reason"`
+	AlwaysPull bool   `json:"alwaysPull"` // image re-pulls on restart
+	// Addon and Component are the grouping labels an addon's deployment
+	// channel stamps (zaentrum.io/addon, zaentrum.io/component). Metadata
+	// only: the console uses them to place a workload under its addon, never
+	// to select anything.
+	Addon     string `json:"addon,omitempty"`
+	Component string `json:"component,omitempty"`
 }
+
+// Grouping labels. They are read, never written, and never used as selectors:
+// selectors are immutable, and a label that could move pods would make adding
+// it to an already-running addon a breaking change.
+const (
+	LabelAddon     = "zaentrum.io/addon"
+	LabelComponent = "zaentrum.io/component"
+)
 
 type Component struct {
 	Name  string `json:"name"`
@@ -116,6 +130,7 @@ func (s *Service) Instances(ctx context.Context) ([]Instance, error) {
 		restarts := sumRestartsForDeployment(pods, d)
 		img, pull := primaryContainer(d)
 		desired := int(deref(d.Spec.Replicas))
+		addon, component := addonLabels(d)
 		out = append(out, Instance{
 			Name:              d.Metadata.Name,
 			Image:             img,
@@ -127,11 +142,13 @@ func (s *Service) Instances(ctx context.Context) ([]Instance, error) {
 			Phase: phaseWithReason(
 				phaseOf(desired, int(d.Status.ReadyReplicas), int(d.Status.UpdatedReplicas)),
 				unhealthyReason(pods, d)),
-			Protected:         s.protected[d.Metadata.Name],
-			OperatorManaged:   ownedByZaentrum(d),
-			Group:             groupOf(d),
-			Reason:            unhealthyReason(pods, d),
-			AlwaysPull:        strings.EqualFold(pull, "Always") || strings.HasSuffix(img, ":latest"),
+			Protected:       s.protected[d.Metadata.Name],
+			OperatorManaged: ownedByZaentrum(d),
+			Group:           groupOf(d),
+			Reason:          unhealthyReason(pods, d),
+			AlwaysPull:      strings.EqualFold(pull, "Always") || strings.HasSuffix(img, ":latest"),
+			Addon:           addon,
+			Component:       component,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -312,17 +329,6 @@ func ownedByZaentrum(d k8s.Deployment) bool {
 	return false
 }
 
-// groupOf classifies a workload.
-//
-// Owner references are the authority for "platform": the operator sets them, so
-// they cannot drift from what it actually reconciles. Addons have no owner ref
-// (nothing owns them — that IS the distinction), so they are identified by the
-// part-of label the addons kustomization stamps on every workload it applies:
-// `app.kubernetes.io/part-of: <namespace>-addons`.
-//
-// The suffix is matched rather than the full value because the prefix is the
-// environment name — beta stamps `zaentrum-beta-addons`, and hardcoding that
-// would silently classify every addon as "other" in any other install.
 // unhealthyReason reports why a deployment's pods are not running, taken from
 // the container state the cluster itself set.
 //
@@ -358,9 +364,34 @@ func unhealthyReason(pods []k8s.Pod, d k8s.Deployment) string {
 	return ""
 }
 
+// addonLabels reads the grouping labels. A component label without an addon
+// label names nothing — a component is only ever a component OF something.
+func addonLabels(d k8s.Deployment) (addon, component string) {
+	addon = strings.TrimSpace(d.Metadata.Labels[LabelAddon])
+	if addon == "" {
+		return "", ""
+	}
+	return addon, strings.TrimSpace(d.Metadata.Labels[LabelComponent])
+}
+
+// groupOf classifies a workload.
+//
+// Owner references are the authority for "platform": the operator sets them, so
+// they cannot drift from what it actually reconciles. Addons have no owner ref
+// (nothing owns them — that IS the distinction), so they are identified by
+// labels their deployment channel stamps: `zaentrum.io/addon: <addon key>`,
+// or the older part-of label the addons kustomization applies,
+// `app.kubernetes.io/part-of: <namespace>-addons`.
+//
+// The part-of suffix is matched rather than the full value because the prefix
+// is the environment name — beta stamps `zaentrum-beta-addons`, and hardcoding
+// that would silently classify every addon as "other" in any other install.
 func groupOf(d k8s.Deployment) string {
 	if ownedByZaentrum(d) {
 		return "platform"
+	}
+	if addon, _ := addonLabels(d); addon != "" {
+		return "addon"
 	}
 	if strings.HasSuffix(d.Metadata.Labels["app.kubernetes.io/part-of"], "-addons") {
 		return "addon"
