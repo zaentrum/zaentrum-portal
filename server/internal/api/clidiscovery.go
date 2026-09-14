@@ -40,9 +40,13 @@ const capabilityVersion = 1
 // deliberately boring; see docs/extending/cli.md in the front-door repo for
 // the published contract.
 type Descriptor struct {
-	Service  string `json:"service"`
-	Kind     string `json:"kind"` // platform | addon
-	Version  string `json:"version,omitempty"`
+	Service string `json:"service"`
+	Kind    string `json:"kind"` // platform | addon
+	Version string `json:"version,omitempty"`
+	// ProxyKey is the app-registry key the portal proxies this service under
+	// (/api/portal/apps/<key>/…), when it is not the service name. The CLI
+	// reads it; an install always keys the app by service.
+	ProxyKey string `json:"proxyKey,omitempty"`
 	Commands []struct {
 		Name    string `json:"name"`
 		Summary string `json:"summary"`
@@ -55,6 +59,10 @@ type Descriptor struct {
 		Path string `json:"path"`
 	} `json:"checks,omitempty"`
 	Topics []string `json:"topics,omitempty"`
+	// Components are the workloads an addon consists of; Setup is where it
+	// reports whether it is configured. Both optional — see addons.go.
+	Components []ManifestComponent `json:"components,omitempty"`
+	Setup      *ManifestSetup      `json:"setup,omitempty"`
 	// UI is what the addon contributes to the portal and product apps; the
 	// platform materialises it into registry rows on install (addons.go).
 	UI *ManifestUI `json:"ui,omitempty"`
@@ -67,6 +75,7 @@ type discoveryCache struct {
 	mu      sync.Mutex
 	fetched time.Time
 	doc     []byte
+	descs   []Descriptor // what doc was built from; settings compares manifests against it
 }
 
 var discCache discoveryCache
@@ -78,17 +87,23 @@ const discoveryTTL = 30 * time.Second
 // and it exposes route metadata of an open-source platform, not data. Every
 // endpoint a descriptor names still authenticates itself.
 func (a *API) cliDiscovery(w http.ResponseWriter, r *http.Request) {
+	doc, _ := a.discover(r.Context())
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(doc)
+}
+
+// discover returns the aggregate document and the descriptors it was built
+// from, out of the cache while it is fresh.
+func (a *API) discover(ctx context.Context) ([]byte, []Descriptor) {
 	discCache.mu.Lock()
 	if time.Since(discCache.fetched) < discoveryTTL && discCache.doc != nil {
-		doc := discCache.doc
+		doc, descs := discCache.doc, discCache.descs
 		discCache.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(doc)
-		return
+		return doc, descs
 	}
 	discCache.mu.Unlock()
 
-	descs := collectDescriptors(r.Context(), a.capabilityCandidates(r.Context()))
+	descs := collectDescriptors(ctx, a.capabilityCandidates(ctx))
 	body, _ := json.Marshal(map[string]any{
 		"capabilityVersion": capabilityVersion,
 		"services":          descs,
@@ -97,10 +112,17 @@ func (a *API) cliDiscovery(w http.ResponseWriter, r *http.Request) {
 	discCache.mu.Lock()
 	discCache.fetched = time.Now()
 	discCache.doc = body
+	discCache.descs = descs
 	discCache.mu.Unlock()
+	return body, descs
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(body)
+// invalidateDiscovery drops the cache: an install or removal changed which
+// services exist, and the next read must see it.
+func invalidateDiscovery() {
+	discCache.mu.Lock()
+	discCache.fetched = time.Time{}
+	discCache.mu.Unlock()
 }
 
 // capabilityCandidates enumerates every base URL that might serve a
@@ -132,7 +154,7 @@ func (a *API) capabilityCandidates(ctx context.Context) []string {
 
 	// Addons: every registered app that carries an in-cluster proxy URL. The
 	// same guard the embed proxy uses validates the shape.
-	if apps, err := a.st.ListApps(ctx); err == nil {
+	if apps, err := a.addons.ListApps(ctx); err == nil {
 		for _, app := range apps {
 			if app.ProxyURL == "" || !app.Enabled {
 				continue

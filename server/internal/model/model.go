@@ -6,6 +6,11 @@
 //	Tile  — a launchpad card opening one action of an app; MANY per app.
 package model
 
+import (
+	"encoding/json"
+	"time"
+)
+
 // App is a registered web app/backend.
 type App struct {
 	Key         string `json:"key"`
@@ -17,7 +22,7 @@ type App struct {
 	Icon        string `json:"icon"`      // lucide name, or "glyph:c" for a brand mark
 	Enabled     bool   `json:"enabled"`
 	// ProxyURL is the in-cluster address the shell proxies to when this app is
-	// embedded (e.g. "http://acquire"). Empty means the app is link-out only —
+	// embedded (e.g. "http://example"). Empty means the app is link-out only —
 	// the portal will not proxy to it.
 	ProxyURL string `json:"proxyUrl"`
 }
@@ -87,7 +92,7 @@ type Extension struct {
 	Key       string `json:"key"`
 	Addon     string `json:"addon"`
 	Slot      string `json:"slot"`
-	Kind      string `json:"kind"`  // link|action
+	Kind      string `json:"kind"` // link|action
 	Label     string `json:"label"`
 	Icon      string `json:"icon"`
 	URL       string `json:"url"`
@@ -95,4 +100,37 @@ type Extension struct {
 	StatusURL string `json:"statusUrl"`
 	Order     int    `json:"ord"`
 	Enabled   bool   `json:"enabled"`
+}
+
+// Addon is the registry's record of an installed addon: where it was installed
+// from, the manifest that install read, and the workloads it consists of.
+// Never any of the addon's configuration — an addon owns its settings; the
+// platform only shows where they are edited.
+type Addon struct {
+	Key     string `json:"key"`
+	Address string `json:"address"` // the in-cluster address the manifest was pulled from
+	Version string `json:"version"`
+	// Manifest is the descriptor as installed, re-encoded canonically so its
+	// hash is comparable with a later fetch. Nil for an addon backfilled from
+	// rows that predate the addons table.
+	Manifest       json.RawMessage  `json:"-"`
+	ManifestSHA256 string           `json:"manifestSha256"`
+	InstalledAt    time.Time        `json:"installedAt"`
+	RefreshedAt    time.Time        `json:"refreshedAt"`
+	Components     []AddonComponent `json:"components"`
+
+	// Read-side joins, not columns of the addons table.
+	Title string `json:"title"`
+	Tiles int    `json:"tiles"`
+	Rows  int    `json:"rows"`
+}
+
+// AddonComponent is one workload an addon declares. Workload is the name of
+// its Deployment and Service; the console matches live state by it.
+type AddonComponent struct {
+	Name     string `json:"name"`
+	Workload string `json:"workload"`
+	Role     string `json:"role"` // primary|required|optional
+	Summary  string `json:"summary"`
+	Order    int    `json:"ord"`
 }

@@ -174,15 +174,15 @@ func TestRequestOrigin(t *testing.T) {
 // several entry points into its console. This is what makes a curated layout
 // reproducible from the manifest instead of hand-built per instance.
 const richManifest = `{
-  "service": "acquire", "kind": "addon",
+  "service": "example", "kind": "addon",
   "ui": {
-    "app": {"title": "acquire", "description": "requests and downloads", "icon": "download"},
+    "app": {"title": "example", "description": "items and queues", "icon": "box"},
     "console": true,
-    "space": {"key": "acquire", "title": "acquire", "ord": 30},
+    "space": {"key": "example", "title": "example", "ord": 30},
     "tiles": [
-      {"key": "requests",  "title": "requests",  "icon": "inbox",    "target": "#/requests",  "ord": 10},
-      {"key": "downloads", "title": "downloads", "target": "#/downloads", "ord": 20},
-      {"key": "settings",  "title": "quality profiles", "target": "settings", "ord": 50},
+      {"key": "items",  "title": "items",  "icon": "inbox",    "target": "#/items",  "ord": 10},
+      {"key": "queue", "title": "queue", "target": "#/queue", "ord": 20},
+      {"key": "settings",  "title": "profiles", "target": "settings", "ord": 50},
       {"key": "", "title": "no key"},
       {"key": "nameless", "title": ""}
     ]
@@ -190,11 +190,11 @@ const richManifest = `{
 }`
 
 func TestPlanAddonWithSpaceAndTiles(t *testing.T) {
-	plan, err := planAddon("http://acquire", decodeManifest(t, richManifest), "apps", "https://media.example.org")
+	plan, err := planAddon("http://example", decodeManifest(t, richManifest), "apps", "https://media.example.org")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Space == nil || plan.Space.Key != "acquire" || plan.Space.Title != "acquire" || plan.Space.Order != 30 {
+	if plan.Space == nil || plan.Space.Key != "example" || plan.Space.Title != "example" || plan.Space.Order != 30 {
 		t.Fatalf("space = %+v", plan.Space)
 	}
 	// Explicit tiles replace the implicit console one, and the two malformed
@@ -203,33 +203,33 @@ func TestPlanAddonWithSpaceAndTiles(t *testing.T) {
 		t.Fatalf("tiles = %d, want 3: %+v", len(plan.Tiles), plan.Tiles)
 	}
 	for _, tl := range plan.Tiles {
-		if tl.SpaceKey != "acquire" {
+		if tl.SpaceKey != "example" {
 			t.Errorf("tile %q must land in the addon's own space, got %q", tl.Key, tl.SpaceKey)
 		}
-		if !ownsTile(tl.Key, "acquire") {
+		if !ownsTile(tl.Key, "example") {
 			t.Errorf("tile %q is not owned by the addon key", tl.Key)
 		}
 		if !tl.Enabled {
 			t.Errorf("tile %q must be enabled", tl.Key)
 		}
 	}
-	if plan.Tiles[0].Key != "addon.acquire.requests" || plan.Tiles[0].Target != "/portal/app/acquire#/requests" {
+	if plan.Tiles[0].Key != "addon.example.items" || plan.Tiles[0].Target != "/portal/app/example#/items" {
 		t.Errorf("hash target: %+v", plan.Tiles[0])
 	}
 	if plan.Tiles[0].Icon != "inbox" {
 		t.Errorf("tile icon should be its own: %+v", plan.Tiles[0])
 	}
 	// A tile without its own icon inherits the app's.
-	if plan.Tiles[1].Icon != "download" {
+	if plan.Tiles[1].Icon != "box" {
 		t.Errorf("tile icon should fall back to the app icon: %+v", plan.Tiles[1])
 	}
 	// A path target is joined with a slash; a hash target is not.
-	if plan.Tiles[2].Target != "/portal/app/acquire/settings" {
+	if plan.Tiles[2].Target != "/portal/app/example/settings" {
 		t.Errorf("path target: %q", plan.Tiles[2].Target)
 	}
 	// console:true is ignored once explicit tiles exist — no duplicate card.
 	for _, tl := range plan.Tiles {
-		if tl.Key == "addon.acquire" {
+		if tl.Key == "addon.example" {
 			t.Error("explicit tiles must replace the implicit console tile, not add to it")
 		}
 	}
@@ -240,25 +240,16 @@ func TestOwnsTile(t *testing.T) {
 		tile, addon string
 		want        bool
 	}{
-		{"addon.acquire", "acquire", true},
-		{"addon.acquire.requests", "acquire", true},
-		{"addon.acquire2", "acquire", false},          // the dot matters
-		{"addon.acquire2.requests", "acquire", false}, // …in both directions
-		{"acquire.requests", "acquire", false},        // a hand-made tile is not ours
-		{"chino.open", "acquire", false},
+		{"addon.example", "example", true},
+		{"addon.example.items", "example", true},
+		{"addon.example2", "example", false},       // the dot matters
+		{"addon.example2.items", "example", false}, // …in both directions
+		{"example.items", "example", false},        // a hand-made tile is not ours
+		{"chino.open", "example", false},
 	}
 	for _, c := range cases {
 		if got := ownsTile(c.tile, c.addon); got != c.want {
 			t.Errorf("ownsTile(%q, %q) = %v, want %v", c.tile, c.addon, got, c.want)
-		}
-	}
-	for tile, want := range map[string]string{
-		"addon.acquire":          "acquire",
-		"addon.acquire.requests": "acquire",
-		"chino.open":             "",
-	} {
-		if got := addonOfTile(tile); got != want {
-			t.Errorf("addonOfTile(%q) = %q, want %q", tile, got, want)
 		}
 	}
 }

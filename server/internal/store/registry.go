@@ -7,12 +7,19 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
 )
 
 // ErrNotFound is returned when a keyed row does not exist.
 var ErrNotFound = errors.New("not found")
+
+// execer is what both the pool and a transaction offer, so an upsert is the
+// same statement whether it runs alone or inside an addon install.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
 // ─── Spaces ──────────────────────────────────────────────────────────────────
 
@@ -47,7 +54,11 @@ func (s *Store) GetSpace(ctx context.Context, key string) (*model.Space, error) 
 }
 
 func (s *Store) UpsertSpace(ctx context.Context, sp model.Space) error {
-	_, err := s.pool.Exec(ctx, `
+	return upsertSpace(ctx, s.pool, sp)
+}
+
+func upsertSpace(ctx context.Context, ex execer, sp model.Space) error {
+	_, err := ex.Exec(ctx, `
 		INSERT INTO spaces (key, title, ord) VALUES ($1,$2,$3)
 		ON CONFLICT (key) DO UPDATE SET title=EXCLUDED.title, ord=EXCLUDED.ord`,
 		sp.Key, sp.Title, sp.Order)
@@ -94,7 +105,11 @@ func (s *Store) GetApp(ctx context.Context, key string) (*model.App, error) {
 }
 
 func (s *Store) UpsertApp(ctx context.Context, a model.App) error {
-	_, err := s.pool.Exec(ctx, `
+	return upsertApp(ctx, s.pool, a)
+}
+
+func upsertApp(ctx context.Context, ex execer, a model.App) error {
+	_, err := ex.Exec(ctx, `
 		INSERT INTO apps (key, title, description, base_url, kind, health_url, icon, enabled, proxy_url)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		ON CONFLICT (key) DO UPDATE SET
@@ -148,7 +163,11 @@ func (s *Store) GetTile(ctx context.Context, key string) (*model.Tile, error) {
 }
 
 func (s *Store) UpsertTile(ctx context.Context, t model.Tile) error {
-	_, err := s.pool.Exec(ctx, `
+	return upsertTile(ctx, s.pool, t)
+}
+
+func upsertTile(ctx context.Context, ex execer, t model.Tile) error {
+	_, err := ex.Exec(ctx, `
 		INSERT INTO tiles (key, app_key, space_key, title, description, icon, target, ord,
 		                   badge, badge_tone, status, external, open_mode, enabled)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
@@ -343,7 +362,11 @@ func (s *Store) ListExtensionsForSlot(ctx context.Context, slot string) ([]model
 }
 
 func (s *Store) UpsertExtension(ctx context.Context, e model.Extension) error {
-	_, err := s.pool.Exec(ctx, `
+	return upsertExtension(ctx, s.pool, e)
+}
+
+func upsertExtension(ctx context.Context, ex execer, e model.Extension) error {
+	_, err := ex.Exec(ctx, `
 		INSERT INTO ui_extensions (key, addon, slot, kind, label, icon, url, method, status_url, ord, enabled)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		ON CONFLICT (key) DO UPDATE SET

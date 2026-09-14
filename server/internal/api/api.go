@@ -25,15 +25,29 @@ import (
 )
 
 type API struct {
-	st  *store.Store
-	cfg config.Config
-	op  *operator.Service
-	tap *eventtap.Tap
-	br  *dbbrowse.Browser
+	st     *store.Store
+	addons addonStore
+	cfg    config.Config
+	op     *operator.Service
+	tap    *eventtap.Tap
+	br     *dbbrowse.Browser
+}
+
+// addonStore is the part of the registry the addon endpoints and capability
+// discovery use. *store.Store implements it; tests substitute an in-memory one.
+type addonStore interface {
+	ListApps(ctx context.Context) ([]model.App, error)
+	GetApp(ctx context.Context, key string) (*model.App, error)
+	ListSpaces(ctx context.Context) ([]model.Space, error)
+	ListAddons(ctx context.Context) ([]model.Addon, error)
+	GetAddon(ctx context.Context, key string) (*model.Addon, error)
+	WorkloadClaims(ctx context.Context) (map[string]string, error)
+	InstallAddon(ctx context.Context, in store.AddonInstall) error
+	RemoveAddon(ctx context.Context, key, declaredSpace string) (store.AddonRemoval, error)
 }
 
 func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap, br *dbbrowse.Browser) *API {
-	return &API{st: st, cfg: cfg, op: op, tap: tap, br: br}
+	return &API{st: st, addons: st, cfg: cfg, op: op, tap: tap, br: br}
 }
 
 // Register mounts the registry routes under /api/portal. Authn is applied here
@@ -77,7 +91,7 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 				ar.Use(mw.RequireAdmin)
 
 				// Addon installation: pull the addon's manifest and materialise
-				// its app, tile and slot rows — see addons.go.
+				// its app, tiles, slot rows and component group — see addons.go.
 				ar.Get("/addons", a.listAddons)
 				ar.Post("/addons", a.installAddon)
 				ar.Delete("/addons/{key}", a.removeAddon)

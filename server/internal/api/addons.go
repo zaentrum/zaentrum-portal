@@ -2,16 +2,24 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
+	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
+	"github.com/zaentrum/zaentrum-portal/server/internal/store"
 )
 
 // Addon installation is PULL, not push.
@@ -26,29 +34,22 @@ import (
 // This is the socket/plug principle applied to installation: the platform
 // pulls the plug in. The runtime self-registration API stays for addons that
 // change their contributions dynamically; it is no longer the install path.
+//
+// An addon is a group of workloads: one primary component that serves the
+// manifest, plus the components it declares. The platform records which
+// workloads belong to which addon and shows their live state and the addon's
+// setup state. It never stores the addon's configuration and never deploys
+// anything — the installer's deployment channel runs the workloads.
 
-// addonTilePrefix marks tiles the platform created for an addon, so "installed
-// addons" is derivable without a schema change: an addon owns the tile keyed
-// addon.<key> and every tile keyed addon.<key>.<something>.
+// addonTilePrefix marks tiles the platform created for an addon: an addon owns
+// the tile keyed addon.<key> and every tile keyed addon.<key>.<something>.
 const addonTilePrefix = "addon."
 
 // ownsTile answers whether a tile key belongs to an addon. The dot matters:
-// "acquire" must not claim "addon.acquire2".
+// "example" must not claim "addon.example2".
 func ownsTile(tileKey, addonKey string) bool {
 	base := addonTilePrefix + addonKey
 	return tileKey == base || strings.HasPrefix(tileKey, base+".")
-}
-
-// addonOfTile is the inverse, for listing what is installed.
-func addonOfTile(tileKey string) string {
-	if !strings.HasPrefix(tileKey, addonTilePrefix) {
-		return ""
-	}
-	rest := strings.TrimPrefix(tileKey, addonTilePrefix)
-	if i := strings.IndexByte(rest, '.'); i >= 0 {
-		return rest[:i]
-	}
-	return rest
 }
 
 // ManifestUI is the optional `ui` section of a capability descriptor: what the
@@ -80,7 +81,7 @@ type ManifestUI struct {
 		Title       string `json:"title"`
 		Description string `json:"description"`
 		Icon        string `json:"icon"`
-		Target      string `json:"target"` // e.g. "#/requests"; relative to the addon's console
+		Target      string `json:"target"` // e.g. "#/items"; relative to the addon's console
 		Ord         int    `json:"ord"`
 	} `json:"tiles,omitempty"`
 	Slots []struct {
@@ -95,16 +96,270 @@ type ManifestUI struct {
 	} `json:"slots"`
 }
 
+// ManifestComponent is one entry of a descriptor's optional `components`: a
+// workload the addon consists of. Workload is the Deployment and Service name
+// in the addon's namespace — the one fact the console matches live state by.
+type ManifestComponent struct {
+	Name     string   `json:"name"`
+	Workload string   `json:"workload"`
+	Role     string   `json:"role"` // primary | required | optional
+	Summary  string   `json:"summary,omitempty"`
+	Topics   []string `json:"topics,omitempty"` // topics this component emits
+}
+
+// ManifestSetup is a descriptor's optional `setup`: the addon's own endpoint
+// that reports whether it is configured, and the sections that report covers.
+// The platform renders the answer and links to where each section is edited;
+// it never sees a configuration value.
+type ManifestSetup struct {
+	Path     string                 `json:"path"` // service-relative GET, reached through the app proxy
+	Sections []ManifestSetupSection `json:"sections,omitempty"`
+}
+
+// ManifestSetupSection is one checklist entry.
+type ManifestSetupSection struct {
+	Key         string `json:"key"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required"`
+	Target      string `json:"target,omitempty"` // where it is configured, inside the addon's console
+	Ord         int    `json:"ord"`
+}
+
+// Manifest limits. Generous for a real addon, small enough that a descriptor
+// cannot turn a settings page into something unrenderable.
+const (
+	maxComponents       = 16
+	maxSetupSections    = 16
+	maxComponentSummary = 120
+	maxSectionTitle     = 60
+)
+
+// Component roles.
+const (
+	rolePrimary  = "primary"
+	roleRequired = "required"
+	roleOptional = "optional"
+)
+
 // addonPlan is what installing a manifest produces. Pure data, so the
 // transformation is testable without a database.
 type addonPlan struct {
-	App   model.App
-	Space *model.Space // nil unless the addon asks for its own launchpad section
-	Tiles []model.Tile // empty when the addon contributes no launchpad entry
-	Rows  []model.Extension
+	App        model.App
+	Space      *model.Space // nil unless the addon asks for its own launchpad section
+	Tiles      []model.Tile // empty when the addon contributes no launchpad entry
+	Rows       []model.Extension
+	Components []model.AddonComponent // never empty: an addon has at least its primary
+	Topics     map[string][]string    // component name → topics it declares
+	Setup      *ManifestSetup         // normalised; nil when the addon reports no setup
+	Version    string
+	Manifest   []byte // the descriptor, canonically encoded
+	SHA256     string // of Manifest
 }
 
-var errNoService = errors.New("descriptor does not name a service")
+// manifestError is a descriptor the platform refuses: the addon answered, but
+// what it declared breaks the contract. The admin sees exactly which field.
+type manifestError struct{ msg string }
+
+func (e *manifestError) Error() string { return "the addon's manifest is invalid: " + e.msg }
+
+func invalid(format string, args ...any) error {
+	return &manifestError{msg: fmt.Sprintf(format, args...)}
+}
+
+var errNoService error = &manifestError{msg: "descriptor does not name a service"}
+
+// dnsLabel is an RFC 1123 label: what a Deployment or Service name may be
+// when it must also be a single DNS label (no dots).
+var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+func isDNSLabel(s string) bool { return len(s) <= 63 && dnsLabel.MatchString(s) }
+
+// schemePrefix matches "javascript:", "https:" and the like at the start of a
+// target — anything that would leave the addon's console.
+var schemePrefix = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
+
+// validTarget is the rule for anything that opens a place INSIDE an addon's
+// console — tile targets and setup section targets alike: a hash route, a
+// query, or a relative path. Never a scheme, never another host, never a
+// path that climbs out of /portal/app/<key>.
+func validTarget(target string) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil
+	}
+	if hasControl(target) || strings.ContainsRune(target, '\\') {
+		return errors.New("contains control characters or backslashes")
+	}
+	if strings.HasPrefix(target, "//") || strings.Contains(target, "://") || schemePrefix.MatchString(target) {
+		return errors.New("must stay inside the addon's console (no scheme, no host)")
+	}
+	path := target
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+	for _, seg := range strings.Split(path, "/") {
+		if seg == ".." {
+			return errors.New("must not contain '..'")
+		}
+	}
+	return nil
+}
+
+// validSetupPath is the rule for setup.path: a relative GET path on the addon
+// itself, which the browser reaches through the portal's app proxy.
+func validSetupPath(p string) error {
+	switch {
+	case !strings.HasPrefix(p, "/"):
+		return errors.New("must start with '/'")
+	case strings.Contains(p, "//"):
+		return errors.New("must not contain '//'")
+	case strings.Contains(p, ".."):
+		return errors.New("must not contain '..'")
+	case strings.Contains(p, "://") || schemePrefix.MatchString(p):
+		return errors.New("must not carry a scheme")
+	case hasControl(p) || strings.ContainsAny(p, "\\# "):
+		return errors.New("must not contain spaces, fragments, backslashes or control characters")
+	}
+	return nil
+}
+
+func hasControl(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// installHost is the workload an install address names: the first DNS label
+// of its host, which is the Service name whether the admin typed
+// http://example, http://example:8080 or http://example.ns.svc.cluster.local.
+func installHost(proxyURL string) string {
+	u, err := url.Parse(strings.TrimSpace(proxyURL))
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if i := strings.IndexByte(host, '.'); i >= 0 {
+		host = host[:i]
+	}
+	return host
+}
+
+// planComponents validates the declared components, or synthesises the
+// implicit one: an addon that declares none is exactly its primary workload,
+// the one the admin typed the address of.
+func planComponents(d Descriptor, service, host string) ([]model.AddonComponent, map[string][]string, error) {
+	if len(d.Components) == 0 {
+		return []model.AddonComponent{{Name: service, Workload: host, Role: rolePrimary}}, nil, nil
+	}
+	if len(d.Components) > maxComponents {
+		return nil, nil, invalid("components: at most %d, got %d", maxComponents, len(d.Components))
+	}
+	var (
+		out       []model.AddonComponent
+		names     = map[string]bool{}
+		workloads = map[string]bool{}
+		primaries []string
+	)
+	for i, c := range d.Components {
+		name, workload, role := strings.TrimSpace(c.Name), strings.TrimSpace(c.Workload), strings.TrimSpace(c.Role)
+		switch {
+		case !isDNSLabel(name):
+			return nil, nil, invalid("components[%d].name %q must be a DNS-1123 label", i, c.Name)
+		case names[name]:
+			return nil, nil, invalid("components[%d].name %q is declared twice", i, name)
+		case !isDNSLabel(workload):
+			return nil, nil, invalid("components[%d].workload %q must be a DNS-1123 label (a Deployment and Service name, no dots)", i, c.Workload)
+		case workloads[workload]:
+			return nil, nil, invalid("components[%d].workload %q is declared twice", i, workload)
+		case role != rolePrimary && role != roleRequired && role != roleOptional:
+			return nil, nil, invalid("components[%d].role %q must be primary, required or optional", i, c.Role)
+		case utf8.RuneCountInString(c.Summary) > maxComponentSummary:
+			return nil, nil, invalid("components[%d].summary is longer than %d characters", i, maxComponentSummary)
+		}
+		names[name], workloads[workload] = true, true
+		if role == rolePrimary {
+			primaries = append(primaries, workload)
+		}
+		out = append(out, model.AddonComponent{
+			Name: name, Workload: workload, Role: role, Summary: strings.TrimSpace(c.Summary), Order: i,
+		})
+	}
+	if len(primaries) != 1 {
+		return nil, nil, invalid("components: exactly one primary is required, got %d", len(primaries))
+	}
+	// The primary is the workload that served this manifest. Anything else
+	// would let an addon claim to be something the admin did not point at.
+	if primaries[0] != host {
+		return nil, nil, invalid("components: the primary workload %q is not the install address host %q", primaries[0], host)
+	}
+	return out, componentTopics(d), nil
+}
+
+// componentTopics maps component name → the topics it declares. Topics are
+// not stored in rows; they are read back from the manifest.
+func componentTopics(d Descriptor) map[string][]string {
+	out := map[string][]string{}
+	for _, c := range d.Components {
+		for _, t := range c.Topics {
+			if t = strings.TrimSpace(t); t != "" {
+				name := strings.TrimSpace(c.Name)
+				out[name] = append(out[name], t)
+			}
+		}
+	}
+	return out
+}
+
+// normaliseSetup validates setup and returns it with defaults applied and
+// sections in display order. Nil in, nil out.
+func normaliseSetup(s *ManifestSetup) (*ManifestSetup, error) {
+	if s == nil {
+		return nil, nil
+	}
+	out := &ManifestSetup{Path: strings.TrimSpace(s.Path)}
+	if err := validSetupPath(out.Path); err != nil {
+		return nil, invalid("setup.path %q %v", s.Path, err)
+	}
+	if len(s.Sections) > maxSetupSections {
+		return nil, invalid("setup.sections: at most %d, got %d", maxSetupSections, len(s.Sections))
+	}
+	keys := map[string]bool{}
+	for i, sec := range s.Sections {
+		sec.Key, sec.Title, sec.Target = strings.TrimSpace(sec.Key), strings.TrimSpace(sec.Title), strings.TrimSpace(sec.Target)
+		sec.Description = strings.TrimSpace(sec.Description)
+		switch {
+		case !isDNSLabel(sec.Key):
+			return nil, invalid("setup.sections[%d].key %q must be a DNS-1123 label", i, sec.Key)
+		case keys[sec.Key]:
+			return nil, invalid("setup.sections[%d].key %q is declared twice", i, sec.Key)
+		case utf8.RuneCountInString(sec.Title) > maxSectionTitle:
+			return nil, invalid("setup.sections[%d].title is longer than %d characters", i, maxSectionTitle)
+		}
+		if err := validTarget(sec.Target); err != nil {
+			return nil, invalid("setup.sections[%d].target %q %v", i, sec.Target, err)
+		}
+		keys[sec.Key] = true
+		if sec.Title == "" {
+			sec.Title = sec.Key
+		}
+		out.Sections = append(out.Sections, sec)
+	}
+	sort.SliceStable(out.Sections, func(i, j int) bool { return out.Sections[i].Ord < out.Sections[j].Ord })
+	return out, nil
+}
+
+// canonicalManifest encodes a descriptor the same way wherever it was decoded,
+// so the hash of what was installed is comparable with the hash of what the
+// addon serves now.
+func canonicalManifest(d Descriptor) ([]byte, string) {
+	b, _ := json.Marshal(d)
+	sum := sha256.Sum256(b)
+	return b, hex.EncodeToString(sum[:])
+}
 
 // planAddon turns a fetched descriptor into registry rows. Ownership is by
 // construction: the app key IS the addon key, the tile is addon.<key>, every
@@ -120,6 +375,14 @@ func planAddon(proxyURL string, d Descriptor, spaceKey, origin string) (addonPla
 	key := strings.TrimSpace(d.Service)
 	if key == "" {
 		return addonPlan{}, errNoService
+	}
+	components, topics, err := planComponents(d, key, installHost(proxyURL))
+	if err != nil {
+		return addonPlan{}, err
+	}
+	setup, err := normaliseSetup(d.Setup)
+	if err != nil {
+		return addonPlan{}, err
 	}
 	ui := d.UI
 	title, desc, icon := key, "", "puzzle"
@@ -137,10 +400,15 @@ func planAddon(proxyURL string, d Descriptor, spaceKey, origin string) (addonPla
 	if desc == "" {
 		desc = "addon"
 	}
-	plan := addonPlan{App: model.App{
-		Key: key, Title: title, Description: desc, Kind: "tool", Icon: icon, Enabled: true,
-		BaseURL: "/portal/app/" + key, ProxyURL: proxyURL,
-	}}
+	manifest, sum := canonicalManifest(d)
+	plan := addonPlan{
+		App: model.App{
+			Key: key, Title: title, Description: desc, Kind: "tool", Icon: icon, Enabled: true,
+			BaseURL: "/portal/app/" + key, ProxyURL: proxyURL,
+		},
+		Components: components, Topics: topics, Setup: setup,
+		Version: d.Version, Manifest: manifest, SHA256: sum,
+	}
 	// An addon's own space, when it asks for one: a section of the launchpad
 	// that belongs to it and goes away with it.
 	if ui != nil && ui.Space != nil && strings.TrimSpace(ui.Space.Key) != "" {
@@ -162,10 +430,13 @@ func planAddon(proxyURL string, d Descriptor, spaceKey, origin string) (addonPla
 	switch {
 	case ui != nil && len(ui.Tiles) > 0:
 		// Explicit tiles: each opens a path inside the addon's own console.
-		for _, t := range ui.Tiles {
+		for i, t := range ui.Tiles {
 			local := strings.TrimSpace(t.Key)
 			if local == "" || t.Title == "" {
 				continue // a tile with no identity or nothing to say
+			}
+			if err := validTarget(t.Target); err != nil {
+				return addonPlan{}, invalid("ui.tiles[%d].target %q %v", i, t.Target, err)
 			}
 			ic := t.Icon
 			if ic == "" {
@@ -204,15 +475,63 @@ func planAddon(proxyURL string, d Descriptor, spaceKey, origin string) (addonPla
 	return plan, nil
 }
 
+// install is the plan as the store writes it.
+func (p addonPlan) install() store.AddonInstall {
+	return store.AddonInstall{
+		App: p.App, Space: p.Space, Tiles: p.Tiles, Rows: p.Rows,
+		Addon: model.Addon{
+			Key: p.App.Key, Address: p.App.ProxyURL, Version: p.Version,
+			Manifest: p.Manifest, ManifestSHA256: p.SHA256,
+		},
+		Components: p.Components,
+	}
+}
+
 // trimLeadingSlash joins a tile target to the addon's console base without
 // doubling the separator. A target is a path or hash INSIDE the console
-// ("#/requests", "/requests"), never somewhere else.
+// ("#/items", "/items"), never somewhere else.
 func trimLeadingSlash(target string) string {
 	target = strings.TrimSpace(target)
 	if target == "" || strings.HasPrefix(target, "#") || strings.HasPrefix(target, "?") {
 		return target
 	}
 	return "/" + strings.TrimLeft(target, "/")
+}
+
+// conflictError is an install the registry refuses although the manifest is
+// valid: something by that name already exists and is not the addon's.
+type conflictError struct{ msg string }
+
+func (e *conflictError) Error() string { return e.msg }
+
+// installConflict checks the three things an install must never take:
+//
+//   - an app of the same key that was not installed as an addon — installing
+//     would silently turn a hand-registered app into an addon and let removal
+//     delete it;
+//   - a platform workload — an addon declaring the platform's own Deployment
+//     as its component would make the console, and its removal notice, lie;
+//   - a workload another addon already declared — one Deployment cannot be
+//     two addons' component.
+//
+// platform is the set of platform-owned workload names (empty when the
+// platform cannot see workloads); claims maps workload → owning addon key.
+func installConflict(p addonPlan, appExists, installed bool, platform map[string]bool, claims map[string]string) error {
+	if appExists && !installed {
+		return &conflictError{msg: fmt.Sprintf(
+			"an app with key %q is already registered and was not installed as an addon — remove or rename that app first", p.App.Key)}
+	}
+	for _, c := range p.Components {
+		if platform[c.Workload] {
+			return &conflictError{msg: fmt.Sprintf(
+				"component %q names workload %q, which is a platform deployment", c.Name, c.Workload)}
+		}
+		if owner, ok := claims[c.Workload]; ok && owner != p.App.Key {
+			return &conflictError{msg: fmt.Sprintf(
+				"component %q names workload %q, which addon %q already declares", c.Name, c.Workload, owner)}
+		}
+	}
+	return nil
 }
 
 // fetchManifest reads an addon's descriptor from its in-cluster address. The
@@ -267,194 +586,311 @@ func requestOrigin(r *http.Request) string {
 	return scheme + "://" + host
 }
 
-// installAddon handles POST /api/portal/addons {proxyUrl, space?, publicBase?}.
+// ─── live state ──────────────────────────────────────────────────────────────
+
+// componentView is one declared component with the live state of its workload.
+// The state fields are null when the workload is not deployed; phase is
+// "unknown" (the rest null) when the platform cannot see workloads at all —
+// "not deployed" and "cannot tell" are different facts.
+type componentView struct {
+	Name     string   `json:"name"`
+	Workload string   `json:"workload"`
+	Role     string   `json:"role"`
+	Summary  string   `json:"summary"`
+	Topics   []string `json:"topics,omitempty"`
+	Phase    *string  `json:"phase"`
+	Ready    *int     `json:"ready"`
+	Desired  *int     `json:"desired"`
+	Restarts *int     `json:"restarts"`
+	Reason   *string  `json:"reason"`
+}
+
+const phaseUnknown = "unknown"
+
+// componentViews matches components to live workloads by name: workload ==
+// operator Instance name. known is false when the operator service is
+// unavailable.
+func componentViews(cs []model.AddonComponent, topics map[string][]string, live map[string]operator.Instance, known bool) []componentView {
+	out := make([]componentView, 0, len(cs))
+	for _, c := range cs {
+		v := componentView{Name: c.Name, Workload: c.Workload, Role: c.Role, Summary: c.Summary, Topics: topics[c.Name]}
+		switch in, ok := live[c.Workload]; {
+		case !known:
+			v.Phase = ptr(phaseUnknown)
+		case ok:
+			v.Phase, v.Reason = ptr(in.Phase), ptr(in.Reason)
+			v.Ready, v.Desired, v.Restarts = ptr(in.ReadyReplicas), ptr(in.DesiredReplicas), ptr(in.Restarts)
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// liveWorkloads reads the namespace's workloads once for a request. known is
+// false when the platform cannot see them (not in a cluster, or the apiserver
+// refused).
+func (a *API) liveWorkloads(ctx context.Context) (live map[string]operator.Instance, known bool) {
+	if a.op == nil || !a.op.Available() {
+		return nil, false
+	}
+	instances, err := a.op.Instances(ctx)
+	if err != nil {
+		return nil, false
+	}
+	live = make(map[string]operator.Instance, len(instances))
+	for _, in := range instances {
+		live[in.Name] = in
+	}
+	return live, true
+}
+
+// platformWorkloads is the set of workload names the platform itself owns.
+func platformWorkloads(live map[string]operator.Instance) map[string]bool {
+	out := map[string]bool{}
+	for name, in := range live {
+		if in.Group == "platform" {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// ─── handlers ────────────────────────────────────────────────────────────────
+
+// installAddon handles POST /api/portal/addons {proxyUrl, space?, publicBase?, dryRun?}.
+//
+// dryRun answers "what would installing this do" — the plan, the live state of
+// each declared workload and any conflict — and writes nothing. A real install
+// writes the app, space, tiles, rows, the addon and its components in one
+// transaction.
 func (a *API) installAddon(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ProxyURL   string `json:"proxyUrl"`
 		Space      string `json:"space"`
 		PublicBase string `json:"publicBase"`
+		DryRun     bool   `json:"dryRun"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.ProxyURL) == "" {
-		http.Error(w, "proxyUrl is required (the addon's in-cluster address, e.g. http://sample-addon)", http.StatusBadRequest)
+		http.Error(w, "proxyUrl is required (the addon's in-cluster address, e.g. http://example)", http.StatusBadRequest)
 		return
 	}
-	d, err := fetchManifest(r.Context(), strings.TrimSpace(body.ProxyURL))
+	ctx := r.Context()
+	proxyURL := strings.TrimSpace(body.ProxyURL)
+	d, err := fetchManifest(ctx, proxyURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	space := body.Space
 	if space == "" {
-		space = a.defaultSpace(r.Context())
+		space = a.defaultSpace(ctx)
 	}
 	origin := strings.TrimSpace(body.PublicBase)
 	if origin == "" {
 		origin = requestOrigin(r)
 	}
-	plan, err := planAddon(strings.TrimSpace(body.ProxyURL), d, space, origin)
+	plan, err := planAddon(proxyURL, d, space, origin)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
-	if err := a.st.UpsertApp(r.Context(), plan.App); err != nil {
-		http.Error(w, "app: "+err.Error(), http.StatusInternalServerError)
+
+	appExists, installed := false, false
+	if _, err := a.addons.GetApp(ctx, plan.App.Key); err == nil {
+		appExists = true
+	} else if !errors.Is(err, store.ErrNotFound) {
+		serverError(w, err)
 		return
 	}
-	if plan.Space != nil {
-		if err := a.st.UpsertSpace(r.Context(), *plan.Space); err != nil {
-			http.Error(w, "space: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if _, err := a.addons.GetAddon(ctx, plan.App.Key); err == nil {
+		installed = true
+	} else if !errors.Is(err, store.ErrNotFound) {
+		serverError(w, err)
+		return
 	}
-	// Replace, don't merge — for tiles as much as rows: a refresh after the
-	// addon dropped a tile must remove it, not leave a dead card behind.
-	existing, err := a.st.ListTiles(r.Context())
+	claims, err := a.addons.WorkloadClaims(ctx)
 	if err != nil {
-		http.Error(w, "tiles: "+err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
-	keep := map[string]bool{}
-	for _, t := range plan.Tiles {
-		keep[t.Key] = true
-	}
-	for _, t := range existing {
-		if ownsTile(t.Key, plan.App.Key) && !keep[t.Key] {
-			if err := a.st.DeleteTile(r.Context(), t.Key); err != nil {
-				http.Error(w, "tile "+t.Key+": "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-	}
-	for _, t := range plan.Tiles {
-		if err := a.st.UpsertTile(r.Context(), t); err != nil {
-			http.Error(w, "tile "+t.Key+": "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-	// Same rule for slot rows: an uninstall-and-reinstall must not resurrect a
-	// button the addon dropped.
-	if err := a.st.DeleteExtensionsByAddon(r.Context(), plan.App.Key); err != nil {
-		http.Error(w, "rows: "+err.Error(), http.StatusInternalServerError)
+	live, known := a.liveWorkloads(ctx)
+	if err := installConflict(plan, appExists, installed, platformWorkloads(live), claims); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	for _, row := range plan.Rows {
-		if err := a.st.UpsertExtension(r.Context(), row); err != nil {
-			http.Error(w, "row "+row.Key+": "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-	discCache.mu.Lock()
-	discCache.fetched = time.Time{} // the CLI surface changed; drop the cache
-	discCache.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{
+
+	out := map[string]any{
 		"key": plan.App.Key, "app": plan.App, "space": plan.Space,
 		"tiles": len(plan.Tiles), "slots": len(plan.Rows),
 		"commands": len(d.Commands), "checks": len(d.Checks),
-	})
-}
-
-// listAddons handles GET /api/portal/addons: apps that own an addon tile.
-func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
-	tiles, err := a.st.ListTiles(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		"version":    plan.Version,
+		"components": componentViews(plan.Components, plan.Topics, live, known),
+		"setup":      plan.Setup,
+		"refresh":    installed,
+		"dryRun":     body.DryRun,
+	}
+	if body.DryRun {
+		writeJSON(w, http.StatusOK, out)
 		return
 	}
-	apps, _ := a.st.ListApps(r.Context())
-	exts, _ := a.st.ListExtensions(r.Context())
-	byKey := map[string]model.App{}
-	for _, ap := range apps {
-		byKey[ap.Key] = ap
-	}
-	rows := map[string]int{}
-	for _, e := range exts {
-		rows[e.Addon]++
-	}
-	type installed struct {
-		Key      string `json:"key"`
-		Title    string `json:"title"`
-		ProxyURL string `json:"proxyUrl"`
-		Tiles    int    `json:"tiles"`
-		Slots    int    `json:"slots"`
-	}
-	tileCount := map[string]int{}
-	var order []string
-	for _, t := range tiles {
-		key := addonOfTile(t.Key)
-		if key == "" {
-			continue
+	if err := a.addons.InstallAddon(ctx, plan.install()); err != nil {
+		if errors.Is(err, store.ErrWorkloadClaimed) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
 		}
-		if tileCount[key] == 0 {
-			order = append(order, key)
-		}
-		tileCount[key]++
+		serverError(w, err)
+		return
 	}
-	out := []installed{}
-	seen := map[string]bool{}
-	for _, key := range order {
-		seen[key] = true
-		ap := byKey[key]
-		out = append(out, installed{Key: key, Title: ap.Title, ProxyURL: ap.ProxyURL, Tiles: tileCount[key], Slots: rows[key]})
+	invalidateDiscovery() // the CLI surface changed
+	writeJSON(w, http.StatusOK, out)
+}
+
+// installedAddon is one row of settings → addons.
+type installedAddon struct {
+	Key         string          `json:"key"`
+	Title       string          `json:"title"`
+	ProxyURL    string          `json:"proxyUrl"`
+	Version     string          `json:"version"`
+	InstalledAt time.Time       `json:"installedAt"`
+	RefreshedAt time.Time       `json:"refreshedAt"`
+	Tiles       int             `json:"tiles"`
+	Slots       int             `json:"slots"`
+	Components  []componentView `json:"components"`
+	Setup       *ManifestSetup  `json:"setup"`
+	// RefreshAvailable: the addon now serves a different manifest than the
+	// one installed — it was redeployed and its contributions may have moved.
+	RefreshAvailable bool `json:"refreshAvailable"`
+}
+
+// listAddons handles GET /api/portal/addons: what the addons table records,
+// with each component's live state and whether a refresh would change
+// anything.
+func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	addons, err := a.addons.ListAddons(ctx)
+	if err != nil {
+		serverError(w, err)
+		return
 	}
-	// Addons without a console have no tile; find them by owned rows.
-	for addon, n := range rows {
-		if !seen[addon] && addon != "" {
-			if ap, ok := byKey[addon]; ok {
-				out = append(out, installed{Key: addon, Title: ap.Title, ProxyURL: ap.ProxyURL, Slots: n})
-			}
+	live, known := a.liveWorkloads(ctx)
+	served := map[string]string{} // service → sha256 of the manifest it serves now
+	if len(addons) > 0 {
+		_, descs := a.discover(ctx)
+		for _, d := range descs {
+			_, sum := canonicalManifest(d)
+			served[d.Service] = sum
 		}
+	}
+	out := make([]installedAddon, 0, len(addons))
+	for _, ad := range addons {
+		row := installedAddon{
+			Key: ad.Key, Title: ad.Title, ProxyURL: ad.Address, Version: ad.Version,
+			InstalledAt: ad.InstalledAt, RefreshedAt: ad.RefreshedAt,
+			Tiles: ad.Tiles, Slots: ad.Rows,
+		}
+		if row.Title == "" {
+			row.Title = ad.Key
+		}
+		var topics map[string][]string
+		if d, ok := storedManifest(ad); ok {
+			// Stored manifests were valid when installed; a failure here can
+			// only mean a newer contract and is not worth hiding the row for.
+			row.Setup, _ = normaliseSetup(d.Setup)
+			topics = componentTopics(d)
+		}
+		row.Components = componentViews(ad.Components, topics, live, known)
+		if sum, ok := served[ad.Key]; ok && sum != ad.ManifestSHA256 {
+			row.RefreshAvailable = true
+		}
+		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
+// storedManifest decodes what an install recorded. False for an addon
+// backfilled from rows that predate the addons table.
+func storedManifest(ad model.Addon) (Descriptor, bool) {
+	if len(ad.Manifest) == 0 {
+		return Descriptor{}, false
+	}
+	var d Descriptor
+	if err := json.Unmarshal(ad.Manifest, &d); err != nil {
+		return Descriptor{}, false
+	}
+	return d, true
+}
+
 // removeAddon handles DELETE /api/portal/addons/{key}: everything the platform
 // created for it, by key. Subtraction; the core shows no trace afterwards.
+// The workloads are not the platform's to delete — the answer names the ones
+// still running so the admin can remove them through their deployment channel.
 func (a *API) removeAddon(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
 	if key == "" {
 		http.Error(w, "key required", http.StatusBadRequest)
 		return
 	}
-	_ = a.st.DeleteExtensionsByAddon(r.Context(), key)
-	tiles, err := a.st.ListTiles(r.Context())
+	ctx := r.Context()
+	// A space goes with the addon only if the addon brought it. Without a
+	// stored manifest (installed before the addons table) the older rule
+	// applies: whatever space its tiles leave empty.
+	declaredSpace := ""
+	if ad, err := a.addons.GetAddon(ctx, key); err == nil {
+		if d, ok := storedManifest(*ad); ok && d.UI != nil && d.UI.Space != nil {
+			declaredSpace = strings.TrimSpace(d.UI.Space.Key)
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		serverError(w, err)
+		return
+	}
+	removed, err := a.addons.RemoveAddon(ctx, key, declaredSpace)
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "no such addon", http.StatusNotFound)
+		return
+	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
-	emptied := map[string]bool{}
-	for _, t := range tiles {
-		if ownsTile(t.Key, key) {
-			if err := a.st.DeleteTile(r.Context(), t.Key); err != nil {
-				http.Error(w, "tile "+t.Key+": "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			emptied[t.SpaceKey] = true
+	invalidateDiscovery()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"removed": map[string]any{
+			"tiles": removed.Tiles, "rows": removed.Rows, "space": strings.Join(removed.Spaces, ","),
+		},
+		"remainingWorkloads": remainingWorkloads(removed.Workloads, a.liveWorkloadsOrNil(ctx)),
+	})
+}
+
+// remainingWorkloads is what the admin still has to remove: the declared
+// workloads that are running, or all of them when the platform cannot tell.
+func remainingWorkloads(declared []string, live map[string]operator.Instance) []string {
+	out := []string{}
+	for _, wl := range declared {
+		if live == nil {
+			out = append(out, wl)
+			continue
+		}
+		if _, ok := live[wl]; ok {
+			out = append(out, wl)
 		}
 	}
-	// A space the addon brought goes with it — but only once nothing else
-	// lives there. An admin may have moved their own tiles in.
-	for _, t := range tiles {
-		if !ownsTile(t.Key, key) {
-			delete(emptied, t.SpaceKey)
-		}
+	return out
+}
+
+func (a *API) liveWorkloadsOrNil(ctx context.Context) map[string]operator.Instance {
+	live, known := a.liveWorkloads(ctx)
+	if !known {
+		return nil
 	}
-	for spaceKey := range emptied {
-		_ = a.st.DeleteSpace(r.Context(), spaceKey)
-	}
-	if err := a.st.DeleteApp(r.Context(), key); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	discCache.mu.Lock()
-	discCache.fetched = time.Time{}
-	discCache.mu.Unlock()
-	w.WriteHeader(http.StatusNoContent)
+	return live
 }
 
 // defaultSpace: the first space by order, so a manifest need not know how an
 // instance named its launchpad sections.
 func (a *API) defaultSpace(ctx context.Context) string {
-	if spaces, err := a.st.ListSpaces(ctx); err == nil && len(spaces) > 0 {
+	if spaces, err := a.addons.ListSpaces(ctx); err == nil && len(spaces) > 0 {
 		return spaces[0].Key
 	}
 	return "apps"
