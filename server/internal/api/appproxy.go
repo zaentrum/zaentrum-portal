@@ -36,7 +36,7 @@ func contextWithTimeout(r *http.Request, d time.Duration) (context.Context, cont
 //
 // Identity is passed through rather than swapped: the caller's bearer has
 // already been verified by the portal's middleware, and it is forwarded to the
-// app so the app can still apply its OWN authorisation (acquire distinguishes
+// app so the app can still apply its OWN authorisation (an addon may distinguish
 // admins from ordinary users). Minting a portal service token here would make
 // every embedded request look like the portal and quietly erase that
 // distinction.

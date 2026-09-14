@@ -138,7 +138,7 @@ const portalLogical = "portal"
 //
 // This is a correctness fix with teeth. The curated list names databases
 // logically ("katalog", "portal"), and those names were used verbatim as
-// physical database names. Beta runs portal_beta / katalog_beta / acquire_beta,
+// physical database names. Beta runs portal_beta / katalog_beta and one per addon,
 // while `katalog` without a suffix is PRODUCTION's catalog database, on the same
 // cluster. So the beta admin console was pointed at production data.
 //

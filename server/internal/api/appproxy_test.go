@@ -10,7 +10,7 @@ import (
 func TestEmbedTargetRejectsUnsafeDestinations(t *testing.T) {
 	for _, tc := range []struct{ name, raw string }{
 		{"empty (link-out app)", ""},
-		{"relative", "/acquire/"},
+		{"relative", "/example/"},
 		{"file scheme", "file:///etc/passwd"},
 		{"gopher scheme", "gopher://example.com"},
 		{"no host", "http://"},
@@ -26,10 +26,10 @@ func TestEmbedTargetRejectsUnsafeDestinations(t *testing.T) {
 
 func TestEmbedTargetAcceptsInClusterAddresses(t *testing.T) {
 	for _, raw := range []string{
-		"http://acquire",
-		"http://acquire:8080",
-		"http://acquire.zaentrum-beta.svc",
-		"http://acquire.zaentrum-beta.svc.cluster.local:8080",
+		"http://example",
+		"http://example:8080",
+		"http://example.zaentrum-beta.svc",
+		"http://example.zaentrum-beta.svc.cluster.local:8080",
 		"http://localhost:8080",
 	} {
 		if _, err := embedTarget(raw); err != nil {
@@ -41,15 +41,15 @@ func TestEmbedTargetAcceptsInClusterAddresses(t *testing.T) {
 // The app is unaware it is embedded: it must receive its own root path, not the
 // portal's mount prefix.
 func TestProxyPathRewrite(t *testing.T) {
-	target, err := embedTarget("http://acquire")
+	target, err := embedTarget("http://example")
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := "/api/portal/apps/acquire"
+	prefix := "/api/portal/apps/example"
 	for _, tc := range []struct{ in, want string }{
 		{prefix + "/", "/"},
 		{prefix, "/"},
-		{prefix + "/api/wanted", "/api/wanted"},
+		{prefix + "/api/items", "/api/items"},
 		{prefix + "/assets/index-abc.js", "/assets/index-abc.js"},
 	} {
 		rest := tc.in[len(prefix):]
@@ -64,8 +64,8 @@ func TestProxyPathRewrite(t *testing.T) {
 
 func TestSingleSlash(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
-		{"//api//wanted", "/api/wanted"},
-		{"/api/wanted", "/api/wanted"},
+		{"//api//items", "/api/items"},
+		{"/api/items", "/api/items"},
 		{"", "/"},
 	} {
 		if got := singleSlash(tc.in); got != tc.want {
