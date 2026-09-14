@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -269,12 +270,16 @@ func hasControl(s string) bool {
 // installHost is the workload an install address names: the first DNS label
 // of its host, which is the Service name whether the admin typed
 // http://example, http://example:8080 or http://example.ns.svc.cluster.local.
+// An IP address names no Service, so it names no workload: "".
 func installHost(proxyURL string) string {
 	u, err := url.Parse(strings.TrimSpace(proxyURL))
 	if err != nil {
 		return ""
 	}
 	host := strings.ToLower(u.Hostname())
+	if net.ParseIP(host) != nil {
+		return ""
+	}
 	if i := strings.IndexByte(host, '.'); i >= 0 {
 		host = host[:i]
 	}
@@ -283,9 +288,14 @@ func installHost(proxyURL string) string {
 
 // planComponents validates the declared components, or synthesises the
 // implicit one: an addon that declares none is exactly its primary workload,
-// the one the admin typed the address of.
+// the one the admin typed the address of. The implicit component obeys the
+// rules a declared one does — its name is the service, so the service must be
+// a DNS-1123 label.
 func planComponents(d Descriptor, service, host string) ([]model.AddonComponent, map[string][]string, error) {
 	if len(d.Components) == 0 {
+		if !isDNSLabel(service) {
+			return nil, nil, invalid("service %q must be a DNS-1123 label when the manifest declares no components — it names the implicit primary component", service)
+		}
 		return []model.AddonComponent{{Name: service, Workload: host, Role: rolePrimary}}, nil, nil
 	}
 	if len(d.Components) > maxComponents {
@@ -409,7 +419,16 @@ func planAddon(proxyURL string, d Descriptor, spaceKey, origin string) (addonPla
 	if key == "" {
 		return addonPlan{}, errNoService
 	}
-	components, topics, err := planComponents(d, key, installHost(proxyURL))
+	// The primary workload is the host of the address, so the host must be a
+	// Service name. Otherwise http://[fe80::1] would record a workload no
+	// Deployment can have, and http://localhost:8081 and :8082 one workload
+	// two addons then fight over.
+	host := installHost(proxyURL)
+	if !isDNSLabel(host) {
+		return addonPlan{}, fmt.Errorf(
+			"the install address %q must name the addon's primary Service — its host a DNS-1123 label, not an IP address", proxyURL)
+	}
+	components, topics, err := planComponents(d, key, host)
 	if err != nil {
 		return addonPlan{}, err
 	}

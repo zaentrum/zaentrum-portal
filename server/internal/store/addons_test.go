@@ -78,12 +78,14 @@ func TestAddonsBackfill(t *testing.T) {
 		('tiled',   'tiled',   'http://tiled'),
 		('rowsonly','rowsonly',''),
 		('plain',   'plain',   'http://plain'),
-		('lookalike','lookalike','http://lookalike')`)
+		('lookalike','lookalike','http://lookalike'),
+		('byip',    'byip',    'http://127.0.0.1:8080')`)
 	exec(t, st, `INSERT INTO tiles (key, app_key, space_key, title) VALUES
 		('addon.example', 'example', 'apps', 'example'),
 		('addon.tiled.items', 'tiled', 'apps', 'items'),
 		('addon.lookalike2', 'lookalike', 'apps', 'not owned: the dot matters'),
-		('plain.open', 'plain', 'apps', 'a hand-made tile')`)
+		('plain.open', 'plain', 'apps', 'a hand-made tile'),
+		('addon.byip', 'byip', 'apps', 'reached by IP')`)
 	exec(t, st, `INSERT INTO ui_extensions (key, addon, slot, label) VALUES ('rowsonly.hint', 'rowsonly', 'search.empty', 'hint')`)
 
 	for i := 0; i < 2; i++ { // every boot re-applies every migration
@@ -103,8 +105,8 @@ func TestAddonsBackfill(t *testing.T) {
 		keys = append(keys, ad.Key)
 	}
 	sort.Strings(keys)
-	if strings.Join(keys, ",") != "example,rowsonly,tiled" {
-		t.Fatalf("backfilled addons = %v, want example,rowsonly,tiled", keys)
+	if strings.Join(keys, ",") != "byip,example,rowsonly,tiled" {
+		t.Fatalf("backfilled addons = %v, want byip,example,rowsonly,tiled", keys)
 	}
 	cases := []struct {
 		key, address, workload string
@@ -112,7 +114,8 @@ func TestAddonsBackfill(t *testing.T) {
 	}{
 		{"example", "http://example.zaentrum.svc.cluster.local:8080", "example", 1, 0},
 		{"tiled", "http://tiled", "tiled", 1, 0},
-		{"rowsonly", "", "", 0, 1}, // no address, so no workload to point at
+		{"rowsonly", "", "", 0, 1},                  // no address, so no workload to point at
+		{"byip", "http://127.0.0.1:8080", "", 1, 0}, // an IP address names no Service
 	}
 	for _, c := range cases {
 		ad := got[c.key]

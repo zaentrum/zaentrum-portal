@@ -51,18 +51,19 @@ ON CONFLICT (key) DO NOTHING;
 -- Each backfilled addon is its implicit primary component: named by its key,
 -- running as the workload its address names (the first DNS label of the host,
 -- i.e. the Service name). Only for addons without a manifest and without
--- components yet, and only when the host is a valid label — an app with no
--- proxy url has no workload to point at.
+-- components yet, and only when the host is a valid label and no IP address
+-- — an app with no proxy url, or one reached by IP, has no workload to point
+-- at. Must agree with api.installHost.
 INSERT INTO addon_components (addon_key, name, workload, role)
-SELECT ad.key, ad.key, h.workload, 'primary'
+SELECT ad.key, ad.key, w.workload, 'primary'
 FROM addons ad
 CROSS JOIN LATERAL (
-  SELECT lower(split_part(
-           substring(ad.address FROM '^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/?#]*@)?([^:/?#]+)'),
-           '.', 1)) AS workload
+  SELECT substring(ad.address FROM '^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/?#]*@)?([^:/?#]+)') AS host
 ) h
+CROSS JOIN LATERAL (SELECT lower(split_part(h.host, '.', 1)) AS workload) w
 WHERE ad.manifest IS NULL
-  AND h.workload ~ '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-  AND length(h.workload) <= 63
+  AND h.host !~ '^[0-9.]+$'
+  AND w.workload ~ '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+  AND length(w.workload) <= 63
   AND NOT EXISTS (SELECT 1 FROM addon_components c WHERE c.addon_key = ad.key)
 ON CONFLICT DO NOTHING;

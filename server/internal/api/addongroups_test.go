@@ -103,6 +103,37 @@ func TestPlanAddonWithoutComponents(t *testing.T) {
 	}
 }
 
+// The implicit primary obeys the rules a declared one does: the address host
+// is its workload and the service its name, so both must be DNS-1123 labels.
+// Before this, http://[fe80::1] recorded workload "fe80::1", and
+// http://localhost:8081 and :8082 collided on "localhost" with a misleading
+// "already declared" conflict.
+func TestPlanAddonRejectsAnAddressThatNamesNoService(t *testing.T) {
+	cases := []struct {
+		name, address, manifest, want string
+	}{
+		{"IPv6 literal", "http://[fe80::1]:8080", sampleManifest, "not an IP address"},
+		{"IPv4 literal", "http://127.0.0.1:8080", sampleManifest, "not an IP address"},
+		{"IPv4 literal with declared components", "http://127.0.0.1", `{"service":"example","components":[{"name":"example","workload":"127","role":"primary"}]}`, "not an IP address"},
+		{"host that is no label", "http://under_score", sampleManifest, "DNS-1123 label"},
+		{"service that is no label, no components", "http://example", `{"service":"Example_Addon"}`, "implicit primary"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := planAddon(c.address, decodeManifest(t, c.manifest), "apps", "")
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("want an error mentioning %q, got %v", c.want, err)
+			}
+		})
+	}
+	// A service that is no label is only the implicit component's problem: a
+	// manifest naming its components says what they are called.
+	m := `{"service":"Example_Addon","components":[{"name":"example","workload":"example","role":"primary"}]}`
+	if _, err := planAddon("http://example", decodeManifest(t, m), "apps", ""); err != nil {
+		t.Errorf("declared components must not require a label service: %v", err)
+	}
+}
+
 func TestPlanAddonRejectsInvalidComponents(t *testing.T) {
 	primary := `{"name":"example","workload":"example","role":"primary"}`
 	many := make([]string, 0, 17)
