@@ -13,7 +13,7 @@ import {
 import type { TableColumn } from '@nalet/design-system';
 import { Minus, Plus, RotateCw, RefreshCw, Lock, ArrowUpCircle } from 'lucide-react';
 import { usePortalApi, type OperatorState, type Instance, type InstalledAddon } from '../lib/api';
-import { containersSummary, phaseTone } from '../lib/addons';
+import { containersSummary, hasComponentGroups, phaseTone } from '../lib/addons';
 import './operator.css';
 
 const REFRESH_MS = 5000;
@@ -133,11 +133,12 @@ export function OperatorConsole() {
     return () => clearInterval(t);
   }, [load]);
 
-  // Installed addons decide the sections below. Without them (an older
-  // portal-api) the console falls back to one "addons" section by label.
+  // Installed addons decide the sections below. Without them the console
+  // falls back to one "addons" section by label — when the call fails, and
+  // when an older portal-api answers it with rows that carry no components.
   const loadAddons = useCallback(() => {
-    api<InstalledAddon[]>('/addons')
-      .then(setAddons)
+    api<unknown>('/addons')
+      .then((rows) => setAddons(hasComponentGroups(rows) ? rows : null))
       .catch(() => setAddons(null));
   }, [api]);
 

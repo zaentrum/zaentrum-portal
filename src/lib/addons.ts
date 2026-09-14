@@ -1,5 +1,34 @@
 import type { BadgeTone } from '@nalet/design-system';
-import type { AddonComponent, SetupState, SetupStatus } from './api';
+import type { AddonComponent, InstalledAddon, SetupState, SetupStatus } from './api';
+
+// The SPA ships in its own image, so during a rollout it can run against an
+// older portal-api. That one answers GET /addons with 200 and rows of
+// {key, title, proxyUrl, tiles, slots} — no version, components or setup — and
+// ignores dryRun on POST /addons, installing instead of checking.
+
+// hasComponentGroups answers whether an /addons answer comes from a portal-api
+// that knows component groups.
+export function hasComponentGroups(rows: unknown): rows is InstalledAddon[] {
+  return Array.isArray(rows) && rows.every((r) => !!r && Array.isArray((r as { components?: unknown }).components));
+}
+
+// withAddonDefaults fills what an older portal-api leaves out, so a row of
+// either shape renders: no containers, no setup, nothing to refresh.
+export function withAddonDefaults(a: Partial<InstalledAddon> & { key: string }): InstalledAddon {
+  return {
+    ...a,
+    title: a.title ?? '',
+    proxyUrl: a.proxyUrl ?? '',
+    version: a.version ?? '',
+    installedAt: a.installedAt ?? '',
+    refreshedAt: a.refreshedAt ?? '',
+    tiles: a.tiles ?? 0,
+    slots: a.slots ?? 0,
+    components: Array.isArray(a.components) ? a.components : [],
+    setup: a.setup ?? null,
+    refreshAvailable: a.refreshAvailable ?? false,
+  };
+}
 
 // joinTarget mirrors trimLeadingSlash in server/internal/api/addons.go: a
 // target is a hash route, a query or a path INSIDE the addon's console, joined
@@ -39,7 +68,8 @@ export function componentPhase(c: AddonComponent): string {
 // containersSummary is the one-line state of an addon's workloads, e.g.
 // "2/2 running". A required component that is not running makes it amber; an
 // optional one that is not deployed does not.
-export function containersSummary(cs: AddonComponent[]): { text: string; tone: BadgeTone } {
+export function containersSummary(components: AddonComponent[] | undefined): { text: string; tone: BadgeTone } {
+  const cs = components ?? [];
   if (cs.length === 0) return { text: '—', tone: 'neutral' };
   if (cs.some((c) => c.phase === 'unknown')) return { text: `${cs.length} declared · unknown`, tone: 'neutral' };
   const running = cs.filter((c) => c.phase === 'ready').length;

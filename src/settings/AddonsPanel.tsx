@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Table,
@@ -37,6 +37,7 @@ import {
   parseSetupStatus,
   phaseTone,
   setupTone,
+  withAddonDefaults,
 } from '../lib/addons';
 import { useResource } from './useResource';
 
@@ -69,7 +70,10 @@ export function AddonsPanel() {
   const api = usePortalApi();
   const navigate = useNavigate();
   const [spaces, setSpaces] = useState<Space[]>([]);
-  const { items, loading, error, reload } = useResource<InstalledAddon>('/addons');
+  const { items: rows, loading, error, reload } = useResource<InstalledAddon>('/addons');
+  // An older portal-api answers with rows that carry no version, components or
+  // setup; render them as addons with nothing declared rather than crash.
+  const items = useMemo(() => rows.map(withAddonDefaults), [rows]);
   const [url, setUrl] = useState('');
   const [space, setSpace] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -123,7 +127,15 @@ export function AddonsPanel() {
     setErr(null);
     setMsg(null);
     try {
-      setPreview(await post(proxyUrl, { dryRun: true }));
+      const r = await post(proxyUrl, { dryRun: true });
+      if (r.dryRun !== true) {
+        // An older portal-api does not know dryRun and installed the addon.
+        setMsg(`this portal-api cannot check first — it ${r.refresh ? 'refreshed' : 'installed'} ${r.key}: ${summarise(r)}`);
+        setUrl('');
+        reload();
+        return;
+      }
+      setPreview(r);
     } catch (e) {
       setErr(errText(e));
     } finally {
