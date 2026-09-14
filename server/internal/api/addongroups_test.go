@@ -658,6 +658,64 @@ func TestInstallAddonAdoptionIsReported(t *testing.T) {
 	}
 }
 
+// fakeWorkloads is the operator service: in a cluster or not, listing or
+// refusing.
+type fakeWorkloads struct {
+	available bool
+	instances []operator.Instance
+	err       error
+}
+
+func (f fakeWorkloads) Available() bool { return f.available }
+
+func (f fakeWorkloads) Instances(context.Context) ([]operator.Instance, error) {
+	return f.instances, f.err
+}
+
+func TestInstallAddonWorkloadVisibility(t *testing.T) {
+	addr := manifestServer(t, localhostManifest)
+	refused := fakeWorkloads{available: true, err: errors.New("apiserver: forbidden")}
+
+	t.Run("in a cluster that refuses the list, install waits", func(t *testing.T) {
+		fake := newFakeStore()
+		a := &API{addons: fake, workloads: refused}
+		rec := postInstall(t, a, map[string]any{"proxyUrl": addr})
+		if rec.Code != http.StatusServiceUnavailable || len(fake.installs) != 0 {
+			t.Fatalf("install = %d %s, installs=%d — want 503 and nothing written", rec.Code, rec.Body, len(fake.installs))
+		}
+		// A check still shows the plan, with the components unknown.
+		rec = postInstall(t, a, map[string]any{"proxyUrl": addr, "dryRun": true})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("check = %d %s", rec.Code, rec.Body)
+		}
+		for _, c := range decodeInstall(t, rec).Components {
+			if c.Phase == nil || *c.Phase != "unknown" {
+				t.Errorf("component %q phase = %v, want unknown", c.Name, c.Phase)
+			}
+		}
+	})
+
+	t.Run("in a cluster that lists, a platform workload is refused", func(t *testing.T) {
+		fake := newFakeStore()
+		a := &API{addons: fake, workloads: fakeWorkloads{available: true, instances: []operator.Instance{
+			{Name: "example-worker", Group: "platform", Phase: "ready"},
+		}}}
+		for _, dry := range []bool{true, false} {
+			if rec := postInstall(t, a, map[string]any{"proxyUrl": addr, "dryRun": dry}); rec.Code != http.StatusConflict {
+				t.Errorf("dryRun=%v = %d %s, want 409", dry, rec.Code, rec.Body)
+			}
+		}
+	})
+
+	t.Run("outside a cluster there are no workloads to take", func(t *testing.T) {
+		fake := newFakeStore()
+		a := &API{addons: fake, workloads: fakeWorkloads{available: false, err: errors.New("not in a cluster")}}
+		if rec := postInstall(t, a, map[string]any{"proxyUrl": addr}); rec.Code != http.StatusOK || len(fake.installs) != 1 {
+			t.Fatalf("install = %d %s", rec.Code, rec.Body)
+		}
+	})
+}
+
 func TestListAddons(t *testing.T) {
 	d := decodeManifest(t, groupManifest)
 	manifest, sum := canonicalManifest(d)

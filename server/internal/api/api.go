@@ -31,6 +31,8 @@ type API struct {
 	op     *operator.Service
 	tap    *eventtap.Tap
 	br     *dbbrowse.Browser
+	// workloads is op as the addon endpoints read it; nil when op is.
+	workloads workloadSource
 }
 
 // addonStore is the part of the registry the addon endpoints and capability
@@ -47,7 +49,11 @@ type addonStore interface {
 }
 
 func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap, br *dbbrowse.Browser) *API {
-	return &API{st: st, addons: st, cfg: cfg, op: op, tap: tap, br: br}
+	a := &API{st: st, addons: st, cfg: cfg, op: op, tap: tap, br: br}
+	if op != nil {
+		a.workloads = op // never a typed nil inside the interface
+	}
+	return a
 }
 
 // Register mounts the registry routes under /api/portal. Authn is applied here

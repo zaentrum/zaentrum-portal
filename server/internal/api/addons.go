@@ -736,14 +736,25 @@ func componentViews(cs []model.AddonComponent, topics map[string][]string, live 
 
 func ptr[T any](v T) *T { return &v }
 
+// workloadSource is the operator service as the addon endpoints use it: is
+// there a cluster, and what runs in it. *operator.Service implements it; tests
+// substitute a fake.
+type workloadSource interface {
+	Available() bool
+	Instances(ctx context.Context) ([]operator.Instance, error)
+}
+
+// inCluster: the platform runs where workloads exist to be seen.
+func (a *API) inCluster() bool { return a.workloads != nil && a.workloads.Available() }
+
 // liveWorkloads reads the namespace's workloads once for a request. known is
 // false when the platform cannot see them (not in a cluster, or the apiserver
 // refused).
 func (a *API) liveWorkloads(ctx context.Context) (live map[string]operator.Instance, known bool) {
-	if a.op == nil || !a.op.Available() {
+	if !a.inCluster() {
 		return nil, false
 	}
-	instances, err := a.op.Instances(ctx)
+	instances, err := a.workloads.Instances(ctx)
 	if err != nil {
 		return nil, false
 	}
@@ -829,6 +840,15 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request) {
 	live, known := a.liveWorkloads(ctx)
 	if err := installConflict(plan, reg, body.ReplaceAddress || body.DryRun, platformWorkloads(live), claims); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	// In a cluster whose workloads cannot be listed right now, nothing proves
+	// that no component names a platform Deployment. A check may still show
+	// the plan — its components read "unknown" — but an install waits. Outside
+	// a cluster there are no workloads to take.
+	if !known && !body.DryRun && a.inCluster() {
+		http.Error(w, "the platform cannot list its workloads right now, so it cannot verify that no component is a platform deployment — try again shortly",
+			http.StatusServiceUnavailable)
 		return
 	}
 
