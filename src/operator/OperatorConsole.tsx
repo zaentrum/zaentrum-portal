@@ -12,24 +12,68 @@ import {
 } from '@nalet/design-system';
 import type { TableColumn } from '@nalet/design-system';
 import { Minus, Plus, RotateCw, RefreshCw, Lock, ArrowUpCircle } from 'lucide-react';
-import { usePortalApi, type OperatorState, type Instance } from '../lib/api';
+import { usePortalApi, type OperatorState, type Instance, type InstalledAddon } from '../lib/api';
+import { containersSummary, phaseTone } from '../lib/addons';
 import './operator.css';
 
 const REFRESH_MS = 5000;
+// Installed addons change on an admin's action, not per second.
+const ADDONS_REFRESH_MS = 30000;
 
-type BadgeTone = 'neutral' | 'green' | 'amber' | 'blue';
+// Row is a live instance, or a placeholder for a component an installed addon
+// declares that is not running here.
+type Row = Instance & { placeholder?: string; componentName?: string; role?: string };
 
-function phaseTone(phase: string): BadgeTone {
-  switch (phase) {
-    case 'ready':
-      return 'green';
-    case 'progressing':
-      return 'blue';
-    case 'degraded':
-      return 'amber';
-    default:
-      return 'neutral';
-  }
+interface Grouped {
+  platform: Row[];
+  addons: { addon: InstalledAddon; rows: Row[] }[] | null; // null: installed addons unknown
+  undeclared: Row[];
+  unclaimed: Row[];
+}
+
+// groupInstances places every workload exactly once. Platform ownership wins;
+// then each installed addon claims the workloads it declares (live rows, or a
+// "not deployed" placeholder); addon-labelled workloads no installed addon
+// declares, and everything else, follow.
+function groupInstances(instances: Instance[], addons: InstalledAddon[] | null): Grouped {
+  const byName = new Map(instances.map((i) => [i.name, i]));
+  const claimed = new Set<string>();
+  const sections =
+    addons?.map((addon) => ({
+      addon,
+      rows: addon.components.map((c): Row => {
+        const live = byName.get(c.workload);
+        if (live && live.group !== 'platform') {
+          claimed.add(live.name);
+          return { ...live, componentName: c.name, role: c.role };
+        }
+        return {
+          name: c.workload,
+          image: '',
+          desiredReplicas: 0,
+          readyReplicas: 0,
+          updatedReplicas: 0,
+          availableReplicas: 0,
+          restarts: 0,
+          phase: '',
+          protected: true,
+          operatorManaged: false,
+          group: 'addon',
+          reason: '',
+          alwaysPull: false,
+          placeholder: live ? 'a platform workload' : 'not deployed',
+          componentName: c.name,
+          role: c.role,
+        };
+      }),
+    })) ?? null;
+  const unclaimedBy = (g: string) => instances.filter((i) => i.group === g && !claimed.has(i.name));
+  return {
+    platform: instances.filter((i) => i.group === 'platform'),
+    addons: sections,
+    undeclared: unclaimedBy('addon'),
+    unclaimed: unclaimedBy('other'),
+  };
 }
 
 // shorten ghcr.io/zaentrum/chino-api:latest -> chino-api:latest
@@ -56,6 +100,7 @@ export function OperatorConsole() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [addons, setAddons] = useState<InstalledAddon[] | null>(null);
   const inflight = useRef(false);
   const seq = useRef(0);
 
@@ -87,6 +132,20 @@ export function OperatorConsole() {
     const t = setInterval(() => load(true), REFRESH_MS);
     return () => clearInterval(t);
   }, [load]);
+
+  // Installed addons decide the sections below. Without them (an older
+  // portal-api) the console falls back to one "addons" section by label.
+  const loadAddons = useCallback(() => {
+    api<InstalledAddon[]>('/addons')
+      .then(setAddons)
+      .catch(() => setAddons(null));
+  }, [api]);
+
+  useEffect(() => {
+    loadAddons();
+    const t = setInterval(loadAddons, ADDONS_REFRESH_MS);
+    return () => clearInterval(t);
+  }, [loadAddons]);
 
   async function act(key: string, fn: () => Promise<unknown>, label: string) {
     setBusy(key);
@@ -124,11 +183,11 @@ export function OperatorConsole() {
 
   const op = state?.operator;
 
-  // The server classifies each workload (owner refs for platform, the addons
-  // part-of label for addons); the console just renders the groups.
-  const inGroup = (g: string) => (state?.instances ?? []).filter((i) => i.group === g);
+  // The server classifies each workload (owner refs for platform, the addon
+  // labels for addons); installed addons claim the workloads they declare.
+  const grouped = groupInstances(state?.instances ?? [], addons);
 
-  const columns: TableColumn<Instance>[] = [
+  const columns: TableColumn<Row>[] = [
     {
       key: 'name',
       header: 'service',
@@ -136,7 +195,13 @@ export function OperatorConsole() {
       render: (i) => (
         <span className="op__svc">
           <b>{i.name}</b>
-          {i.protected && (
+          {i.componentName && (
+            <Text variant="dim">
+              {i.componentName !== i.name ? `${i.componentName} · ` : ''}
+              {i.role}
+            </Text>
+          )}
+          {i.protected && !i.placeholder && (
             <span className="op__lock" title="protected — not scalable here">
               <Lock size={12} />
             </span>
@@ -148,41 +213,44 @@ export function OperatorConsole() {
       key: 'image',
       header: 'image',
       width: 260,
-      render: (i) => <span className="op__mono">{shortImage(i.image)}</span>,
+      render: (i) => (i.placeholder ? '—' : <span className="op__mono">{shortImage(i.image)}</span>),
     },
     {
       key: 'readyReplicas',
       header: 'replicas',
       width: 130,
-      render: (i) => (
-        <span className="op__scale">
-          {!i.protected && (
-            <IconButton
-              label={`scale ${i.name} down`}
-              size="sm"
-              variant="ghost"
-              disabled={busy === i.name || i.desiredReplicas <= 0}
-              onClick={() => scale(i, i.desiredReplicas - 1)}
-            >
-              <Minus size={13} />
-            </IconButton>
-          )}
-          <span className="op__count">
-            {i.readyReplicas}/{i.desiredReplicas}
+      render: (i) =>
+        i.placeholder ? (
+          '—'
+        ) : (
+          <span className="op__scale">
+            {!i.protected && (
+              <IconButton
+                label={`scale ${i.name} down`}
+                size="sm"
+                variant="ghost"
+                disabled={busy === i.name || i.desiredReplicas <= 0}
+                onClick={() => scale(i, i.desiredReplicas - 1)}
+              >
+                <Minus size={13} />
+              </IconButton>
+            )}
+            <span className="op__count">
+              {i.readyReplicas}/{i.desiredReplicas}
+            </span>
+            {!i.protected && (
+              <IconButton
+                label={`scale ${i.name} up`}
+                size="sm"
+                variant="ghost"
+                disabled={busy === i.name || i.desiredReplicas >= 20}
+                onClick={() => scale(i, i.desiredReplicas + 1)}
+              >
+                <Plus size={13} />
+              </IconButton>
+            )}
           </span>
-          {!i.protected && (
-            <IconButton
-              label={`scale ${i.name} up`}
-              size="sm"
-              variant="ghost"
-              disabled={busy === i.name || i.desiredReplicas >= 20}
-              onClick={() => scale(i, i.desiredReplicas + 1)}
-            >
-              <Plus size={13} />
-            </IconButton>
-          )}
-        </span>
-      ),
+        ),
     },
     {
       key: 'phase',
@@ -190,14 +258,17 @@ export function OperatorConsole() {
       width: 260,
       // The reason sits next to the phase, not in its own column: "degraded"
       // on its own is not actionable, and the two are one fact.
-      render: (i) => (
-        <span className="op__status">
-          <Badge tone={phaseTone(i.phase)} dot>
-            {i.phase}
-          </Badge>
-          {i.reason && <Text variant="dim">{i.reason}</Text>}
-        </span>
-      ),
+      render: (i) =>
+        i.placeholder ? (
+          <Badge tone="neutral">{i.placeholder}</Badge>
+        ) : (
+          <span className="op__status">
+            <Badge tone={phaseTone(i.phase)} dot>
+              {i.phase}
+            </Badge>
+            {i.reason && <Text variant="dim">{i.reason}</Text>}
+          </span>
+        ),
     },
     {
       key: 'restarts',
@@ -212,7 +283,7 @@ export function OperatorConsole() {
       align: 'right',
       width: 120,
       render: (i) =>
-        i.protected ? (
+        i.placeholder ? null : i.protected ? (
           <Badge tone="neutral">protected</Badge>
         ) : (
           <Button
@@ -239,7 +310,15 @@ export function OperatorConsole() {
       </div>
 
       <div className="op__toolbar">
-        <Button variant="ghost" size="sm" leading={<RefreshCw size={14} />} onClick={() => load()}>
+        <Button
+          variant="ghost"
+          size="sm"
+          leading={<RefreshCw size={14} />}
+          onClick={() => {
+            load();
+            loadAddons();
+          }}
+        >
           refresh
         </Button>
         {msg && <span className="op__msg">{msg}</span>}
@@ -305,20 +384,34 @@ export function OperatorConsole() {
             <InstanceGroup
               title="platform services"
               hint="rendered by the operator from the platform chart — these upgrade with it"
-              rows={inGroup('platform')}
+              rows={grouped.platform}
               columns={columns}
             />
+            {grouped.addons?.map(({ addon, rows }) => (
+              <InstanceGroup
+                key={addon.key}
+                title={addon.title || addon.key}
+                hint={`addon ${addon.key}${addon.version ? ` ${addon.version}` : ''} — ${containersSummary(addon.components).text}; its containers run through the addon's own deployment channel`}
+                rows={rows}
+                columns={columns}
+                emptyText="the addon declares no containers."
+              />
+            ))}
             <InstanceGroup
-              title="addons"
-              hint="installed alongside the platform, each with its own lifecycle and version"
-              rows={inGroup('addon')}
+              title={grouped.addons === null ? 'addons' : 'undeclared addon workloads'}
+              hint={
+                grouped.addons === null
+                  ? 'installed alongside the platform, each with its own lifecycle and version'
+                  : 'labelled as addon workloads, but no installed addon declares them'
+              }
+              rows={grouped.undeclared}
               columns={columns}
-              emptyText="no addons are running."
+              emptyText={grouped.addons === null || grouped.addons.length === 0 ? 'no addons are running.' : ''}
             />
             <InstanceGroup
               title="unclaimed"
-              hint="running in this namespace but claimed by neither the platform chart nor the addons kustomization"
-              rows={inGroup('other')}
+              hint="running in this namespace but claimed by neither the platform chart nor an addon"
+              rows={grouped.unclaimed}
               columns={columns}
               emptyText=""
             />
@@ -352,8 +445,8 @@ function InstanceGroup({
 }: {
   title: string;
   hint: string;
-  rows: Instance[];
-  columns: TableColumn<Instance>[];
+  rows: Row[];
+  columns: TableColumn<Row>[];
   emptyText?: string;
 }) {
   if (rows.length === 0 && !emptyText) return null;
