@@ -15,10 +15,11 @@ import {
   Heading,
 } from '@nalet/design-system';
 import type { TableColumn } from '@nalet/design-system';
-import { Plus, Pencil, Trash2, Puzzle, RefreshCw } from 'lucide-react';
+import { Plus, Pencil, Trash2 } from 'lucide-react';
 import { usePortalApi, type App, type Space, type Tile, type Extension } from '../lib/api';
 import { ICON_CHOICES } from '../lib/icons';
 import { useResource } from './useResource';
+import { AddonsPanel } from './AddonsPanel';
 import './settings.css';
 
 const KINDS = ['product', 'manage', 'tool', 'external'];
@@ -207,194 +208,6 @@ function CrudPanel<T extends { key: string }>({
   );
 }
 
-// ─── addons ──────────────────────────────────────────────────────────────────
-
-interface InstalledAddon {
-  key: string;
-  title: string;
-  proxyUrl: string;
-  tiles: number;
-  slots: number;
-}
-
-interface InstallResult {
-  key: string;
-  tiles: number;
-  slots: number;
-  commands: number;
-  checks: number;
-  space: { key: string; title: string } | null;
-}
-
-// What an install created, in the order it matters to the admin.
-function summarise(r: InstallResult) {
-  const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
-  const parts = [];
-  if (r.space) parts.push(`space "${r.space.title || r.space.key}"`);
-  if (r.tiles) parts.push(n(r.tiles, 'tile', 'tiles'));
-  if (r.slots) parts.push(n(r.slots, 'slot row', 'slot rows'));
-  if (r.commands) parts.push(n(r.commands, 'CLI command', 'CLI commands'));
-  return parts.length ? parts.join(', ') : 'nothing to show — the addon declares no UI';
-}
-
-// AddonsPanel is the install path. The admin types the addon's in-cluster
-// address; portal-api pulls the addon's manifest and creates its app, tile and
-// slot rows, owned by the addon key. The addon needs no identity to appear and
-// removing it deletes everything the platform created for it.
-function AddonsPanel() {
-  const api = usePortalApi();
-  const [spaces, setSpaces] = useState<Space[]>([]);
-  const { items, loading, error, reload } = useResource<InstalledAddon>('/addons');
-  const [url, setUrl] = useState('');
-  const [space, setSpace] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    api<Space[]>('/spaces')
-      .then((s) => live && setSpaces(s))
-      .catch(() => undefined);
-    return () => {
-      live = false;
-    };
-  }, [api]);
-
-  async function install() {
-    const proxyUrl = url.trim();
-    if (!proxyUrl) {
-      setErr('the addon address is required');
-      return;
-    }
-    setBusy(true);
-    setErr(null);
-    setMsg(null);
-    try {
-      const r = await api<InstallResult>('/addons', {
-        method: 'POST',
-        body: JSON.stringify({ proxyUrl, ...(space ? { space } : {}) }),
-      });
-      setMsg(`installed ${r.key}: ${summarise(r)}`);
-      setUrl('');
-      reload();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function remove(row: InstalledAddon) {
-    if (
-      !confirm(
-        `remove addon "${row.key}"? Its app, tiles, slot rows and any space it brought are deleted; the workload is yours to remove.`,
-      )
-    )
-      return;
-    setMsg(null);
-    setErr(null);
-    try {
-      await api<void>(`/addons/${encodeURIComponent(row.key)}`, { method: 'DELETE' });
-      setMsg(`removed ${row.key}`);
-      reload();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  async function refresh(row: InstalledAddon) {
-    // Re-pull the manifest: the addon shipped a new version and declares
-    // different contributions. Same call as install; rows are replaced.
-    setMsg(null);
-    setErr(null);
-    try {
-      const r = await api<InstallResult>('/addons', {
-        method: 'POST',
-        body: JSON.stringify({ proxyUrl: row.proxyUrl }),
-      });
-      setMsg(`refreshed ${r.key}: ${summarise(r)}`);
-      reload();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  const cols: TableColumn<InstalledAddon>[] = [
-    { key: 'title', header: 'addon', render: (r) => <b>{r.title || r.key}</b> },
-    { key: 'key', header: 'key', render: (r) => <span className="set__mono">{r.key}</span> },
-    { key: 'proxyUrl', header: 'address', render: (r) => <span className="set__mono">{r.proxyUrl}</span> },
-    { key: 'tiles', header: 'tiles', align: 'right', render: (r) => r.tiles },
-    { key: 'slots', header: 'slot rows', align: 'right', render: (r) => r.slots },
-    {
-      key: '__act',
-      header: '',
-      align: 'right',
-      render: (r) => (
-        <span style={{ display: 'inline-flex', gap: 4 }}>
-          <Button variant="ghost" size="sm" leading={<RefreshCw size={13} />} onClick={() => refresh(r)}>
-            refresh
-          </Button>
-          <Button variant="ghost" size="sm" leading={<Trash2 size={13} />} onClick={() => remove(r)}>
-            remove
-          </Button>
-        </span>
-      ),
-    } as unknown as TableColumn<InstalledAddon>,
-  ];
-
-  return (
-    <div>
-      <div className="set__form" style={{ maxWidth: 640, marginBottom: 16 }}>
-        <Field
-          label="add an addon"
-          hint="its in-cluster address — the Service name of the addon workload, e.g. http://sample-addon. The platform reads the addon's manifest and creates what it declares."
-        >
-          <Input
-            value={url}
-            placeholder="http://sample-addon"
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && install()}
-          />
-        </Field>
-        {spaces.length > 0 && (
-          <Field
-            label="space"
-            hint="where tiles are placed, unless the addon brings its own section; default is the first space"
-          >
-            <Select
-              value={space}
-              onChange={(e) => setSpace(e.target.value)}
-              options={[{ label: '(default)', value: '' }, ...spaces.map((s) => ({ label: s.title || s.key, value: s.key }))]}
-            />
-          </Field>
-        )}
-        <div className="set__toolbar">
-          <Button leading={<Puzzle size={15} />} loading={busy} onClick={install}>
-            install
-          </Button>
-          {msg && <span className="set__ok">{msg}</span>}
-        </div>
-        {err && <span className="set__err">{err}</span>}
-      </div>
-      {error && <span className="set__err">error: {error}</span>}
-      {loading && !items.length ? (
-        <div className="set__state">
-          <Spinner /> <Text variant="muted">loading…</Text>
-        </div>
-      ) : (
-        <Table
-          columns={cols}
-          rows={items}
-          rowKey={(r) => r.key}
-          dense
-          empty={<Text variant="muted">no addons installed. Deploy one next to the platform, then add it by its address.</Text>}
-        />
-      )}
-    </div>
-  );
-}
-
 // ─── apps ────────────────────────────────────────────────────────────────────
 
 function AppsPanel() {
@@ -447,7 +260,7 @@ function AppsPanel() {
           </Field>
           <Field
             label="proxy url"
-            hint="in-cluster address, e.g. http://acquire — required to host this app inside the portal"
+            hint="in-cluster address, e.g. http://example — required to host this app inside the portal"
           >
             <Input value={d.proxyUrl} onChange={(e) => patch({ proxyUrl: e.target.value })} />
           </Field>
@@ -462,15 +275,15 @@ function AppsPanel() {
 
 // ─── extensions ──────────────────────────────────────────────────────────────
 
-// ExtensionsPanel — the addon UI seam. Rows are usually written by an addon's
-// service account on install (e.g. laedeli/acquire adds a "request" button to
-// chino's search-empty slot); admins can view/toggle/remove them here.
+// ExtensionsPanel — the addon UI seam. Rows are usually created when an addon
+// is installed (e.g. an addon adds a button to chino's search-empty slot);
+// admins can view/toggle/remove them here.
 function ExtensionsPanel() {
   return (
     <CrudPanel<Extension>
       singular="extension"
       path="/extensions"
-      keyHint="e.g. acquire.search-request"
+      keyHint="e.g. example.search-hint"
       empty={() => ({
         key: '', addon: '', slot: 'search.empty', kind: 'link', label: '', icon: '',
         url: '', method: 'POST', statusUrl: '', ord: 0, enabled: true,

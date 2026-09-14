@@ -108,6 +108,10 @@ export interface Instance {
   // CrashLoopBackOff, OOMKilled …). Empty when it is fine.
   reason: string;
   alwaysPull: boolean;
+  // The zaentrum.io/addon and zaentrum.io/component labels, when the addon's
+  // deployment channel stamped them. Grouping metadata only.
+  addon?: string;
+  component?: string;
 }
 export interface OperatorComponent {
   name: string;
@@ -134,6 +138,77 @@ export interface OperatorState {
   operator: OperatorInfo;
   instances: Instance[];
   error?: string;
+}
+
+// ─── addons (mirror server/internal/api/addons.go) ───────────────────────────
+
+// AddonComponent is one declared workload with its live state. The state
+// fields are null when the workload is not deployed; phase is "unknown" (the
+// rest null) when the portal cannot see workloads at all.
+export interface AddonComponent {
+  name: string;
+  workload: string;
+  role: string; // primary|required|optional
+  summary: string;
+  topics?: string[];
+  phase: string | null;
+  ready: number | null;
+  desired: number | null;
+  restarts: number | null;
+  reason: string | null;
+}
+export interface AddonSetupSection {
+  key: string;
+  title: string;
+  description?: string;
+  required: boolean;
+  target?: string;
+  ord: number;
+}
+// AddonSetup is what the addon DECLARES: where its setup status is served
+// (relative to the addon, reached through the app proxy) and the sections.
+export interface AddonSetup {
+  path: string;
+  sections?: AddonSetupSection[];
+}
+export interface InstalledAddon {
+  key: string;
+  title: string;
+  proxyUrl: string;
+  version: string;
+  installedAt: string;
+  refreshedAt: string;
+  tiles: number;
+  slots: number;
+  components: AddonComponent[];
+  setup: AddonSetup | null;
+  refreshAvailable: boolean;
+}
+// InstallResult answers both a dry run ("check") and a real install.
+export interface InstallResult {
+  key: string;
+  app: App;
+  space: Space | null;
+  tiles: number;
+  slots: number;
+  commands: number;
+  checks: number;
+  version: string;
+  components: AddonComponent[];
+  setup: AddonSetup | null;
+  refresh: boolean;
+  dryRun: boolean;
+}
+export interface RemoveResult {
+  removed: { tiles: number; rows: number; space: string };
+  remainingWorkloads: string[];
+}
+// SetupStatus is what the ADDON answers at its setup path. Addon-authored, so
+// the console treats every field as untrusted plain text.
+export type SetupState = 'ready' | 'needs-setup' | 'degraded' | 'unknown';
+export interface SetupStatus {
+  state: SetupState;
+  sections: { key: string; state: SetupState; summary: string }[];
 }
 
 // usePortalApi returns a fetcher bound to the current access token. It throws an

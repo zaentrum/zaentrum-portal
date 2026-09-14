@@ -23,9 +23,15 @@ group badge repeated on all 14 platform rows (redundant with the section
 heading it sat under, and it made the service column ragged), and three
 independently auto-sized tables whose columns did not line up.
 
-`mock-server.mjs` mirrors live `zaentrum-beta` — 14 platform services, 5
-addons, one deliberately unclaimed workload so every group renders, and the
-ImagePullBackOff state the estate was actually in.
+`mock-server.mjs` mirrors live `zaentrum-beta` — 14 platform services and
+the ImagePullBackOff state the estate was actually in — plus one installed
+addon, `example`, made of three containers (one crash-looping, one not
+deployed), addon workloads no installed addon declares, and one deliberately
+unclaimed workload, so every section of the operator console renders. The
+settings console's addons tab reads the same fixture: a refresh-available
+badge, the containers column, and a setup checklist whose status the browser
+fetches through the app proxy (one summary carries markup on purpose, to show
+it renders as text).
 
 The registry fixture mirrors what migrations 002/003/004 actually seed — every
 seeded app has an **empty** `proxyUrl`, which is the state that made the

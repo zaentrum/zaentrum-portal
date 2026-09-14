@@ -51,3 +51,54 @@
   color: var(--signal-red, #F85149);
   font-size: 13px;
 }
+
+/* addons: an expandable table — each addon row opens its containers and its
+   setup checklist. */
+.set__addon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.set__detail > td {
+  background: var(--bg-2, #0d1117);
+}
+.set__detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 4px 12px;
+}
+.set__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.set__checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.set__checklist-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.set__check {
+  display: grid;
+  grid-template-columns: 120px 1fr auto;
+  align-items: start;
+  gap: 12px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border, #30363d);
+}
+.set__check-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
