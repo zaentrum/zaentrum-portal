@@ -58,14 +58,6 @@ function mock(query: string): unknown {
         { id: 'j2', source: 'nfs', status: 'running', startedAt: '2026-06-28T10:00:00Z', finishedAt: null, filesSeen: 0, itemsInserted: 0, itemsUpdated: 0 },
       ],
     };
-  if (query.includes('downloadJobs'))
-    return {
-      downloadJobs: [
-        { id: 'd1', adapter: 'sample-adapter', clientJobId: 'p1', title: 'sintel 1080p', state: 'downloading', progressPct: 62, sizeBytes: 734003200, lastEventAt: '2026-06-28T10:05:00Z' },
-        { id: 'd2', adapter: 'sample-adapter', clientJobId: 'p2', title: 'cosmos laundromat', state: 'completed', progressPct: 100, sizeBytes: 1073741824, lastEventAt: '2026-06-28T09:00:00Z' },
-      ],
-      downloadClients: '["sample-adapter"]',
-    };
   if (query.includes('settings'))
     return {
       settings: [
