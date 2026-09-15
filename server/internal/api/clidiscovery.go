@@ -172,7 +172,7 @@ func (a *API) capabilityCandidates(ctx context.Context) []string {
 // candidate that is down must cost at most its own timeout, never the
 // endpoint's availability.
 func collectDescriptors(ctx context.Context, bases []string) []Descriptor {
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: 2 * time.Second, CheckRedirect: noRedirects}
 	var (
 		mu  sync.Mutex
 		out []Descriptor
@@ -213,6 +213,11 @@ func collectDescriptors(ctx context.Context, bases []string) []Descriptor {
 	}
 	return out
 }
+
+// noRedirects answers a redirect with the redirect itself. Candidates are
+// validated where they come from; a redirect would take portal-api somewhere
+// nobody validated.
+func noRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // limitedReader caps how much of a descriptor we will read: a misbehaving
 // service must not be able to balloon the aggregate document.

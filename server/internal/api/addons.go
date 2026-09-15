@@ -644,7 +644,8 @@ func installConflict(p addonPlan, reg registered, replaceAddress bool, platform 
 
 // fetchManifest reads an addon's descriptor from its in-cluster address. The
 // address is validated exactly like the embed proxy's target — the request
-// never decides where portal-api connects to.
+// never decides where portal-api connects to — and a redirect is not followed:
+// the address a chart's author names answers for itself, or not at all.
 func fetchManifest(ctx context.Context, proxyURL string) (Descriptor, error) {
 	target, err := embedTarget(proxyURL)
 	if err != nil {
@@ -653,7 +654,7 @@ func fetchManifest(ctx context.Context, proxyURL string) (Descriptor, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(target.String(), "/")+wellKnownCapability, nil)
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 5 * time.Second, CheckRedirect: noRedirects}).Do(req)
 	if err != nil {
 		return Descriptor{}, fmt.Errorf("the addon did not answer at %s: %w", proxyURL, err)
 	}

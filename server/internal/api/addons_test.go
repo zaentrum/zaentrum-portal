@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -143,6 +144,32 @@ func TestFetchManifestFailures(t *testing.T) {
 	}
 	if _, err := fetchManifest(context.Background(), "ftp://sample-addon"); err == nil {
 		t.Error("a non-http scheme must be refused")
+	}
+}
+
+// A primary Service that answers with a redirect is refused, not followed:
+// the redirect names a place nobody validated.
+func TestFetchManifestDoesNotFollowRedirects(t *testing.T) {
+	var hits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(sampleManifest))
+	}))
+	defer target.Close()
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/latest/meta-data/", http.StatusFound)
+	}))
+	defer primary.Close()
+	addr := strings.Replace(primary.URL, "127.0.0.1", "localhost", 1)
+
+	if _, err := fetchManifest(context.Background(), addr); err == nil || !strings.Contains(err.Error(), "302") {
+		t.Errorf("fetchManifest = %v, want the redirect refused", err)
+	}
+	if descs := collectDescriptors(context.Background(), []string{addr}); len(descs) != 0 {
+		t.Errorf("discovery collected %v through a redirect", descs)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("the redirect target was reached %d times", n)
 	}
 }
 
