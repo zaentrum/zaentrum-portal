@@ -12,9 +12,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22.18 or later: npm test runs the TypeScript unit tests with node's
+          # own type stripping.
+          node-version: 22
       - run: npm ci --no-audit --no-fund
       - run: npm run build
+      - run: npm test
       - name: container build (sanity)
         run: docker build -t zaentrum-portal:ci .
 
