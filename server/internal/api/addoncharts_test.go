@@ -894,6 +894,36 @@ func TestFailedWriteReportsItsOrphanedSecret(t *testing.T) {
 	})
 }
 
+// An addon removed while a request is applied: the apiserver's NotFound is
+// the answer, not a failure of the cluster.
+func TestAddonGoneMidRequestIsNotFound(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		body map[string]any
+		gone func(k8sfake.Call) bool
+	}{
+		{"values", map[string]any{"values": map[string]any{"a": 1}},
+			func(c k8sfake.Call) bool { return c.Method == http.MethodPut }},
+		{"secret inputs, before a Secret is stored", map[string]any{"secretValues": map[string]string{"config.password": "x"}},
+			func(c k8sfake.Call) bool { return c.Method == http.MethodPut && c.Query == "dryRun=All" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newChartEnv(t)
+			installedExample(e, "")
+			e.kube.Fail = func(call k8sfake.Call) (int, string, bool) {
+				return http.StatusNotFound, `zaentrumaddons.zaentrum.io "example" not found`, strings.Contains(call.Path, addonPlural) && c.gone(call)
+			}
+			rec := e.do(http.MethodPatch, "/api/portal/addon-charts/example", c.body)
+			if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "gone") {
+				t.Errorf("patch = %d %s, want 404", rec.Code, rec.Body)
+			}
+			if len(e.secretsCreated()) != 0 {
+				t.Error("nothing may be stored for an addon that is gone")
+			}
+		})
+	}
+}
+
 // Replacing an input's value points its entry at a new Secret: the spec
 // changes, so the plan made with the old value no longer counts as current.
 func TestSecretWriteMakesThePlanStale(t *testing.T) {

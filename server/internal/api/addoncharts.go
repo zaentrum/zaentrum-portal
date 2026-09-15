@@ -449,6 +449,8 @@ func writeChartError(w http.ResponseWriter, err error) {
 			http.StatusServiceUnavailable)
 	case k8s.IsConflict(err):
 		http.Error(w, "the addon changed while this request was applied — read it again and retry: "+err.Error(), http.StatusConflict)
+	case k8s.IsNotFound(err):
+		http.Error(w, "the addon is gone — it was removed while this request was applied: "+err.Error(), http.StatusNotFound)
 	case errors.As(err, &ae) && (ae.Code == http.StatusBadRequest || ae.Code == http.StatusUnprocessableEntity):
 		http.Error(w, "the cluster refused the addon: "+err.Error(), http.StatusUnprocessableEntity)
 	default:
