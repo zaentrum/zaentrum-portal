@@ -228,7 +228,7 @@ const planFor = (a) => {
       annotations: { 'zaentrum.io/addon': 'true', 'zaentrum.io/primary': a.name, 'zaentrum.io/title': title },
     },
     valuesSchema,
-    valuesErrors: a.secretKeys.has('config.password') ? [] : ['config.password: required — the database password is not set'],
+    valuesErrors: a.inputs.has('config.password') ? [] : ['config.password: required — the database password is not set'],
     violations: a.chart.ref.includes('privileged') ? [`Deployment/${a.name}-worker: privileged containers are not allowed`] : [],
     objects: [
       { kind: 'ServiceAccount', name: a.name },
@@ -301,7 +301,7 @@ const chartView = (a) => {
     name: a.name, chart: a.chart, suspended: a.suspend, phase: a.phase, message: a.message,
     generation: a.generation, observedGeneration: a.observedGeneration, plan: a.plan,
     components: a.components, lastAppliedChart: a.lastAppliedChart, values: a.values,
-    secretKeys: [...a.secretKeys].sort(), registered: a.registered,
+    secretKeys: [...a.inputs.keys()].sort(), secretRefs: Object.fromEntries(a.inputs), registered: a.registered,
   };
 };
 
@@ -328,15 +328,27 @@ const chartRow = (a) => {
   };
 };
 
-const newChartAddon = (name, chart, values, secretKeys) => ({
-  name, chart, values, secretKeys: new Set(secretKeys), suspend: true,
+// writeInputs is what portal-api does with secret inputs: the values of one
+// write go to a new Secret, references point at Secrets that exist.
+const writeInputs = (a, body) => {
+  const set = Object.keys(body.secretValues ?? {});
+  const secret = `zaentrum-addon-${a.name}-values-${Math.random().toString(36).slice(2, 7)}`;
+  set.forEach((path) => a.inputs.set(path, { name: secret, key: path }));
+  Object.entries(body.secretRefs ?? {}).forEach(([path, ref]) => a.inputs.set(path, { name: ref.name, key: ref.key || path }));
+  (body.clearSecrets ?? []).forEach((path) => a.inputs.delete(path));
+  return set.length > 0 || Object.keys(body.secretRefs ?? {}).length > 0 || (body.clearSecrets ?? []).length > 0;
+};
+
+const newChartAddon = (name, chart, values) => ({
+  name, chart, values, inputs: new Map(), suspend: true,
   generation: 1, observedGeneration: 0, changedAt: Date.now(), phase: 'Pending', message: '',
   plan: null, components: [], lastAppliedChart: null, registered: false, installStartedAt: 0, readyAt: 0,
 });
 
 // Seeded: "sample", installed from its chart and registered, one version behind.
 {
-  const sample = newChartAddon('sample', { ref: 'oci://registry.example.org/charts/sample', version: '1.0.0' }, { replicas: 2 }, ['config.password']);
+  const sample = newChartAddon('sample', { ref: 'oci://registry.example.org/charts/sample', version: '1.0.0' }, { replicas: 2 });
+  sample.inputs.set('config.password', { name: 'zaentrum-addon-sample-values-7kq2x', key: 'config.password' });
   sample.suspend = false;
   sample.observedGeneration = 1;
   sample.plan = planFor(sample);
@@ -381,14 +393,15 @@ async function serveCharts(req, res, pathname, query) {
     if (taken && !chartAddons.has(name)) {
       return text(res, 409, `an addon "${name}" is already installed from ${taken.proxyUrl} — remove it first, or choose another name`), true;
     }
-    const secrets = Object.keys(body.secretValues ?? {});
     const existing = chartAddons.get(name);
     if (existing) {
       Object.assign(existing, { chart, values: body.values ?? null, suspend: true, changedAt: Date.now() });
-      secrets.forEach((k) => existing.secretKeys.add(k));
+      writeInputs(existing, body);
       existing.generation++;
     } else {
-      chartAddons.set(name, newChartAddon(name, chart, body.values ?? null, secrets));
+      const a = newChartAddon(name, chart, body.values ?? null);
+      writeInputs(a, body);
+      chartAddons.set(name, a);
     }
     return json(res, 202, accepted(chartAddons.get(name))), true;
   }
@@ -425,12 +438,13 @@ async function serveCharts(req, res, pathname, query) {
       const version = body.version !== undefined ? body.version : body.chart !== undefined && /:[^/]+$/.test(body.chart.replace(/^oci:\/\//, '')) ? '' : a.chart.version;
       const { chart, error } = normaliseChart(ref, version, body.digest !== undefined ? body.digest : undefined);
       if (error) return text(res, 400, error), true;
-      changed = chart.ref !== a.chart.ref || (chart.version ?? '') !== (a.chart.version ?? '') || (chart.digest ?? '') !== (a.chart.digest ?? '');
+      const applied = a.lastAppliedChart;
+      const runs = applied && applied.ref === chart.ref && (applied.version ?? '') === (chart.version ?? '') && (!chart.digest || chart.digest === applied.digest);
+      changed = !runs || chart.ref !== a.chart.ref || (chart.version ?? '') !== (a.chart.version ?? '') || (chart.digest ?? '') !== (a.chart.digest ?? '');
       a.chart = chart;
     }
     if ('values' in body) a.values = body.values;
-    Object.keys(body.secretValues ?? {}).forEach((k) => a.secretKeys.add(k));
-    clear.forEach((k) => a.secretKeys.delete(k));
+    writeInputs(a, body);
     if (body.suspend !== undefined) a.suspend = body.suspend;
     else if (changed) a.suspend = true;
     a.generation++;

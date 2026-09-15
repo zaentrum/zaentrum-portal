@@ -39,7 +39,9 @@ addons → **add from a chart** walks the whole wizard. Any chart reference plan
 `https://charts.example.org/notes-1.2.0.tgz`); the plan is generated from the
 chart's name and carries a values schema with a secret input, a generated one,
 an enum, a checkbox, a nested group and a JSON field. Until the database
-password is set the plan has a values error; a reference containing
+password is set the plan has a values error — paste it among the values
+(`{"config":{"password":"…"}}`) and the plan offers to move it to the secret
+inputs; a reference containing
 `privileged` plans with a violation, so a refusal renders. A plan turns current
 about a second after each change, an install brings its two workloads up one
 after the other, and the addon reads as registered a second after it is ready.
