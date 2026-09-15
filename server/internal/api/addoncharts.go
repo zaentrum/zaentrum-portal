@@ -368,6 +368,14 @@ func orphaned(err error, secret string) error {
 	return &orphanedSecret{err: err, secret: secret}
 }
 
+// runs answers whether an addon runs the requested chart: the one it applied
+// last is that reference and version, and — when the request pins a digest —
+// that archive.
+func runs(requested operator.ChartSource, applied *operator.ChartSource) bool {
+	return applied != nil && applied.Ref == requested.Ref && applied.Version == requested.Version &&
+		(requested.Digest == "" || requested.Digest == applied.Digest)
+}
+
 // installable answers whether an addon's plan permits installing it: the
 // operator planned the current generation, and found nothing to refuse and
 // no values error.
@@ -739,10 +747,12 @@ func (a *API) installAddonChart(w http.ResponseWriter, r *http.Request) {
 // {chart?, version?, digest?, values?, secretValues?, secretRefs?,
 // clearSecrets?, suspend?}: upgrade or reconfigure.
 //
-// A new chart, version or digest suspends the addon — the operator plans it
-// and the admin installs the plan — unless suspend: false is sent. Values are
-// replaced when present (null removes them). Only the secret inputs the request
-// names are touched: every other valuesFrom entry keeps its place and fields.
+// A chart, version or digest other than the addon's spec — or other than the
+// chart the addon runs, so a failed upgrade is retried by planning it again —
+// suspends the addon: the operator plans it and the admin installs the plan,
+// unless suspend: false is sent. Values are replaced when present (null
+// removes them). Only the secret inputs the request names are touched: every
+// other valuesFrom entry keeps its place and fields.
 func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
 	if !a.chartsReady(w) {
 		return
@@ -818,7 +828,7 @@ func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
 				// A digest pins one archive; another chart or version is not it.
 				chart.Digest = ""
 			}
-			changed = chart != ca.Chart
+			changed = chart != ca.Chart || !runs(chart, ca.LastAppliedChart)
 			ca.Chart = chart
 		}
 		if body.Values != nil {

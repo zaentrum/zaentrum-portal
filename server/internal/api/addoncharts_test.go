@@ -763,6 +763,56 @@ func TestPatchAddonChart(t *testing.T) {
 	})
 }
 
+// Asking for a chart plans it first whenever the addon does not run that
+// chart — also when the spec names it already, as after an upgrade that was
+// installed and failed to apply: retrying it plans again.
+func TestPatchPlansAChartTheAddonDoesNotRun(t *testing.T) {
+	applied := func(version, digest string) map[string]any {
+		return map[string]any{"ref": "oci://registry.example.org/charts/example", "version": version, "digest": digest}
+	}
+	resolved := "sha256:" + strings.Repeat("a", 64)
+	other := "sha256:" + strings.Repeat("c", 64)
+	cases := []struct {
+		name         string
+		spec, digest string // the spec's version and pin
+		lastApplied  map[string]any
+		body         map[string]any
+		suspend      bool
+	}{
+		{"a failed upgrade, retried", "1.3.0", "", applied("1.2.0", resolved), map[string]any{"version": "1.3.0"}, true},
+		{"the chart it runs", "1.2.0", "", applied("1.2.0", resolved), map[string]any{"version": "1.2.0"}, false},
+		{"the archive it runs, pinned already", "1.2.0", resolved, applied("1.2.0", resolved), map[string]any{"version": "1.2.0", "digest": resolved}, false},
+		{"a pin is a spec change", "1.2.0", "", applied("1.2.0", resolved), map[string]any{"version": "1.2.0", "digest": resolved}, true},
+		{"another archive of the version it runs, pinned in the spec", "1.2.0", other, applied("1.2.0", resolved), map[string]any{"digest": other}, true},
+		{"never applied", "1.2.0", "", nil, map[string]any{"version": "1.2.0"}, true},
+		{"explicitly not suspended", "1.3.0", "", applied("1.2.0", resolved), map[string]any{"version": "1.3.0", "suspend": false}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newChartEnv(t)
+			status := map[string]any{"phase": "Failed", "message": "apply Deployment/example: boom"}
+			if c.lastApplied != nil {
+				status["lastAppliedChart"] = c.lastApplied
+			}
+			chart := map[string]any{"ref": "oci://registry.example.org/charts/example", "version": c.spec}
+			if c.digest != "" {
+				chart["digest"] = c.digest
+			}
+			e.seed("example", map[string]any{"chart": chart, "suspend": false}, status)
+			rec := e.do(http.MethodPatch, "/api/portal/addon-charts/example", c.body)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("patch = %d %s", rec.Code, rec.Body)
+			}
+			if got := e.spec("example")["suspend"] == true; got != c.suspend {
+				t.Errorf("suspended = %v, want %v", got, c.suspend)
+			}
+			if c.suspend && e.kube.Generation(addonPlural, "example") != 2 {
+				t.Errorf("a plan needs a new generation, got %d", e.kube.Generation(addonPlural, "example"))
+			}
+		})
+	}
+}
+
 // A write whose resource update fails after its Secret was stored: the addon
 // keeps reading the old input — the running addon never sees the new value —
 // and the answer says which Secret was left behind.
