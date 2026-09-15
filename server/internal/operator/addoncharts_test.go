@@ -79,12 +79,14 @@ func TestChartAddonRoundTripKeepsUnknownFields(t *testing.T) {
 	if spec["suspend"] != true || spec["chart"].(map[string]any)["version"] != "1.1.0" || len(spec["valuesFrom"].([]any)) != 2 {
 		t.Errorf("managed fields = %v", spec)
 	}
-	if gen := fake.Generation(addons, "example"); gen != 2 {
-		t.Errorf("a spec change moves the generation: %v", gen)
+	if gen := fake.Generation(addons, "example"); gen != 2 || a.Generation != 2 || a.ObservedGeneration != 1 {
+		t.Errorf("a spec change moves the generation: stored %v, answered %d/%d", gen, a.Generation, a.ObservedGeneration)
 	}
+	stale, _ := svc.ChartAddon(ctx, "example")
+	fake.SetStatus(addons, "example", map[string]any{"phase": "Planned"})
 
 	// The read is stale now: an update from it is a conflict, never a blind write.
-	if err := svc.UpdateChartAddon(ctx, a); !k8s.IsConflict(err) {
+	if err := svc.UpdateChartAddon(ctx, stale); !k8s.IsConflict(err) {
 		t.Errorf("stale update = %v, want a conflict", err)
 	}
 }
@@ -99,6 +101,9 @@ func TestCreateAndDeleteChartAddon(t *testing.T) {
 	}
 	if err := svc.CreateChartAddon(ctx, a); err != nil {
 		t.Fatal(err)
+	}
+	if a.Generation != 1 || a.ObservedGeneration != 0 || a.ResourceVersion == "" || a.Chart.Ref != "https://charts.example.org/example-1.2.0.tgz" {
+		t.Errorf("a create must leave the addon as created: %+v", a)
 	}
 	got := fake.Object(addons, "example")
 	if got["kind"] != "ZaentrumAddon" || got["apiVersion"] != "zaentrum.io/v1alpha1" {
@@ -203,22 +208,29 @@ func TestKeepAndDeleteAddonSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fake.PutSecret(map[string]any{
-		"metadata": map[string]any{
-			"name":            name,
-			"labels":          map[string]any{"zaentrum.io/addon": "example"},
-			"ownerReferences": []any{map[string]any{"kind": "ZaentrumAddon", "name": "example", "controller": false}},
-		},
-		"data": map[string]any{"config.password": "czNjcmV0"},
-	})
+	owned := func(secret string) map[string]any {
+		return map[string]any{
+			"metadata": map[string]any{
+				"name":            secret,
+				"labels":          map[string]any{"zaentrum.io/addon": "example"},
+				"ownerReferences": []any{map[string]any{"kind": "ZaentrumAddon", "name": "example", "controller": false}},
+			},
+			"data": map[string]any{"config.password": "czNjcmV0"},
+		}
+	}
+	generated := GeneratedSecretName("example")
+	fake.PutSecret(owned(name))
+	fake.PutSecret(owned(generated))
 	if err := svc.KeepAddonSecrets(ctx, "example"); err != nil {
 		t.Fatal(err)
 	}
-	md := fake.Secret(name)["metadata"].(map[string]any)
-	if md["labels"].(map[string]any)[LabelKeep] != "true" || md["ownerReferences"] != nil {
-		t.Errorf("kept secret metadata = %v — labelled keep, and nothing for garbage collection to follow", md)
+	for _, n := range []string{name, generated} {
+		md := fake.Secret(n)["metadata"].(map[string]any)
+		if md["labels"].(map[string]any)[LabelKeep] != "true" || md["ownerReferences"] != nil {
+			t.Errorf("kept %s metadata = %v — labelled keep, and nothing for garbage collection to follow", n, md)
+		}
 	}
-	if err := svc.DeleteAddonSecrets(ctx, "example"); err != nil || fake.Secret(name) != nil {
-		t.Errorf("delete = %v, secret %v", err, fake.Secret(name))
+	if err := svc.DeleteAddonSecrets(ctx, "example"); err != nil || fake.Secret(name) != nil || fake.Secret(generated) != nil {
+		t.Errorf("delete = %v, secrets %v %v", err, fake.Secret(name), fake.Secret(generated))
 	}
 }

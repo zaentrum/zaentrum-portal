@@ -78,7 +78,7 @@ const chartManifest = `{
   "service": "example", "kind": "addon", "version": "2.0.0",
   "components": [
     {"name": "example", "workload": "example", "role": "primary", "summary": "serves the console"},
-    {"name": "worker", "workload": "example-worker", "role": "optional", "summary": "processes the queue"}
+    {"name": "worker", "workload": "example-worker", "role": "optional", "summary": "processes the queue", "topics": ["example.item.done"]}
   ],
   "ui": {"app": {"title": "Example"}, "console": true,
          "slots": [{"key": "hint", "slot": "search.empty", "label": "open example", "url": "/portal/app/example?q={q}"}]}
@@ -146,6 +146,15 @@ func TestSyncChartAddons(t *testing.T) {
 	}
 	if len(in.Rows) != 1 || in.Rows[0].URL != "https://zaentrum.example.org/portal/app/example?q={q}" {
 		t.Errorf("slot URLs are absolutised against the platform's hostname: %+v", in.Rows)
+	}
+	// Components are named as the operator labels them — by Deployment — with
+	// the chart's primary and every other workload required.
+	wantComponents := []model.AddonComponent{
+		{Name: "example", Workload: "example", Role: "primary", Summary: "serves the console"},
+		{Name: "example-worker", Workload: "example-worker", Role: "required", Summary: "processes the queue", Order: 1},
+	}
+	if len(in.Components) != 2 || in.Components[0] != wantComponents[0] || in.Components[1] != wantComponents[1] {
+		t.Errorf("components = %+v", in.Components)
 	}
 	registerInstalls(e.store)
 	if rec := e.do(http.MethodGet, "/api/portal/addon-charts/example", nil); !strings.Contains(rec.Body.String(), `"registered":true`) {
@@ -349,7 +358,7 @@ func TestListAddonsMergesChartAddons(t *testing.T) {
 		ChartRef: "oci://registry.example.org/charts/example", ChartVersion: "1.2.0",
 		Components: []model.AddonComponent{
 			{Name: "example", Workload: "example", Role: "primary", Summary: "serves the console"},
-			{Name: "worker", Workload: "example-worker", Role: "optional", Summary: "processes the queue", Order: 1},
+			{Name: "example-worker", Workload: "example-worker", Role: "required", Summary: "processes the queue", Order: 1},
 		},
 	}
 	e.store.addons["legacy"] = model.Addon{Key: "legacy", Address: "http://legacy", Components: []model.AddonComponent{{Name: "legacy", Workload: "legacy", Role: "primary"}}}
@@ -392,8 +401,9 @@ func TestListAddonsMergesChartAddons(t *testing.T) {
 		t.Errorf("primary = %+v", primary)
 	}
 	// The chart's other workloads are required, whatever the manifest says.
-	if worker.Workload != "example-worker" || worker.Role != "required" || *worker.Phase != "degraded" ||
-		*worker.Ready != 0 || *worker.Desired != 1 || *worker.Reason != "CrashLoopBackOff" || worker.Summary != "processes the queue" {
+	if worker.Name != "example-worker" || worker.Workload != "example-worker" || worker.Role != "required" || *worker.Phase != "degraded" ||
+		*worker.Ready != 0 || *worker.Desired != 1 || *worker.Reason != "CrashLoopBackOff" || worker.Summary != "processes the queue" ||
+		strings.Join(worker.Topics, ",") != "example.item.done" {
 		t.Errorf("worker = %+v", worker)
 	}
 	if legacy.Chart != nil || !legacy.Registered || legacy.Phase != "" {
@@ -427,5 +437,39 @@ func TestAddressPathLeavesChartAddonsAlone(t *testing.T) {
 	}
 	if len(e.store.installs) != 0 || len(e.store.removals) != 0 {
 		t.Errorf("installs %d, removals %v", len(e.store.installs), e.store.removals)
+	}
+}
+
+func TestChartComponents(t *testing.T) {
+	declared := []model.AddonComponent{
+		{Name: "example", Workload: "example", Role: "primary", Summary: "serves the console"},
+		{Name: "worker", Workload: "example-worker", Role: "optional", Summary: "processes the queue", Order: 1},
+	}
+	withPrimary := func(components ...operator.ChartComponent) operator.ChartAddon {
+		ca := operator.ChartAddon{Name: "example", Components: components, Plan: &operator.ChartPlan{}}
+		ca.Plan.Chart.Annotations = map[string]string{operator.AnnotationPrimary: "example"}
+		return ca
+	}
+	names := func(cs []model.AddonComponent) string {
+		var out []string
+		for _, c := range cs {
+			out = append(out, c.Name+"/"+c.Role)
+		}
+		return strings.Join(out, " ")
+	}
+	// The status lists what runs, in its own order; the primary leads.
+	got := chartComponents(withPrimary(
+		operator.ChartComponent{Name: "example-worker"}, operator.ChartComponent{Name: "example-cache"}, operator.ChartComponent{Name: "example"},
+	), declared)
+	if names(got) != "example/primary example-worker/required example-cache/required" || got[1].Summary != "processes the queue" || got[2].Order != 2 {
+		t.Errorf("from status = %+v", got)
+	}
+	// No status components yet: the manifest's, named by workload.
+	if got := chartComponents(withPrimary(), declared); names(got) != "example/primary example-worker/required" {
+		t.Errorf("from the manifest = %+v", got)
+	}
+	// A workload name that is no label cannot be a component row.
+	if got := chartComponents(withPrimary(operator.ChartComponent{Name: "example.v2"}), declared); names(got) != "example/primary" {
+		t.Errorf("non-label names = %+v", got)
 	}
 }

@@ -151,7 +151,8 @@ func (a *API) registerChartAddon(ctx context.Context, ca operator.ChartAddon) er
 	a.registration.mu.Lock()
 	defer a.registration.mu.Unlock()
 	// Removed, or no longer ready, while the manifest was read: not now.
-	switch current, err := a.charts.ChartAddon(ctx, ca.Name); {
+	current, err := a.charts.ChartAddon(ctx, ca.Name)
+	switch {
 	case k8s.IsNotFound(err):
 		return nil
 	case err != nil:
@@ -172,6 +173,7 @@ func (a *API) registerChartAddon(ctx context.Context, ca operator.ChartAddon) er
 	if err != nil {
 		return err
 	}
+	plan.Components = chartComponents(*current, plan.Components)
 	if reg.app, err = a.addons.GetApp(ctx, plan.App.Key); errors.Is(err, store.ErrNotFound) {
 		reg.app = nil
 	} else if err != nil {
@@ -317,10 +319,65 @@ func (row *installedAddon) withChart(ca operator.ChartAddon) {
 	row.RefreshAvailable = false // the registration loop refreshes a chart addon
 }
 
+// chartComponents are the components a chart addon is registered with, named
+// the way the operator labels its workloads (zaentrum.io/component): by
+// Deployment name. They are the Deployments the addon's status reports — the
+// one the chart's primary annotation names is the primary, every other one
+// required — with the summary the manifest gives a workload it declares.
+// Without components in the status, the manifest's components stand in, named
+// and ranked the same way. The primary serves the manifest, so it is always
+// one.
+func chartComponents(ca operator.ChartAddon, declared []model.AddonComponent) []model.AddonComponent {
+	byWorkload := make(map[string]model.AddonComponent, len(declared))
+	for _, c := range declared {
+		byWorkload[c.Workload] = c
+	}
+	primary := ca.Primary()
+	seen := map[string]bool{}
+	var out []model.AddonComponent
+	add := func(workload string) {
+		if seen[workload] || !isDNSLabel(workload) {
+			return
+		}
+		seen[workload] = true
+		role := roleRequired
+		if workload == primary {
+			role = rolePrimary
+		}
+		out = append(out, model.AddonComponent{Name: workload, Workload: workload, Role: role, Summary: byWorkload[workload].Summary})
+	}
+	add(primary)
+	for _, c := range ca.Components {
+		add(c.Name)
+	}
+	if len(ca.Components) == 0 {
+		for _, c := range declared {
+			add(c.Workload)
+		}
+	}
+	for i := range out {
+		out[i].Order = i
+	}
+	return out
+}
+
+// workloadTopics maps each workload a manifest declares to its topics.
+func workloadTopics(d Descriptor) map[string][]string {
+	byName := componentTopics(d)
+	out := map[string][]string{}
+	for _, c := range d.Components {
+		if topics := byName[strings.TrimSpace(c.Name)]; len(topics) > 0 {
+			out[strings.TrimSpace(c.Workload)] = topics
+		}
+	}
+	return out
+}
+
 // chartComponentViews are a chart addon's components as its status reports
-// them: the workload the chart names primary is the primary, every other one
-// required. The live workload state wins when the platform can see it;
-// summaries and topics come from the manifest, where it declares the workload.
+// them, named by Deployment: the workload the chart names primary is the
+// primary, every other one required. The live workload state wins when the
+// platform can see it; summaries come from the registered components, topics
+// (by workload) from the manifest.
 func chartComponentViews(ca operator.ChartAddon, declared []model.AddonComponent, topics map[string][]string, live map[string]operator.Instance, known bool) []componentView {
 	byWorkload := make(map[string]model.AddonComponent, len(declared))
 	for _, c := range declared {
@@ -333,9 +390,7 @@ func chartComponentViews(ca operator.ChartAddon, declared []model.AddonComponent
 		if c.Name == primary {
 			v.Role = rolePrimary
 		}
-		if d, ok := byWorkload[c.Name]; ok {
-			v.Summary, v.Topics = d.Summary, topics[d.Name]
-		}
+		v.Summary, v.Topics = byWorkload[c.Name].Summary, topics[c.Name]
 		if in, ok := live[c.Name]; known && ok {
 			v.Phase, v.Reason = ptr(in.Phase), ptr(in.Reason)
 			v.Ready, v.Desired, v.Restarts = ptr(in.ReadyReplicas), ptr(in.DesiredReplicas), ptr(in.Restarts)

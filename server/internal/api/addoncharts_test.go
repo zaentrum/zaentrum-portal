@@ -134,6 +134,15 @@ func secretData(t *testing.T, kube *k8sfake.Server, name string) map[string]stri
 	return out
 }
 
+func decodeAccepted(t *testing.T, rec *httptest.ResponseRecorder) chartAccepted {
+	t.Helper()
+	var got chartAccepted
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("%v: %s", err, rec.Body)
+	}
+	return got
+}
+
 // secretCalls is every request portal-api made against Secrets, as "METHOD name".
 func secretCalls(kube *k8sfake.Server) []string {
 	var out []string
@@ -195,8 +204,12 @@ func TestCreateAddonChart(t *testing.T) {
 		"values":       map[string]any{"worker": map[string]any{"replicas": 2}},
 		"secretValues": map[string]string{"config.password": "s3cret-value"},
 	})
-	if rec.Code != http.StatusAccepted || strings.TrimSpace(rec.Body.String()) != `{"name":"example"}` {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	if got := decodeAccepted(t, rec); got.Name != "example" || got.Generation != 1 || got.ObservedGeneration != 0 ||
+		got.Chart != (operator.ChartSource{Ref: "oci://registry.example.org/charts/example", Version: "1.2.0"}) {
+		t.Errorf("accepted = %+v — a client tells this plan from an older one by the generation", got)
 	}
 	spec := e.spec("example")
 	chart := spec["chart"].(map[string]any)
@@ -228,6 +241,9 @@ func TestCreateAddonChart(t *testing.T) {
 	})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("update = %d %s", rec.Code, rec.Body)
+	}
+	if got := decodeAccepted(t, rec); got.Generation != 2 || got.ObservedGeneration != 1 || got.Chart.Ref != "https://charts.example.org/example-1.3.0.tgz" {
+		t.Errorf("accepted after update = %+v", got)
 	}
 	spec = e.spec("example")
 	if b, _ := json.Marshal(spec["values"]); string(b) != `{"logLevel":"debug"}` {
@@ -452,8 +468,12 @@ func TestInstallAddonChart(t *testing.T) {
 		e := newChartEnv(t)
 		e.seed("example", spec, nil)
 		e.plans("example", "Planned", examplePlan("1.2.0"), nil)
-		if rec := install(e); rec.Code != http.StatusAccepted || suspended(e) {
+		rec := install(e)
+		if rec.Code != http.StatusAccepted || suspended(e) {
 			t.Fatalf("install = %d %s, suspend=%v", rec.Code, rec.Body, e.spec("example")["suspend"])
+		}
+		if got := decodeAccepted(t, rec); got.Generation != 2 || got.ObservedGeneration != 1 {
+			t.Errorf("accepted = %+v — suspend is spec: installing moves the generation", got)
 		}
 		select {
 		case <-e.api.registration.kick:
@@ -501,17 +521,21 @@ func TestPatchAddonChart(t *testing.T) {
 			"data":     map[string]any{"config.password": base64.StdEncoding.EncodeToString([]byte("old"))},
 		})
 	}
-	patch := func(e *chartEnv, body any) {
+	patch := func(e *chartEnv, body any) chartAccepted {
 		t.Helper()
-		if rec := e.do(http.MethodPatch, "/api/portal/addon-charts/example", body); rec.Code != http.StatusAccepted {
+		rec := e.do(http.MethodPatch, "/api/portal/addon-charts/example", body)
+		if rec.Code != http.StatusAccepted {
 			t.Fatalf("patch %v = %d %s", body, rec.Code, rec.Body)
 		}
+		return decodeAccepted(t, rec)
 	}
 
 	t.Run("upgrade plans first", func(t *testing.T) {
 		e := newChartEnv(t)
 		installed(e)
-		patch(e, map[string]any{"version": "1.3.0"})
+		if got := patch(e, map[string]any{"version": "1.3.0"}); got.Generation != 2 || got.Chart.Version != "1.3.0" || got.Chart.Digest != "" {
+			t.Errorf("accepted = %+v", got)
+		}
 		spec := e.spec("example")
 		chart := spec["chart"].(map[string]any)
 		if chart["version"] != "1.3.0" || chart["digest"] != nil || spec["suspend"] != true {
@@ -611,14 +635,16 @@ func TestPatchAddonChart(t *testing.T) {
 func TestRemoveAddonChart(t *testing.T) {
 	prepare := func(e *chartEnv, registered bool) {
 		e.seed("example", map[string]any{"chart": map[string]any{"ref": "oci://registry.example.org/charts/example", "version": "1.2.0"}}, nil)
-		e.kube.PutSecret(map[string]any{
-			"metadata": map[string]any{
-				"name":            "zaentrum-addon-example-values",
-				"labels":          map[string]any{"zaentrum.io/addon": "example"},
-				"ownerReferences": []any{map[string]any{"apiVersion": "zaentrum.io/v1alpha1", "kind": "ZaentrumAddon", "name": "example"}},
-			},
-			"data": map[string]any{"config.password": base64.StdEncoding.EncodeToString([]byte("s3cret"))},
-		})
+		for _, name := range []string{"zaentrum-addon-example-values", "zaentrum-addon-example-generated"} {
+			e.kube.PutSecret(map[string]any{
+				"metadata": map[string]any{
+					"name":            name,
+					"labels":          map[string]any{"zaentrum.io/addon": "example"},
+					"ownerReferences": []any{map[string]any{"apiVersion": "zaentrum.io/v1alpha1", "kind": "ZaentrumAddon", "name": "example"}},
+				},
+				"data": map[string]any{"config.password": base64.StdEncoding.EncodeToString([]byte("s3cret"))},
+			})
+		}
 		if registered {
 			e.store.addons["example"] = model.Addon{Key: "example", ChartRef: "oci://registry.example.org/charts/example", ChartVersion: "1.2.0"}
 		}
@@ -634,22 +660,25 @@ func TestRemoveAddonChart(t *testing.T) {
 		if e.kube.Object(addonPlural, "example") != nil {
 			t.Error("the ZaentrumAddon must be deleted")
 		}
-		sec := e.kube.Secret("zaentrum-addon-example-values")
-		if sec == nil {
-			t.Fatal("a kept values Secret must survive its addon's garbage collection")
-		}
-		md := sec["metadata"].(map[string]any)
-		if md["labels"].(map[string]any)["zaentrum.io/keep"] != "true" || md["ownerReferences"] != nil {
-			t.Errorf("kept secret = %v", md)
+		// The operator's generated values are values too: kept alike.
+		for _, name := range []string{"zaentrum-addon-example-values", "zaentrum-addon-example-generated"} {
+			sec := e.kube.Secret(name)
+			if sec == nil {
+				t.Fatalf("kept %s must survive its addon's garbage collection", name)
+			}
+			md := sec["metadata"].(map[string]any)
+			if md["labels"].(map[string]any)["zaentrum.io/keep"] != "true" || md["ownerReferences"] != nil {
+				t.Errorf("kept %s = %v", name, md)
+			}
 		}
 		if len(e.store.removals) != 1 || e.store.removals[0] != "example|" {
 			t.Errorf("registry rows must go: %v", e.store.removals)
 		}
-		// The keep label lands before the resource is deleted.
+		// The keep labels land before the resource is deleted.
 		calls := e.kube.Calls()
 		keptAt, deletedAt := -1, -1
 		for i, c := range calls {
-			if c.Method == http.MethodPatch && strings.Contains(c.Path, "/secrets/") {
+			if c.Method == http.MethodPatch && strings.Contains(c.Path, "/secrets/") && keptAt < i {
 				keptAt = i
 			}
 			if c.Method == http.MethodDelete && strings.Contains(c.Path, addonPlural) {
@@ -664,10 +693,13 @@ func TestRemoveAddonChart(t *testing.T) {
 	t.Run("without keeping values", func(t *testing.T) {
 		e := newChartEnv(t)
 		prepare(e, true)
-		// Not owned yet — the operator never reconciled — and still deleted.
+		// Not owned — never reconciled, or kept by an earlier removal — and
+		// still deleted.
 		e.kube.PutSecret(map[string]any{"metadata": map[string]any{"name": "zaentrum-addon-example-values"}, "data": map[string]any{}})
+		e.kube.PutSecret(map[string]any{"metadata": map[string]any{"name": "zaentrum-addon-example-generated", "labels": map[string]any{"zaentrum.io/keep": "true"}}})
 		rec := e.do(http.MethodDelete, "/api/portal/addon-charts/example", nil)
-		if rec.Code != http.StatusOK || e.kube.Secret("zaentrum-addon-example-values") != nil || e.kube.Object(addonPlural, "example") != nil {
+		if rec.Code != http.StatusOK || e.kube.Object(addonPlural, "example") != nil ||
+			e.kube.Secret("zaentrum-addon-example-values") != nil || e.kube.Secret("zaentrum-addon-example-generated") != nil {
 			t.Fatalf("remove = %d %s", rec.Code, rec.Body)
 		}
 		if len(e.store.removals) != 1 {

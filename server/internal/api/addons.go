@@ -946,12 +946,15 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
 		if row.Title == "" {
 			row.Title = ad.Key
 		}
-		var topics map[string][]string
+		var topics, byWorkload map[string][]string
 		if d, ok := storedManifest(ad); ok {
 			// Stored manifests were valid when installed; a failure here can
 			// only mean a newer contract and is not worth hiding the row for.
 			row.Setup, _ = normaliseSetup(d.Setup)
-			topics = componentTopics(d)
+			topics, byWorkload = componentTopics(d), workloadTopics(d)
+		}
+		if ad.ChartRef != "" {
+			topics = byWorkload // a chart addon's components are named by workload
 		}
 		row.Components = componentViews(ad.Components, topics, live, known)
 		if sum, ok := served[ad.Key]; ok && sum != ad.ManifestSHA256 {
@@ -959,7 +962,7 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
 		}
 		if ca, ok := charts[ad.Key]; ok {
 			if len(ca.Components) > 0 {
-				row.Components = chartComponentViews(ca, ad.Components, topics, live, known)
+				row.Components = chartComponentViews(ca, ad.Components, byWorkload, live, known)
 			}
 			row.withChart(ca)
 			row.RegistrationError = a.registrationError(ad.Key)

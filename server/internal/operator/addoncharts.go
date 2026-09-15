@@ -38,6 +38,10 @@ const ChartPhaseReady = "Ready"
 // dotted values path.
 func ValuesSecretName(addon string) string { return "zaentrum-addon-" + addon + "-values" }
 
+// GeneratedSecretName is the Secret the operator keeps the values it generated
+// for an addon in.
+func GeneratedSecretName(addon string) string { return "zaentrum-addon-" + addon + "-generated" }
+
 // ChartSource is a chart reference: an oci:// ref with a version (its tag), or
 // an https:// link to a chart archive. Digest optionally pins the archive.
 type ChartSource struct {
@@ -265,7 +269,8 @@ func (s *Service) ChartAddon(ctx context.Context, name string) (*ChartAddon, err
 	return &a, nil
 }
 
-// CreateChartAddon creates a ZaentrumAddon from a's name and managed spec.
+// CreateChartAddon creates a ZaentrumAddon from a's name and managed spec, and
+// updates a to the resource as created (its generation, among others).
 func (s *Service) CreateChartAddon(ctx context.Context, a *ChartAddon) error {
 	if err := validName(a.Name); err != nil {
 		return err
@@ -283,13 +288,27 @@ func (s *Service) CreateChartAddon(ctx context.Context, a *ChartAddon) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.k8s.CreateResource(ctx, g, v, p, body)
-	return err
+	raw, err := s.k8s.CreateResource(ctx, g, v, p, body)
+	if err != nil {
+		return err
+	}
+	return a.refresh(raw)
 }
 
-// UpdateChartAddon writes a's managed spec over the resource as it was read. A
-// change made since then is answered with a conflict (k8s.IsConflict): read
-// again and redo the change, never overwrite.
+// refresh replaces a with the resource an apiserver answered a write with.
+func (a *ChartAddon) refresh(raw []byte) error {
+	written, err := parseChartAddon(raw)
+	if err != nil {
+		return err
+	}
+	*a = written
+	return nil
+}
+
+// UpdateChartAddon writes a's managed spec over the resource as it was read,
+// and updates a to the resource as written. A change made since the read is
+// answered with a conflict (k8s.IsConflict): read again and redo the change,
+// never overwrite.
 func (s *Service) UpdateChartAddon(ctx context.Context, a *ChartAddon) error {
 	if a.obj == nil {
 		return errors.New("update of a ZaentrumAddon that was not read")
@@ -303,8 +322,11 @@ func (s *Service) UpdateChartAddon(ctx context.Context, a *ChartAddon) error {
 		return err
 	}
 	g, v, p := s.addonResource()
-	_, err = s.k8s.UpdateResource(ctx, g, v, p, a.Name, body)
-	return err
+	raw, err := s.k8s.UpdateResource(ctx, g, v, p, a.Name, body)
+	if err != nil {
+		return err
+	}
+	return a.refresh(raw)
 }
 
 // DeleteChartAddon deletes a ZaentrumAddon. What it owns — workloads, the
@@ -377,10 +399,11 @@ func (s *Service) WriteAddonSecrets(ctx context.Context, addon string, set map[s
 	return nil
 }
 
-// KeepAddonSecrets makes an addon's values Secret outlive the addon: the keep
-// label, so the operator stops owning it, and no owner reference, so garbage
-// collection has nothing to follow when the addon goes. A missing Secret has
-// nothing to keep.
+// KeepAddonSecrets makes an addon's values outlive the addon — the Secret
+// with its secret inputs and the one with the values the operator generated:
+// the keep label, so the operator stops owning them, and no owner reference,
+// so garbage collection has nothing to follow when the addon goes. A missing
+// Secret has nothing to keep.
 func (s *Service) KeepAddonSecrets(ctx context.Context, addon string) error {
 	if err := validName(addon); err != nil {
 		return err
@@ -394,19 +417,25 @@ func (s *Service) KeepAddonSecrets(ctx context.Context, addon string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.k8s.PatchSecret(ctx, ValuesSecretName(addon), patch); err != nil && !k8s.IsNotFound(err) {
-		return err
+	for _, name := range []string{ValuesSecretName(addon), GeneratedSecretName(addon)} {
+		if err := s.k8s.PatchSecret(ctx, name, patch); err != nil && !k8s.IsNotFound(err) {
+			return err
+		}
 	}
 	return nil
 }
 
-// DeleteAddonSecrets deletes an addon's values Secret, if there is one.
+// DeleteAddonSecrets deletes an addon's values Secret and the one with its
+// generated values, whichever exist — also when a removal that kept them left
+// them without an owner for garbage collection to follow.
 func (s *Service) DeleteAddonSecrets(ctx context.Context, addon string) error {
 	if err := validName(addon); err != nil {
 		return err
 	}
-	if err := s.k8s.DeleteSecret(ctx, ValuesSecretName(addon)); err != nil && !k8s.IsNotFound(err) {
-		return err
+	for _, name := range []string{ValuesSecretName(addon), GeneratedSecretName(addon)} {
+		if err := s.k8s.DeleteSecret(ctx, name); err != nil && !k8s.IsNotFound(err) {
+			return err
+		}
 	}
 	return nil
 }

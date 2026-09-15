@@ -375,26 +375,44 @@ func (a *API) chartMissing(ctx context.Context, w http.ResponseWriter, name stri
 	http.Error(w, fmt.Sprintf("no addon %q is installed from a chart", name), http.StatusNotFound)
 }
 
-// updateChartAddon reads an addon, applies change and writes it back. A write
-// that lost a race — with an admin, or with the operator's status — is redone
-// from a fresh read, so change must be safe to apply again. change returns
-// errUnchanged when there is nothing to write.
-func (a *API) updateChartAddon(ctx context.Context, name string, change func(*operator.ChartAddon) error) error {
+// updateChartAddon reads an addon, applies change, writes it back and returns
+// it as written. A write that lost a race — with an admin, or with the
+// operator's status — is redone from a fresh read, so change must be safe to
+// apply again. change returns errUnchanged when there is nothing to write; the
+// addon is then returned as read.
+func (a *API) updateChartAddon(ctx context.Context, name string, change func(*operator.ChartAddon) error) (*operator.ChartAddon, error) {
 	for attempt := 1; ; attempt++ {
 		ca, err := a.charts.ChartAddon(ctx, name)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := change(ca); errors.Is(err, errUnchanged) {
-			return nil
+			return ca, nil
 		} else if err != nil {
-			return err
+			return nil, err
 		}
 		err = a.charts.UpdateChartAddon(ctx, ca)
+		if err == nil {
+			return ca, nil
+		}
 		if !k8s.IsConflict(err) || attempt == updateAttempts {
-			return err
+			return nil, err
 		}
 	}
+}
+
+// chartAccepted answers a write: the addon's name, and what a client needs
+// to tell the plan for this write from an older one — the generation it made
+// and the one the operator has planned so far — with the chart it names.
+type chartAccepted struct {
+	Name               string               `json:"name"`
+	Generation         int64                `json:"generation"`
+	ObservedGeneration int64                `json:"observedGeneration"`
+	Chart              operator.ChartSource `json:"chart"`
+}
+
+func accepted(ca *operator.ChartAddon) chartAccepted {
+	return chartAccepted{Name: ca.Name, Generation: ca.Generation, ObservedGeneration: ca.ObservedGeneration, Chart: ca.Chart}
 }
 
 // chartNameTaken refuses a new chart addon whose name the registry already
@@ -506,16 +524,18 @@ func (a *API) createAddonChart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var written *operator.ChartAddon
 	if existing == nil {
-		err = a.charts.CreateChartAddon(ctx, &operator.ChartAddon{
+		written = &operator.ChartAddon{
 			Name: name, Chart: chart, Values: values, Suspend: true,
 			ValuesFrom: withSecretInputs(name, nil, set),
-		})
+		}
+		err = a.charts.CreateChartAddon(ctx, written)
 		if k8s.IsConflict(err) {
 			err = &conflictError{msg: fmt.Sprintf("an addon %q was created meanwhile — read it and try again", name)}
 		}
 	} else {
-		err = a.updateChartAddon(ctx, name, func(ca *operator.ChartAddon) error {
+		written, err = a.updateChartAddon(ctx, name, func(ca *operator.ChartAddon) error {
 			current, others := secretInputs(name, ca.ValuesFrom)
 			if len(current)+len(set) > maxSecretInputs {
 				return bad("at most %d secret inputs", maxSecretInputs)
@@ -529,7 +549,7 @@ func (a *API) createAddonChart(w http.ResponseWriter, r *http.Request) {
 		writeChartError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"name": name})
+	writeJSON(w, http.StatusAccepted, accepted(written))
 }
 
 // chartAddonView is GET /api/portal/addon-charts/{name}: the resource as the
@@ -604,7 +624,7 @@ func (a *API) installAddonChart(w http.ResponseWriter, r *http.Request) {
 	}
 	a.noteOrigin(r)
 	ctx := r.Context()
-	err := a.updateChartAddon(ctx, name, func(ca *operator.ChartAddon) error {
+	written, err := a.updateChartAddon(ctx, name, func(ca *operator.ChartAddon) error {
 		if err := installable(ca); err != nil {
 			return err
 		}
@@ -623,7 +643,7 @@ func (a *API) installAddonChart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.kickRegistration()
-	writeJSON(w, http.StatusAccepted, map[string]string{"name": name})
+	writeJSON(w, http.StatusAccepted, accepted(written))
 }
 
 // patchAddonChart handles PATCH /api/portal/addon-charts/{name}
@@ -697,7 +717,7 @@ func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	err = a.updateChartAddon(ctx, name, func(ca *operator.ChartAddon) error {
+	written, err := a.updateChartAddon(ctx, name, func(ca *operator.ChartAddon) error {
 		changed := false
 		if body.Chart != nil || body.Version != nil || body.Digest != nil {
 			ref, version, digest := ca.Chart.Ref, ca.Chart.Version, ca.Chart.Digest
@@ -763,16 +783,17 @@ func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
 	if body.Suspend != nil && !*body.Suspend {
 		a.kickRegistration()
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"name": name})
+	writeJSON(w, http.StatusAccepted, accepted(written))
 }
 
 // removeAddonChart handles DELETE /api/portal/addon-charts/{name}?keepValues=.
 //
-// keepValues marks the values Secret to outlive the addon first; then the
-// ZaentrumAddon is deleted — garbage collection takes the workloads and
-// everything else it owns — and so are the addon's registry rows. Without
-// keepValues the values Secret is deleted too, whether or not the operator
-// ever came to own it. A plan-only addon is cancelled the same way.
+// keepValues first marks the values Secret and the operator's generated one to
+// outlive the addon; then the ZaentrumAddon is deleted — garbage collection
+// takes the workloads and everything else it owns — and so are the addon's
+// registry rows. Without keepValues both Secrets are deleted too, whether or
+// not the operator ever came to own them. A plan-only addon is cancelled the
+// same way.
 func (a *API) removeAddonChart(w http.ResponseWriter, r *http.Request) {
 	if !a.chartsReady(w) {
 		return
@@ -813,7 +834,7 @@ func (a *API) removeAddonChart(w http.ResponseWriter, r *http.Request) {
 	var warnings []string
 	if !keep {
 		if err := a.charts.DeleteAddonSecrets(ctx, name); err != nil {
-			warnings = append(warnings, "the values Secret "+operator.ValuesSecretName(name)+" could not be deleted: "+err.Error())
+			warnings = append(warnings, "the addon's values Secrets could not be deleted: "+err.Error())
 		}
 	}
 	removed, err := a.removeChartRegistration(ctx, name)
