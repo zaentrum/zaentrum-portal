@@ -38,8 +38,9 @@ interface Grouped {
 function groupInstances(instances: Instance[], addons: InstalledAddon[] | null): Grouped {
   const byName = new Map(instances.map((i) => [i.name, i]));
   const claimed = new Set<string>();
+  // A chart addon that is only planned has no workloads to place yet.
   const sections =
-    addons?.map((addon) => ({
+    addons?.filter((addon) => addon.registered !== false || addon.components.length > 0).map((addon) => ({
       addon,
       rows: addon.components.map((c): Row => {
         const live = byName.get(c.workload);
@@ -392,7 +393,11 @@ export function OperatorConsole() {
               <InstanceGroup
                 key={addon.key}
                 title={addon.title || addon.key}
-                hint={`addon ${addon.key}${addon.version ? ` ${addon.version}` : ''} — ${containersSummary(addon.components).text}; its containers run through the addon's own deployment channel`}
+                hint={`addon ${addon.key}${addon.version ? ` ${addon.version}` : ''} — ${containersSummary(addon.components).text}; ${
+                  addon.chart
+                    ? `the operator runs its containers from the chart ${addon.chart.ref}${addon.chart.lastApplied?.version ? ` ${addon.chart.lastApplied.version}` : ''}`
+                    : "its containers run through the addon's own deployment channel"
+                }`}
                 rows={rows}
                 columns={columns}
                 emptyText="the addon declares no containers."

@@ -102,3 +102,118 @@
   gap: 2px;
   overflow-wrap: anywhere;
 }
+
+/* chart addons: the wizard, the plan the operator reports, the values form. */
+.set__steps {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.set__row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+}
+.set__plan {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.set__plan-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.set__planning {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.set__notice {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--border, #30363d);
+  border-left-width: 3px;
+  overflow-wrap: anywhere;
+}
+.set__notice--refused {
+  border-left-color: var(--signal-red, #F85149);
+}
+.set__notice--warning {
+  border-left-color: var(--signal-amber, #D29922);
+}
+.set__changes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.set__objects,
+.set__images {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  overflow-wrap: anywhere;
+}
+.set__images {
+  flex-direction: column;
+}
+.set__values-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border, #30363d);
+}
+.set__values {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.set__group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border, #30363d);
+  min-width: 0;
+}
+.set__group > legend {
+  padding: 0 4px;
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 13px;
+  color: var(--fg-2, #c9d1d9);
+}
+.set__req {
+  color: var(--cloud-blue, #58A6FF);
+}
+.set__field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* the field label is lower-cased by the design system; a values path is not. */
+.set__path {
+  text-transform: none;
+  font-size: 11px;
+  color: var(--fg-dim, #6E7787);
+}
+.set__secret {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.set__done {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.set__chart-version {
+  display: block;
+  font-size: 11px;
+}

@@ -18,9 +18,11 @@ import {
   Text,
 } from '@nalet/design-system';
 import type { TableColumn } from '@nalet/design-system';
-import { ChevronDown, ChevronRight, ExternalLink, Puzzle, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { ArrowUpFromLine, ChevronDown, ChevronRight, ExternalLink, ListChecks, Plus, Puzzle, RefreshCw, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
 import {
+  ApiError,
   usePortalApi,
+  type AddonChartsStatus,
   type AddonComponent,
   type AddonSetup,
   type InstallResult,
@@ -32,13 +34,19 @@ import {
 import {
   UNKNOWN_SETUP,
   appRoute,
+  chartPhaseTone,
   componentPhase,
   containersSummary,
+  isPlanOnly,
   parseSetupStatus,
+  phaseLabel,
   phaseTone,
   setupTone,
+  upgradePlanned,
   withAddonDefaults,
 } from '../lib/addons';
+import { AddonChartWizard } from './AddonChartWizard';
+import { ChartValuesDialog, RemoveChartDialog, UpgradeChartDialog } from './ChartDialogs';
 import { useResource } from './useResource';
 
 // What an install created (or a check would create), in the order it matters
@@ -60,12 +68,20 @@ const LEFT = { textAlign: 'left' } as const;
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-// AddonsPanel is the install path and the addon overview. The admin types the
-// addon's in-cluster address; portal-api pulls the addon's manifest and creates
-// its app, tiles and slot rows, owned by the addon key, and records the
-// containers the addon consists of. The portal shows their state and the
-// addon's own setup checklist, and links to where the addon is configured —
-// it never holds a configuration value, and it never deploys a container.
+// A chart row's pending dialog.
+type ChartAction = { kind: 'upgrade' | 'values' | 'remove'; addon: InstalledAddon };
+
+// AddonsPanel is the install path and the addon overview. An addon is added
+// two ways:
+//
+//   - from a Helm chart (the "+" wizard): the operator installs the chart's
+//     workloads from a ZaentrumAddon, and the portal registers the addon once
+//     they are ready;
+//   - by the in-cluster address of an addon deployed some other way: portal-api
+//     pulls the addon's manifest and creates its app, tiles and slot rows.
+//
+// Either way the portal shows the containers the addon consists of, the
+// addon's own setup checklist, and links to where the addon is configured.
 export function AddonsPanel() {
   const api = usePortalApi();
   const navigate = useNavigate();
@@ -83,6 +99,29 @@ export function AddonsPanel() {
   const [removing, setRemoving] = useState<InstalledAddon | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [setup, setSetup] = useState<Record<string, SetupStatus | undefined>>({});
+  // charts: whether this portal-api and cluster can install chart addons.
+  const [charts, setCharts] = useState<AddonChartsStatus | null>(null);
+  const [wizard, setWizard] = useState<{ resume?: string } | null>(null);
+  const [action, setAction] = useState<ChartAction | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    api<AddonChartsStatus>('/addon-charts')
+      .then((s) => live && setCharts({ available: !!s?.available, note: s?.note ?? '' }))
+      .catch((e) => {
+        if (!live) return;
+        // An older portal-api has no such endpoint: no chart addons, and no
+        // "+" that could only fail.
+        const old = e instanceof ApiError && (e.status === 404 || e.status === 405);
+        setCharts({
+          available: false,
+          note: old ? 'this portal-api cannot install addons from charts yet — update it to add addons from a chart' : errText(e),
+        });
+      });
+    return () => {
+      live = false;
+    };
+  }, [api]);
 
   useEffect(() => {
     let live = true;
@@ -101,7 +140,7 @@ export function AddonsPanel() {
     let live = true;
     setSetup({});
     for (const a of items) {
-      if (!a.setup) continue;
+      if (!a.setup || !a.registered) continue;
       api<unknown>(`/apps/${encodeURIComponent(a.key)}${a.setup.path}`)
         .then((raw) => live && setSetup((s) => ({ ...s, [a.key]: parseSetupStatus(raw) })))
         .catch(() => live && setSetup((s) => ({ ...s, [a.key]: UNKNOWN_SETUP })));
@@ -215,10 +254,18 @@ export function AddonsPanel() {
 
   return (
     <div>
+      <div className="set__toolbar">
+        {charts?.available && (
+          <Button leading={<Plus size={15} />} onClick={() => setWizard({})}>
+            add from a chart
+          </Button>
+        )}
+        {charts && !charts.available && <Text variant="dim">{charts.note}</Text>}
+      </div>
       <div className="set__form" style={{ maxWidth: 640, marginBottom: 16 }}>
         <Field
-          label="add an addon"
-          hint="its in-cluster address — the Service name of the addon's primary container, e.g. http://example. The platform reads the addon's manifest and creates what it declares. Check first to see what that is."
+          label="add an addon by its address"
+          hint="for an addon deployed some other way: its in-cluster address — the Service name of the addon's primary container, e.g. http://example. The platform reads the addon's manifest and creates what it declares. Check first to see what that is."
         >
           <Input
             value={url}
@@ -274,7 +321,7 @@ export function AddonsPanel() {
               {items.length === 0 && (
                 <tr>
                   <td className="nc-table__empty" colSpan={COLS}>
-                    no addons installed. Deploy one next to the platform, then add it by its address.
+                    no addons installed. Add one from a chart, or deploy one next to the platform and add it by its address.
                   </td>
                 </tr>
               )}
@@ -298,6 +345,7 @@ export function AddonsPanel() {
                       <Td>
                         <span className="set__addon">
                           <b>{a.title || a.key}</b>
+                          {a.chart && <ChartBadges addon={a} />}
                           {a.refreshAvailable && (
                             <Badge tone="blue" title="the addon now serves a different manifest — refresh to apply it">
                               refresh available
@@ -310,6 +358,11 @@ export function AddonsPanel() {
                       </Td>
                       <Td>
                         <span className="set__mono">{a.version || '—'}</span>
+                        {a.chart && (
+                          <Text variant="dim" className="set__chart-version">
+                            chart {a.chart.lastApplied?.version || a.chart.version || 'archive'}
+                          </Text>
+                        )}
                       </Td>
                       <Td>
                         <Badge tone={containers.tone} dot>
@@ -320,20 +373,28 @@ export function AddonsPanel() {
                         <SetupBadge setup={a.setup} status={setup[a.key]} />
                       </Td>
                       <Td style={{ textAlign: 'right' }}>
-                        <span style={{ display: 'inline-flex', gap: 4 }}>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            leading={<RefreshCw size={13} />}
-                            loading={busy === a.key}
-                            onClick={() => refresh(a)}
-                          >
-                            refresh
-                          </Button>
-                          <Button variant="ghost" size="sm" leading={<Trash2 size={13} />} onClick={() => setRemoving(a)}>
-                            remove
-                          </Button>
-                        </span>
+                        {a.chart ? (
+                          <ChartActions
+                            addon={a}
+                            onReview={() => setWizard({ resume: a.key })}
+                            onAction={(kind) => setAction({ kind, addon: a })}
+                          />
+                        ) : (
+                          <span style={{ display: 'inline-flex', gap: 4 }}>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              leading={<RefreshCw size={13} />}
+                              loading={busy === a.key}
+                              onClick={() => refresh(a)}
+                            >
+                              refresh
+                            </Button>
+                            <Button variant="ghost" size="sm" leading={<Trash2 size={13} />} onClick={() => setRemoving(a)}>
+                              remove
+                            </Button>
+                          </span>
+                        )}
                       </Td>
                     </Tr>
                     {expanded && (
@@ -401,6 +462,54 @@ export function AddonsPanel() {
             {preview.setup && <SetupChecklist setup={preview.setup} />}
           </div>
         </Modal>
+      )}
+
+      {wizard && (
+        <AddonChartWizard
+          resume={wizard.resume}
+          existing={items}
+          onClose={() => {
+            setWizard(null);
+            reload();
+          }}
+          onChanged={reload}
+          onUnsupported={(note) => {
+            setWizard(null);
+            setCharts({ available: false, note });
+          }}
+        />
+      )}
+      {action?.kind === 'upgrade' && (
+        <UpgradeChartDialog
+          addon={action.addon}
+          onClose={() => {
+            setAction(null);
+            reload();
+          }}
+          onChanged={reload}
+        />
+      )}
+      {action?.kind === 'values' && (
+        <ChartValuesDialog
+          addon={action.addon}
+          onClose={() => {
+            setAction(null);
+            reload();
+          }}
+          onChanged={reload}
+        />
+      )}
+      {action?.kind === 'remove' && (
+        <RemoveChartDialog
+          addon={action.addon}
+          planOnly={isPlanOnly(action.addon)}
+          onClose={() => setAction(null)}
+          onRemoved={(message) => {
+            setAction(null);
+            setMsg(message);
+            reload();
+          }}
+        />
       )}
 
       {removing && (
@@ -475,10 +584,31 @@ function AddonDetail({
 }) {
   return (
     <div className="set__detail-body">
-      <Text variant="dim" as="p">
-        installed from <span className="set__mono">{addon.proxyUrl || '—'}</span> · {addon.tiles}{' '}
-        {addon.tiles === 1 ? 'tile' : 'tiles'} · {addon.slots} {addon.slots === 1 ? 'slot row' : 'slot rows'}
-      </Text>
+      {addon.chart ? (
+        <Text variant="dim" as="p">
+          chart <span className="set__mono">{addon.chart.ref}</span>
+          {addon.chart.version && <span className="set__mono"> {addon.chart.version}</span>}
+          {addon.chart.lastApplied ? (
+            <>
+              {' '}· runs <span className="set__mono">{addon.chart.lastApplied.version || addon.chart.lastApplied.ref}</span>
+            </>
+          ) : (
+            ' · not installed yet'
+          )}
+          {addon.registered && (
+            <>
+              {' '}· serves at <span className="set__mono">{addon.proxyUrl || '—'}</span> · {addon.tiles}{' '}
+              {addon.tiles === 1 ? 'tile' : 'tiles'} · {addon.slots} {addon.slots === 1 ? 'slot row' : 'slot rows'}
+            </>
+          )}
+        </Text>
+      ) : (
+        <Text variant="dim" as="p">
+          installed from <span className="set__mono">{addon.proxyUrl || '—'}</span> · {addon.tiles}{' '}
+          {addon.tiles === 1 ? 'tile' : 'tiles'} · {addon.slots} {addon.slots === 1 ? 'slot row' : 'slot rows'}
+        </Text>
+      )}
+      {addon.registrationError && <span className="set__err">registration: {addon.registrationError}</span>}
       <ComponentTable components={addon.components} />
       {addon.setup && <SetupChecklist setup={addon.setup} status={status} onConfigure={onConfigure} />}
     </div>
@@ -588,5 +718,71 @@ function SetupChecklist({
         })}
       </ul>
     </div>
+  );
+}
+
+// ChartBadges says where a chart addon is: planned, installing, failing — or
+// ready and waiting for an upgrade to be applied. A ready, registered addon
+// needs no badge.
+function ChartBadges({ addon }: { addon: InstalledAddon }) {
+  const phase = addon.phase;
+  return (
+    <>
+      {isPlanOnly(addon) ? (
+        <Badge tone={chartPhaseTone(addon.phase)} title="planned from its chart, not installed">
+          {phaseLabel(phase)}
+        </Badge>
+      ) : (
+        (phase !== 'Ready' || !addon.registered) && (
+          <Badge tone={chartPhaseTone(addon.phase)} dot>
+            {phase === 'Ready' ? 'registering' : phaseLabel(phase)}
+          </Badge>
+        )
+      )}
+      {upgradePlanned(addon) && (
+        <Badge tone="blue" title="another chart version is planned and waits to be applied">
+          upgrade planned
+        </Badge>
+      )}
+    </>
+  );
+}
+
+// ChartActions are a chart addon's row actions. A plan that was never
+// installed is reviewed or cancelled; an installed addon is upgraded,
+// reconfigured or removed.
+function ChartActions({
+  addon,
+  onReview,
+  onAction,
+}: {
+  addon: InstalledAddon;
+  onReview: () => void;
+  onAction: (kind: ChartAction['kind']) => void;
+}) {
+  if (isPlanOnly(addon)) {
+    return (
+      <span style={{ display: 'inline-flex', gap: 4 }}>
+        <Button variant="ghost" size="sm" leading={<ListChecks size={13} />} onClick={onReview}>
+          review
+        </Button>
+        <Button variant="ghost" size="sm" leading={<Trash2 size={13} />} onClick={() => onAction('remove')}>
+          cancel
+        </Button>
+      </span>
+    );
+  }
+  return (
+    <span style={{ display: 'inline-flex', gap: 4 }}>
+      <Button variant="ghost" size="sm" leading={<ArrowUpFromLine size={13} />} onClick={() => onAction('upgrade')}>
+        {upgradePlanned(addon) ? 'review upgrade' : 'upgrade'}
+      </Button>
+      <Button variant="ghost" size="sm" leading={<SlidersHorizontal size={13} />} onClick={() => onAction('values')}>
+        values
+      </Button>
+      <Button variant="ghost" size="sm" leading={<Trash2 size={13} />} onClick={() => onAction('remove')}>
+        remove
+      </Button>
+    </span>
   );
 }

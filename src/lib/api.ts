@@ -183,6 +183,81 @@ export interface InstalledAddon {
   components: AddonComponent[];
   setup: AddonSetup | null;
   refreshAvailable: boolean;
+  // chart: the Helm chart the operator installs the addon from; null for an
+  // addon added by its address. phase and suspended are its ZaentrumAddon's.
+  chart: AddonChartInfo | null;
+  phase: string;
+  suspended: boolean;
+  // registered: the registry holds the addon. A chart addon the operator has
+  // not made ready yet is listed with nothing registered.
+  registered: boolean;
+  registrationError: string;
+}
+
+// ─── addons as Helm charts (mirror server/internal/api/addoncharts.go) ───────
+
+export interface ChartSource {
+  ref: string;
+  version?: string;
+  digest?: string;
+}
+export interface AddonChartInfo extends ChartSource {
+  // lastApplied: the chart running; null while nothing was applied.
+  lastApplied: ChartSource | null;
+}
+export interface ChartWorkload {
+  kind: string;
+  name: string;
+  images: string[] | null;
+  ports: unknown[] | null;
+}
+// ChartPlan is what the operator reports for the addon's spec: the chart as
+// rendered, what it would apply and what it refuses. Nothing of it is applied
+// while the addon is suspended.
+export interface ChartPlan {
+  chart: {
+    name: string;
+    version: string;
+    appVersion?: string;
+    description?: string;
+    digest?: string;
+    annotations?: Record<string, string> | null;
+  };
+  valuesSchema: string;
+  valuesErrors: string[] | null;
+  violations: string[] | null;
+  objects: { kind: string; name: string }[] | null;
+  workloads: ChartWorkload[] | null;
+  changes?: { added?: string[] | null; removed?: string[] | null; images?: string[] | null } | null;
+}
+export interface ChartComponentStatus {
+  name: string;
+  kind: string;
+  ready: number;
+  desired: number;
+  reason?: string;
+}
+// AddonChart is GET /addon-charts/{name}. No secret value: secretKeys names
+// the secret inputs that are set.
+export interface AddonChart {
+  name: string;
+  chart: ChartSource;
+  suspended: boolean;
+  phase: string;
+  message: string;
+  generation: number;
+  observedGeneration: number;
+  plan: ChartPlan | null;
+  components: ChartComponentStatus[];
+  lastAppliedChart: ChartSource | null;
+  values: Record<string, unknown> | null;
+  secretKeys: string[];
+  registered: boolean;
+  registrationError?: string;
+}
+export interface AddonChartsStatus {
+  available: boolean;
+  note: string;
 }
 // InstallResult answers both a dry run ("check") and a real install.
 export interface InstallResult {
@@ -218,8 +293,19 @@ export interface SetupStatus {
   sections: { key: string; state: SetupState; summary: string }[];
 }
 
+// ApiError is a non-2xx answer: the server's message, and the status a caller
+// may branch on (404 from an older portal-api, 409 from a refused install).
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 // usePortalApi returns a fetcher bound to the current access token. It throws an
-// Error (with the server message) on any non-2xx.
+// ApiError (with the server message) on any non-2xx.
 export function usePortalApi() {
   const auth = useAuth();
   const token = auth.user?.access_token;
@@ -235,7 +321,7 @@ export function usePortalApi() {
         },
       });
       const text = await res.text();
-      if (!res.ok) throw new Error(text.trim() || `portal-api ${res.status}`);
+      if (!res.ok) throw new ApiError(res.status, text.trim() || `portal-api ${res.status}`);
       return (text ? JSON.parse(text) : undefined) as T;
     },
     [token],

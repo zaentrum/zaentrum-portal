@@ -20,5 +20,7 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Unit tests run under node --test, not in the app's program.
+  "exclude": ["src/**/*.test.ts"]
 }
