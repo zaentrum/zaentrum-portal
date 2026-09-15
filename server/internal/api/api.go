@@ -33,6 +33,10 @@ type API struct {
 	br     *dbbrowse.Browser
 	// workloads is op as the addon endpoints read it; nil when op is.
 	workloads workloadSource
+	// charts is op as the chart addon endpoints use it; nil when op is.
+	charts chartClient
+	// registration is the chart addon registration loop's state.
+	registration chartRegistration
 }
 
 // addonStore is the part of the registry the addon endpoints and capability
@@ -52,6 +56,7 @@ func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap
 	a := &API{st: st, addons: st, cfg: cfg, op: op, tap: tap, br: br}
 	if op != nil {
 		a.workloads = op // never a typed nil inside the interface
+		a.charts = op
 	}
 	return a
 }
@@ -101,6 +106,16 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 				ar.Get("/addons", a.listAddons)
 				ar.Post("/addons", a.installAddon)
 				ar.Delete("/addons/{key}", a.removeAddon)
+
+				// Addons as Helm charts: portal-api writes the ZaentrumAddon
+				// and its values Secret; the operator plans and installs the
+				// chart — see addoncharts.go.
+				ar.Get("/addon-charts", a.addonChartsStatus)
+				ar.Post("/addon-charts", a.createAddonChart)
+				ar.Get("/addon-charts/{name}", a.getAddonChart)
+				ar.Patch("/addon-charts/{name}", a.patchAddonChart)
+				ar.Delete("/addon-charts/{name}", a.removeAddonChart)
+				ar.Post("/addon-charts/{name}/install", a.installAddonChart)
 
 				ar.Get("/apps", a.listApps)
 				ar.Post("/apps", a.upsertApp)
@@ -761,6 +776,7 @@ func (a *API) configSummary() map[string]any {
 		"operatorGroup":    a.cfg.OperatorGroup,
 		"operatorVersion":  a.cfg.OperatorVersion,
 		"operatorPlural":   a.cfg.OperatorPlural,
+		"addonPlural":      a.cfg.AddonPlural,
 		"kafkaBrokers":     a.cfg.KafkaBrokers,
 		"kafkaTopicPrefix": a.cfg.KafkaTopicPrefix,
 	}
