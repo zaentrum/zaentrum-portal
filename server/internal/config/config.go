@@ -38,6 +38,8 @@ type Config struct {
 	OperatorGroup    string   // PORTAL_OPERATOR_GROUP (default zaentrum.io)
 	OperatorVersion  string   // PORTAL_OPERATOR_VERSION (default v1alpha1)
 	OperatorPlural   string   // PORTAL_OPERATOR_PLURAL (default zaentrums)
+	// Chart addons: one ZaentrumAddon per addon, in the same group/version.
+	AddonPlural string // PORTAL_ADDON_PLURAL (default zaentrumaddons)
 
 	// Kafka event tap (admin debug console). Empty brokers disables it.
 	KafkaBrokers     string // KAFKA_BROKERS (comma-separated bootstrap list)
@@ -118,6 +120,7 @@ func Load() Config {
 		OperatorGroup:    envDefault("zaentrum.io", "PORTAL_OPERATOR_GROUP"),
 		OperatorVersion:  envDefault("v1alpha1", "PORTAL_OPERATOR_VERSION"),
 		OperatorPlural:   envDefault("zaentrums", "PORTAL_OPERATOR_PLURAL"),
+		AddonPlural:      envDefault("zaentrumaddons", "PORTAL_ADDON_PLURAL"),
 
 		KafkaBrokers:     env("KAFKA_BROKERS"),
 		KafkaCertDir:     env("KAFKA_TLS_DIR", "KAFKA_CERT_DIR"),
