@@ -50,6 +50,8 @@ type addonStore interface {
 	WorkloadClaims(ctx context.Context) (map[string]string, error)
 	InstallAddon(ctx context.Context, in store.AddonInstall) error
 	RemoveAddon(ctx context.Context, key, declaredSpace string) (store.AddonRemoval, error)
+	SetRegistrationError(ctx context.Context, name, msg string) error
+	RegistrationErrors(ctx context.Context) (map[string]string, error)
 }
 
 func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap, br *dbbrowse.Browser) *API {

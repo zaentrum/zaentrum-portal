@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -396,16 +397,39 @@ func TestCanonicalManifestIgnoresFormatting(t *testing.T) {
 // ─── handlers, against an in-memory registry ────────────────────────────────
 
 type fakeAddonStore struct {
-	apps     map[string]model.App
-	addons   map[string]model.Addon
-	claims   map[string]string
-	installs []store.AddonInstall
-	removals []string // key|declaredSpace
-	removal  store.AddonRemoval
+	apps      map[string]model.App
+	addons    map[string]model.Addon
+	claims    map[string]string
+	installs  []store.AddonInstall
+	removals  []string // key|declaredSpace
+	removal   store.AddonRemoval
+	mu        sync.Mutex
+	regErrors map[string]string
 }
 
 func newFakeStore() *fakeAddonStore {
-	return &fakeAddonStore{apps: map[string]model.App{}, addons: map[string]model.Addon{}, claims: map[string]string{}}
+	return &fakeAddonStore{apps: map[string]model.App{}, addons: map[string]model.Addon{}, claims: map[string]string{}, regErrors: map[string]string{}}
+}
+
+func (f *fakeAddonStore) SetRegistrationError(_ context.Context, name, msg string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if msg == "" {
+		delete(f.regErrors, name)
+	} else {
+		f.regErrors[name] = msg
+	}
+	return nil
+}
+
+func (f *fakeAddonStore) RegistrationErrors(context.Context) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]string{}
+	for k, v := range f.regErrors {
+		out[k] = v
+	}
+	return out, nil
 }
 
 func (f *fakeAddonStore) ListApps(context.Context) ([]model.App, error) {

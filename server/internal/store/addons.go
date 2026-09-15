@@ -296,3 +296,34 @@ func (s *Store) WorkloadClaims(ctx context.Context) (map[string]string, error) {
 	}
 	return out, rows.Err()
 }
+
+// SetRegistrationError records why a chart addon could not be registered; an
+// empty message clears the record.
+func (s *Store) SetRegistrationError(ctx context.Context, name, msg string) error {
+	if msg == "" {
+		_, err := s.pool.Exec(ctx, `DELETE FROM addon_registration_errors WHERE name = $1`, name)
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO addon_registration_errors (name, error, updated_at) VALUES ($1, $2, now())
+		ON CONFLICT (name) DO UPDATE SET error = EXCLUDED.error, updated_at = now()`, name, msg)
+	return err
+}
+
+// RegistrationErrors maps each chart addon that could not be registered to why.
+func (s *Store) RegistrationErrors(ctx context.Context) (map[string]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT name, error FROM addon_registration_errors`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var name, msg string
+		if err := rows.Scan(&name, &msg); err != nil {
+			return nil, err
+		}
+		out[name] = msg
+	}
+	return out, rows.Err()
+}

@@ -929,6 +929,10 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
 	}
 	live, known := a.liveWorkloads(ctx)
 	charts := a.chartAddonsByName(ctx)
+	var regErrors map[string]string
+	if charts != nil {
+		regErrors = a.registrationErrors(ctx)
+	}
 	served := map[string]string{} // service → sha256 of the manifest it serves now
 	if len(addons) > 0 {
 		_, descs := a.discover(ctx)
@@ -966,7 +970,7 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
 				row.Components = chartComponentViews(ca, ad.Components, byWorkload, live, known)
 			}
 			row.withChart(ca)
-			row.RegistrationError = a.registrationError(ad.Key)
+			row.RegistrationError = regErrors[ad.Key]
 			delete(charts, ad.Key)
 		} else if ad.ChartRef != "" {
 			// Its resource is gone; the registration loop unregisters it.
@@ -981,7 +985,7 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		out = append(out, a.chartOnlyRow(charts[name], live, known))
+		out = append(out, chartOnlyRow(charts[name], live, known, regErrors))
 	}
 	writeJSON(w, http.StatusOK, out)
 }

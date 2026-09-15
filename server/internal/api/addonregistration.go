@@ -145,7 +145,7 @@ func (a *API) syncChartAddons(ctx context.Context) {
 			a.unregisterChartAddon(ctx, step.name)
 			continue
 		}
-		a.setRegistrationError(step.name, a.registerChartAddon(ctx, byName[step.name]))
+		a.setRegistrationError(ctx, step.name, a.registerChartAddon(ctx, byName[step.name]))
 	}
 }
 
@@ -281,27 +281,33 @@ func (a *API) unregisterChartAddon(ctx context.Context, name string) {
 	}
 }
 
-// setRegistrationError records how an addon's registration went, logging a
-// change only: the loop runs every few seconds.
-func (a *API) setRegistrationError(name string, err error) {
+// setRegistrationError records how an addon's registration went — in the
+// registry, where every replica reads it — writing and logging a change only:
+// the loop runs every few seconds.
+func (a *API) setRegistrationError(ctx context.Context, name string, err error) {
 	msg := ""
 	if err != nil {
 		msg = err.Error()
 	}
 	a.registration.stateMu.Lock()
-	defer a.registration.stateMu.Unlock()
 	if a.registration.errors == nil {
 		a.registration.errors = map[string]string{}
 	}
-	if a.registration.errors[name] == msg {
-		return
-	}
-	if msg == "" {
-		delete(a.registration.errors, name)
+	if last, seen := a.registration.errors[name]; seen && last == msg {
+		a.registration.stateMu.Unlock()
 		return
 	}
 	a.registration.errors[name] = msg
-	log.Printf("addons: cannot register %s: %s", name, msg)
+	a.registration.stateMu.Unlock()
+	if msg != "" {
+		log.Printf("addons: cannot register %s: %s", name, msg)
+	}
+	if err := a.addons.SetRegistrationError(ctx, name, msg); err != nil {
+		log.Printf("addons: cannot record the registration of %s: %v", name, err)
+		a.registration.stateMu.Lock()
+		delete(a.registration.errors, name) // the next pass records it again
+		a.registration.stateMu.Unlock()
+	}
 }
 
 // setListError logs a failure to list the addons once, and its end.
@@ -477,8 +483,8 @@ func chartComponentPhase(c operator.ChartComponent) string {
 
 // chartOnlyRow is an addons list row for a chart addon the registry does not
 // hold yet: planned, installing, failed — or ready and about to be registered.
-func (a *API) chartOnlyRow(ca operator.ChartAddon, live map[string]operator.Instance, known bool) installedAddon {
-	row := installedAddon{Key: ca.Name, Title: ca.Name, RegistrationError: a.registrationError(ca.Name)}
+func chartOnlyRow(ca operator.ChartAddon, live map[string]operator.Instance, known bool, regErrors map[string]string) installedAddon {
+	row := installedAddon{Key: ca.Name, Title: ca.Name, RegistrationError: regErrors[ca.Name]}
 	if ca.Plan != nil {
 		switch {
 		case ca.Plan.Chart.Annotations[operator.AnnotationTitle] != "":

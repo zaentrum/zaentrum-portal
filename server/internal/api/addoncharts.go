@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -705,7 +706,7 @@ func (a *API) getAddonChart(w http.ResponseWriter, r *http.Request) {
 		Generation: ca.Generation, ObservedGeneration: ca.ObservedGeneration,
 		Plan: ca.PlanRaw, Components: nonNil(ca.Components), LastAppliedChart: ca.LastAppliedChart,
 		Values: ca.Values, SecretKeys: sortedKeys(inputs), SecretRefs: inputs,
-		RegistrationError: a.registrationError(name),
+		RegistrationError: a.registrationErrors(ctx)[name],
 	}
 	if ad, err := a.addons.GetAddon(ctx, name); err == nil && ad.ChartRef != "" {
 		view.Registered = true
@@ -951,7 +952,7 @@ func (a *API) removeAddonChart(w http.ResponseWriter, r *http.Request) {
 // never an addon of the same key added by address, which is removed as such.
 // nil when there was nothing.
 func (a *API) removeChartRegistration(ctx context.Context, name string) (*store.AddonRemoval, error) {
-	a.forgetRegistration(name)
+	a.forgetRegistration(ctx, name)
 	ad, err := a.addons.GetAddon(ctx, name)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && ad.ChartRef == "") {
 		return nil, nil
@@ -987,10 +988,12 @@ type chartRegistration struct {
 	// minGap overrides registrationMinGap, for tests.
 	minGap time.Duration
 
-	stateMu   sync.Mutex
-	errors    map[string]string // addon → why its registration failed last
-	listError string            // why the last pass could not list the addons
-	origin    string            // the portal's public origin, as last requested
+	stateMu sync.Mutex
+	// errors is what this replica last recorded, addon → why its registration
+	// failed ("" for registered); the registry holds what every replica reads.
+	errors    map[string]string
+	listError string // why the last pass could not list the addons
+	origin    string // the portal's public origin, as last requested
 
 	// fetch reads a manifest; fetchManifest unless a test substitutes one.
 	fetch func(ctx context.Context, proxyURL string) (Descriptor, error)
@@ -1004,16 +1007,32 @@ func (a *API) kickRegistration() {
 	}
 }
 
-func (a *API) registrationError(name string) string {
+// registrationErrors is why chart addons could not be registered, as the
+// registry records it for every replica — or, when the registry cannot say,
+// as this replica last saw it.
+func (a *API) registrationErrors(ctx context.Context) map[string]string {
+	if recorded, err := a.addons.RegistrationErrors(ctx); err == nil {
+		return recorded
+	}
 	a.registration.stateMu.Lock()
 	defer a.registration.stateMu.Unlock()
-	return a.registration.errors[name]
+	out := map[string]string{}
+	for name, msg := range a.registration.errors {
+		if msg != "" {
+			out[name] = msg
+		}
+	}
+	return out
 }
 
-func (a *API) forgetRegistration(name string) {
+// forgetRegistration drops what was recorded about a removed addon.
+func (a *API) forgetRegistration(ctx context.Context, name string) {
 	a.registration.stateMu.Lock()
-	defer a.registration.stateMu.Unlock()
 	delete(a.registration.errors, name)
+	a.registration.stateMu.Unlock()
+	if err := a.addons.SetRegistrationError(ctx, name, ""); err != nil {
+		log.Printf("addons: cannot clear the registration record of %s: %v", name, err)
+	}
 }
 
 // noteOrigin remembers the public origin an admin reached the portal on: the

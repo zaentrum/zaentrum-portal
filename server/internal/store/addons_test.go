@@ -29,7 +29,7 @@ func testStore(t *testing.T) *Store {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(st.Close)
-	if _, err := st.pool.Exec(ctx, `DROP TABLE IF EXISTS addon_components, addons, ui_extensions, tiles, spaces, apps CASCADE`); err != nil {
+	if _, err := st.pool.Exec(ctx, `DROP TABLE IF EXISTS addon_registration_errors, addon_components, addons, ui_extensions, tiles, spaces, apps CASCADE`); err != nil {
 		t.Fatalf("reset: %v", err)
 	}
 	return st
@@ -251,5 +251,103 @@ func TestInstallRefreshAndRemoveAddon(t *testing.T) {
 	}
 	if _, err := st.RemoveAddon(ctx, "example", ""); !errors.Is(err, ErrNotFound) {
 		t.Errorf("removing twice = %v, want ErrNotFound", err)
+	}
+}
+
+// An instance at migration 008 with installed addons boots an image with the
+// chart migrations: they apply, apply again on every boot, every existing row
+// reads — and an 008 image still running during the rollout keeps writing.
+func TestChartMigrationsUpgradeFrom008(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	if err := st.Migrate(ctx, migrationsBefore(t, "009")); err != nil {
+		t.Fatalf("pre-009: %v", err)
+	}
+	exec(t, st, `INSERT INTO apps (key, title, proxy_url, base_url) VALUES ('example', 'Example', 'http://example', '/portal/app/example'), ('legacy', 'legacy', 'http://legacy', '')`)
+	exec(t, st, `INSERT INTO addons (key, address, version, manifest, manifest_sha256) VALUES ('example', 'http://example', '1.0.0', '{"service":"example"}', 'aa'), ('legacy', 'http://legacy', '', NULL, '')`)
+	exec(t, st, `INSERT INTO addon_components (addon_key, name, workload, role) VALUES ('example', 'example', 'example', 'primary')`)
+	for boot := 1; boot <= 3; boot++ {
+		if err := st.Migrate(ctx, db.Migrations); err != nil {
+			t.Fatalf("boot %d: %v", boot, err)
+		}
+	}
+	list, err := st.ListAddons(ctx)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("list after upgrade = %+v, %v", list, err)
+	}
+	for _, ad := range list {
+		if ad.ChartRef != "" || ad.ChartVersion != "" {
+			t.Errorf("%s: an addon from before charts has no chart: %+v", ad.Key, ad)
+		}
+	}
+	// The install statement of the 008 image, which knows no chart columns.
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO addons (key, address, version, manifest, manifest_sha256, installed_at, refreshed_at)
+		VALUES ('example', 'http://example', '1.1.0', NULL, 'bb', now(), now())
+		ON CONFLICT (key) DO UPDATE SET address = EXCLUDED.address, version = EXCLUDED.version,
+		manifest = EXCLUDED.manifest, manifest_sha256 = EXCLUDED.manifest_sha256, refreshed_at = now()`); err != nil {
+		t.Errorf("an 008 image's install fails on the new schema: %v", err)
+	}
+}
+
+// Two replicas register the same chart addon at the same moment: both
+// transactions succeed, and one addon is left.
+func TestConcurrentInstallOfTheSameAddon(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	if err := st.Migrate(ctx, db.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	in := AddonInstall{
+		App:   model.App{Key: "example", Title: "Example", Kind: "tool", Enabled: true, BaseURL: "/portal/app/example", ProxyURL: "http://example"},
+		Tiles: []model.Tile{{Key: "addon.example", AppKey: "example", SpaceKey: "apps", Title: "Example", Open: "inline", Enabled: true}},
+		Rows:  []model.Extension{{Key: "example.hint", Addon: "example", Slot: "search.empty", Kind: "link", Label: "hint", Method: "POST", Enabled: true}},
+		Addon: model.Addon{Key: "example", Address: "http://example", Version: "1.0.0", Manifest: []byte(`{"service":"example"}`), ManifestSHA256: "aa",
+			ChartRef: "oci://registry.example.org/charts/example", ChartVersion: "1.2.0"},
+		Components: []model.AddonComponent{{Name: "example", Workload: "example", Role: "primary"}, {Name: "example-worker", Workload: "example-worker", Role: "required", Order: 1}},
+	}
+	for round := 0; round < 20; round++ {
+		exec(t, st, `DELETE FROM apps WHERE key = 'example'`)
+		errs := make(chan error, 2)
+		for r := 0; r < 2; r++ {
+			go func() { errs <- st.InstallAddon(ctx, in) }()
+		}
+		for r := 0; r < 2; r++ {
+			if err := <-errs; err != nil {
+				t.Fatalf("round %d: %v", round, err)
+			}
+		}
+	}
+	if list, err := st.ListAddons(ctx); err != nil || len(list) != 1 || len(list[0].Components) != 2 {
+		t.Errorf("addons = %+v, %v", list, err)
+	}
+}
+
+func TestRegistrationErrors(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	if err := st.Migrate(ctx, db.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct{ name, msg string }{
+		{"example", "the chart renders no Service of that name"},
+		{"sample", "the manifest names another service"},
+		{"example", "the platform cannot list its workloads right now"},
+		{"sample", ""},
+		{"never-set", ""},
+	} {
+		if err := st.SetRegistrationError(ctx, step.name, step.msg); err != nil {
+			t.Fatalf("set %s: %v", step.name, err)
+		}
+	}
+	got, err := st.RegistrationErrors(ctx)
+	if err != nil || len(got) != 1 || got["example"] != "the platform cannot list its workloads right now" {
+		t.Errorf("errors = %v, %v", got, err)
+	}
+	if err := st.Migrate(ctx, db.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := st.RegistrationErrors(ctx); len(again) != 1 {
+		t.Errorf("a boot must keep what was recorded: %v", again)
 	}
 }

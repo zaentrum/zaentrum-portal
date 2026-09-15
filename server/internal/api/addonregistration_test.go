@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
+	"github.com/zaentrum/zaentrum-portal/server/internal/auth"
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
 	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
 )
@@ -199,16 +203,16 @@ func TestSyncChartAddons(t *testing.T) {
 	}
 	served.Service = "example"
 	sync()
-	if len(e.store.installs) != 4 || e.api.registrationError("example") != "" {
-		t.Fatalf("fixed: installs %d, error %q", len(e.store.installs), e.api.registrationError("example"))
+	if len(e.store.installs) != 4 || e.api.registrationErrors(context.Background())["example"] != "" {
+		t.Fatalf("fixed: installs %d, error %q", len(e.store.installs), e.api.registrationErrors(context.Background())["example"])
 	}
 	registerInstalls(e.store)
 
 	// The chart must name its primary.
 	e.kube.SetStatus(addonPlural, "example", readyStatus(e, "1.3.0", ""))
 	sync()
-	if !strings.Contains(e.api.registrationError("example"), "primary") {
-		t.Errorf("error = %q", e.api.registrationError("example"))
+	if !strings.Contains(e.api.registrationErrors(context.Background())["example"], "primary") {
+		t.Errorf("error = %q", e.api.registrationErrors(context.Background())["example"])
 	}
 
 	// A list that fails unregisters nothing.
@@ -290,6 +294,41 @@ func TestRunAddonRegistration(t *testing.T) {
 	case <-returned:
 	case <-time.After(time.Second):
 		t.Fatal("outside a cluster the loop must return at once")
+	}
+}
+
+// The loop runs in every replica: why an addon did not register is recorded
+// where each replica reads it, and cleared once it registers.
+func TestRegistrationErrorsReachEveryReplica(t *testing.T) {
+	loop := newChartEnv(t)
+	loop.api.workloads = fakeWorkloads{available: true}
+	manifest := strings.ReplaceAll(chartManifest, `"service": "example"`, `"service": "other"`)
+	loop.api.registration.fetch = func(context.Context, string) (Descriptor, error) { return decodeManifest(t, manifest), nil }
+	loop.seed("example", map[string]any{"chart": map[string]any{"ref": "oci://registry.example.org/charts/example", "version": "1.2.0"}}, nil)
+	loop.kube.SetStatus(addonPlural, "example", readyStatus(loop, "1.2.0", "example"))
+
+	// Another replica: the same cluster and registry, its own process state.
+	other := &API{addons: loop.store, cfg: loop.api.cfg, charts: operator.New(loop.kube.Client("zaentrum"), loop.api.cfg)}
+	jwt, _ := auth.NewJWTVerifier(context.Background(), "", "", "zaentrum-admin", false, true)
+	r := chi.NewRouter()
+	other.Register(r, auth.NewMiddleware(jwt, "zaentrum-admin", "zaentrum-addon"))
+	read := func(target string) string {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		return rec.Body.String()
+	}
+
+	loop.api.syncChartAddons(context.Background())
+	if got := read("/api/portal/addon-charts/example"); !strings.Contains(got, `names service \"other\"`) {
+		t.Errorf("the other replica's view = %s", got)
+	}
+	if got := read("/api/portal/addons"); !strings.Contains(got, `"registrationError":"the manifest at http://example names service`) {
+		t.Errorf("the other replica's list = %s", got)
+	}
+	manifest = chartManifest
+	loop.api.syncChartAddons(context.Background())
+	if got := read("/api/portal/addon-charts/example"); strings.Contains(got, "registrationError") {
+		t.Errorf("a registered addon must show no error: %s", got)
 	}
 }
 
@@ -386,7 +425,7 @@ func TestChartPrimaryMustBeItsOwnService(t *testing.T) {
 			e.kube.SetStatus(addonPlural, "example", status)
 			e.api.syncChartAddons(context.Background())
 
-			regErr := e.api.registrationError("example")
+			regErr := e.api.registrationErrors(context.Background())["example"]
 			if c.mention == "" {
 				if len(e.store.installs) != 1 || regErr != "" {
 					t.Fatalf("installs %d, error %q", len(e.store.installs), regErr)
@@ -435,8 +474,8 @@ func TestSyncChartAddonsRefusesToTakeOver(t *testing.T) {
 			e := setup(t)
 			c.prepare(e)
 			e.api.syncChartAddons(context.Background())
-			if len(e.store.installs) != 0 || !strings.Contains(e.api.registrationError("example"), c.mention) {
-				t.Fatalf("installs %d, error %q — want a refusal mentioning %q", len(e.store.installs), e.api.registrationError("example"), c.mention)
+			if len(e.store.installs) != 0 || !strings.Contains(e.api.registrationErrors(context.Background())["example"], c.mention) {
+				t.Fatalf("installs %d, error %q — want a refusal mentioning %q", len(e.store.installs), e.api.registrationErrors(context.Background())["example"], c.mention)
 			}
 		})
 	}
@@ -447,7 +486,7 @@ func TestSyncChartAddonsRefusesToTakeOver(t *testing.T) {
 		e.store.addons["example"] = model.Addon{Key: "example", Address: "http://example"}
 		e.api.syncChartAddons(context.Background())
 		if len(e.store.installs) != 1 || e.store.installs[0].Addon.ChartRef == "" {
-			t.Fatalf("installs %+v, error %q", e.store.installs, e.api.registrationError("example"))
+			t.Fatalf("installs %+v, error %q", e.store.installs, e.api.registrationErrors(context.Background())["example"])
 		}
 	})
 }
