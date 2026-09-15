@@ -2,8 +2,9 @@
 // the distroless image small). It talks to the apiserver over https using the
 // pod's ServiceAccount: bearer token (re-read per request — projected tokens
 // rotate) + the mounted CA (distroless ships no system CA bundle). It exposes
-// only what the portal operator/instances UI needs: list/scale/restart
-// Deployments, list Pods, and get/patch a namespaced Custom Resource.
+// only what the portal needs: list/scale/restart Deployments, list Pods,
+// get/list/create/update/patch/delete a namespaced Custom Resource, and WRITE a
+// Secret — there is deliberately no way to read one.
 package k8s
 
 import (
@@ -49,12 +50,16 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("k8s %d %s", e.Code, e.Reason)
 }
 
-// NotFound / Forbidden helpers for callers.
+// NotFound / Forbidden / Conflict helpers for callers.
 func IsNotFound(err error) bool { a, ok := err.(*APIError); return ok && a.Code == http.StatusNotFound }
 func IsForbidden(err error) bool {
 	a, ok := err.(*APIError)
 	return ok && a.Code == http.StatusForbidden
 }
+
+// IsConflict: an update carried a stale resourceVersion, or a create named an
+// object that already exists.
+func IsConflict(err error) bool { a, ok := err.(*APIError); return ok && a.Code == http.StatusConflict }
 
 // Client is a namespaced in-cluster apiserver client.
 type Client struct {
@@ -62,6 +67,7 @@ type Client struct {
 	namespace string
 	http      *http.Client
 	inCluster bool
+	token     func() string
 }
 
 // New builds the client from the in-cluster environment. When not running in a
@@ -97,7 +103,23 @@ func New() (*Client, error) {
 		namespace: ns,
 		http:      &http.Client{Transport: tr, Timeout: 20 * time.Second},
 		inCluster: true,
+		token:     func() string { return readTrim(tokenPath) },
 	}, nil
+}
+
+// NewAt builds a client for the apiserver at base (scheme://host:port) acting
+// in namespace with a fixed bearer token. Tests point it at a fake apiserver.
+func NewAt(base, namespace, token string, hc *http.Client) *Client {
+	if hc == nil {
+		hc = &http.Client{Timeout: 20 * time.Second}
+	}
+	return &Client{
+		base:      strings.TrimRight(base, "/"),
+		namespace: namespace,
+		http:      hc,
+		inCluster: true,
+		token:     func() string { return token },
+	}
 }
 
 // ErrNotInCluster is returned by API methods when not running in a cluster.
@@ -106,12 +128,23 @@ var ErrNotInCluster = &APIError{Code: 0, Reason: "NotInCluster", Message: "porta
 func (c *Client) InCluster() bool   { return c.inCluster }
 func (c *Client) Namespace() string { return c.namespace }
 
-// do performs a request, re-reading the (rotating) SA token each time.
+// do performs a request and returns the answer.
 func (c *Client) do(ctx context.Context, method, path, contentType string, body []byte) ([]byte, error) {
+	return c.send(ctx, method, path, contentType, body, true)
+}
+
+// send performs a request, re-reading the (rotating) SA token each time. With
+// keep false a successful answer is drained unread: a write to a Secret is
+// answered with the Secret, values included, and the caller must never hold
+// those. Error answers are Status objects and are always read.
+func (c *Client) send(ctx context.Context, method, path, contentType string, body []byte, keep bool) ([]byte, error) {
 	if !c.inCluster {
 		return nil, ErrNotInCluster
 	}
-	token := readTrim(tokenPath)
+	token := ""
+	if c.token != nil {
+		token = c.token()
+	}
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
@@ -130,6 +163,10 @@ func (c *Client) do(ctx context.Context, method, path, contentType string, body 
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if !keep && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
+		return nil, nil
+	}
 	// Backstop: never buffer more than maxResponseBytes from any single response
 	// (pod logs are additionally capped server-side via limitBytes; normal API
 	// responses are KBs). Bounds portal-api's memory against a runaway body.
@@ -342,6 +379,62 @@ func (c *Client) GetResourceList(ctx context.Context, group, version, plural str
 func (c *Client) PatchResource(ctx context.Context, group, version, plural, name string, mergePatch []byte) error {
 	p := fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s", group, version, c.namespace, plural, name)
 	_, err := c.do(ctx, http.MethodPatch, p, "application/merge-patch+json", mergePatch)
+	return err
+}
+
+// GetResource GETs one namespaced custom resource (raw JSON).
+func (c *Client) GetResource(ctx context.Context, group, version, plural, name string) (json.RawMessage, error) {
+	p := fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s", group, version, c.namespace, plural, url.PathEscape(name))
+	return c.do(ctx, http.MethodGet, p, "", nil)
+}
+
+// CreateResource POSTs a namespaced custom resource and returns it as created.
+func (c *Client) CreateResource(ctx context.Context, group, version, plural string, obj []byte) (json.RawMessage, error) {
+	p := fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s", group, version, c.namespace, plural)
+	return c.do(ctx, http.MethodPost, p, "application/json", obj)
+}
+
+// UpdateResource PUTs a namespaced custom resource. The body carries the
+// metadata.resourceVersion it was read at; a stale one is answered 409, so a
+// read-modify-write never overwrites a change it did not see.
+func (c *Client) UpdateResource(ctx context.Context, group, version, plural, name string, obj []byte) (json.RawMessage, error) {
+	p := fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s", group, version, c.namespace, plural, url.PathEscape(name))
+	return c.do(ctx, http.MethodPut, p, "application/json", obj)
+}
+
+// DeleteResource deletes a namespaced custom resource. Dependents go by owner
+// reference garbage collection (background propagation, the default).
+func (c *Client) DeleteResource(ctx context.Context, group, version, plural, name string) error {
+	p := fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s", group, version, c.namespace, plural, url.PathEscape(name))
+	_, err := c.do(ctx, http.MethodDelete, p, "", nil)
+	return err
+}
+
+// ─── secrets: write-only ─────────────────────────────────────────────────────
+//
+// portal-api writes the secret inputs an admin types and never reads them
+// back: there is no get, list or watch here, and every answer that would echo
+// a Secret is drained unread. Its Role grants create, patch and delete only.
+
+// CreateSecret creates a Secret in the client namespace.
+func (c *Client) CreateSecret(ctx context.Context, obj []byte) error {
+	p := fmt.Sprintf("/api/v1/namespaces/%s/secrets", c.namespace)
+	_, err := c.send(ctx, http.MethodPost, p, "application/json", obj, false)
+	return err
+}
+
+// PatchSecret applies a JSON merge patch to a Secret: keys set to null are
+// removed, the rest merged. Patching needs no read — the apiserver applies it.
+func (c *Client) PatchSecret(ctx context.Context, name string, mergePatch []byte) error {
+	p := fmt.Sprintf("/api/v1/namespaces/%s/secrets/%s", c.namespace, url.PathEscape(name))
+	_, err := c.send(ctx, http.MethodPatch, p, "application/merge-patch+json", mergePatch, false)
+	return err
+}
+
+// DeleteSecret deletes a Secret in the client namespace.
+func (c *Client) DeleteSecret(ctx context.Context, name string) error {
+	p := fmt.Sprintf("/api/v1/namespaces/%s/secrets/%s", c.namespace, url.PathEscape(name))
+	_, err := c.send(ctx, http.MethodDelete, p, "", nil, false)
 	return err
 }
 
