@@ -186,6 +186,28 @@ func TestInstallRefreshAndRemoveAddon(t *testing.T) {
 	if second.Version != "1.1.0" || second.Tiles != 1 || len(second.Components) != 1 || !second.InstalledAt.Equal(first.InstalledAt) {
 		t.Errorf("refreshed = %+v", second)
 	}
+	if second.ChartRef != "" || second.ChartVersion != "" {
+		t.Errorf("an addon added by address has no chart: %+v", second)
+	}
+
+	// Registered from a chart: the source is recorded, and a later
+	// registration of another chart version replaces it.
+	charted := in
+	charted.Addon.ChartRef, charted.Addon.ChartVersion = "oci://registry.example.org/charts/example", "1.2.0"
+	if err := st.InstallAddon(ctx, charted); err != nil {
+		t.Fatalf("chart registration: %v", err)
+	}
+	charted.Addon.ChartVersion = "1.3.0"
+	if err := st.InstallAddon(ctx, charted); err != nil {
+		t.Fatalf("chart upgrade: %v", err)
+	}
+	list, err := st.ListAddons(ctx)
+	if err != nil || len(list) != 1 || list[0].ChartRef != charted.Addon.ChartRef || list[0].ChartVersion != "1.3.0" {
+		t.Fatalf("chart source = %+v, %v", list, err)
+	}
+	if err := st.InstallAddon(ctx, in); err != nil {
+		t.Fatal(err)
+	}
 
 	// A second addon may not take the first one's workload, and the failed
 	// install leaves nothing behind.

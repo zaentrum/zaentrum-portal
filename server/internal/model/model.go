@@ -118,6 +118,10 @@ type Addon struct {
 	InstalledAt    time.Time        `json:"installedAt"`
 	RefreshedAt    time.Time        `json:"refreshedAt"`
 	Components     []AddonComponent `json:"components"`
+	// ChartRef and ChartVersion are the Helm chart the operator installed the
+	// addon from; empty for an addon added by its address.
+	ChartRef     string `json:"chartRef"`
+	ChartVersion string `json:"chartVersion"`
 
 	// Read-side joins, not columns of the addons table.
 	Title string `json:"title"`

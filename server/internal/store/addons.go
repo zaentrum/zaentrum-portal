@@ -73,12 +73,14 @@ func (s *Store) InstallAddon(ctx context.Context, in AddonInstall) error {
 			}
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO addons (key, address, version, manifest, manifest_sha256, installed_at, refreshed_at)
-			VALUES ($1, $2, $3, $4, $5, now(), now())
+			INSERT INTO addons (key, address, version, manifest, manifest_sha256, chart_ref, chart_version, installed_at, refreshed_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())
 			ON CONFLICT (key) DO UPDATE SET
 				address = EXCLUDED.address, version = EXCLUDED.version, manifest = EXCLUDED.manifest,
-				manifest_sha256 = EXCLUDED.manifest_sha256, refreshed_at = now()`,
-			key, in.Addon.Address, in.Addon.Version, manifestParam(in.Addon.Manifest), in.Addon.ManifestSHA256); err != nil {
+				manifest_sha256 = EXCLUDED.manifest_sha256, chart_ref = EXCLUDED.chart_ref,
+				chart_version = EXCLUDED.chart_version, refreshed_at = now()`,
+			key, in.Addon.Address, in.Addon.Version, manifestParam(in.Addon.Manifest), in.Addon.ManifestSHA256,
+			in.Addon.ChartRef, in.Addon.ChartVersion); err != nil {
 			return fmt.Errorf("addon: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM addon_components WHERE addon_key = $1`, key); err != nil {
@@ -184,7 +186,7 @@ func (s *Store) RemoveAddon(ctx context.Context, key, declaredSpace string) (Add
 
 const addonCols = `
 	ad.key, ad.address, ad.version, ad.manifest, ad.manifest_sha256, ad.installed_at, ad.refreshed_at,
-	a.title,
+	ad.chart_ref, ad.chart_version, a.title,
 	(SELECT count(*) FROM tiles WHERE ` + ownedTilesOf + `),
 	(SELECT count(*) FROM ui_extensions e WHERE e.addon = ad.key)`
 
@@ -199,7 +201,7 @@ func scanAddon(r rowScanner) (model.Addon, error) {
 		tiles, extRows int64
 	)
 	err := r.Scan(&ad.Key, &ad.Address, &ad.Version, &manifest, &ad.ManifestSHA256,
-		&ad.InstalledAt, &ad.RefreshedAt, &ad.Title, &tiles, &extRows)
+		&ad.InstalledAt, &ad.RefreshedAt, &ad.ChartRef, &ad.ChartVersion, &ad.Title, &tiles, &extRows)
 	ad.Manifest, ad.Tiles, ad.Rows = manifest, int(tiles), int(extRows)
 	return ad, err
 }
