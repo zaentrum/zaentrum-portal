@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -148,12 +149,44 @@ func (a *API) syncChartAddons(ctx context.Context) {
 	}
 }
 
+// reservedPrimaries are names a chart may not give its primary Service: in the
+// platform's namespace they reach something that is not the addon.
+var reservedPrimaries = map[string]bool{"localhost": true, "kubernetes": true, "portal-api": true}
+
+// primaryAllowed refuses a primary Service portal-api would reach something
+// other than the addon's own Service by. The chart's author names it, so the
+// name must be a Service the chart renders, and none the platform already
+// gives a meaning: a reserved or protected name, a platform service, or the
+// key of an app registered for something else.
+func (a *API) primaryAllowed(ctx context.Context, ca operator.ChartAddon, primary string) error {
+	switch {
+	case !isDNSLabel(primary):
+		return fmt.Errorf("the chart does not name its primary Service: its %s annotation is %q", operator.AnnotationPrimary, primary)
+	case reservedPrimaries[primary] || slices.Contains(a.cfg.ProtectedNames, primary):
+		return fmt.Errorf("the chart names %q as its primary Service, a name the platform keeps", primary)
+	case ca.Plan == nil || !ca.Plan.Renders("Service", primary):
+		return fmt.Errorf("the chart names %q as its primary Service but renders no Service of that name", primary)
+	}
+	if primary != ca.Name {
+		switch _, err := a.addons.GetApp(ctx, primary); {
+		case err == nil:
+			return fmt.Errorf("the chart names %q as its primary Service, the key of a registered app", primary)
+		case !errors.Is(err, store.ErrNotFound):
+			return err
+		}
+	}
+	if live, known := a.liveWorkloads(ctx); known && live[primary].Group == "platform" {
+		return fmt.Errorf("the chart names %q as its primary Service, a platform service", primary)
+	}
+	return nil
+}
+
 // registerChartAddon runs the install for a ready chart addon from its primary
 // Service, when the registry does not hold what runs.
 func (a *API) registerChartAddon(ctx context.Context, ca operator.ChartAddon) error {
 	primary := ca.Primary()
-	if !isDNSLabel(primary) {
-		return fmt.Errorf("the chart does not name its primary Service: its %s annotation is %q", operator.AnnotationPrimary, primary)
+	if err := a.primaryAllowed(ctx, ca, primary); err != nil {
+		return err
 	}
 	proxyURL := "http://" + primary
 	fetch := a.registration.fetch

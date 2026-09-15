@@ -335,6 +335,71 @@ func TestKicksDoNotDriveRegistrationPasses(t *testing.T) {
 	}
 }
 
+// A chart's author names the Service portal-api reads the manifest from. A
+// name that reaches anything but a Service the chart renders is refused before
+// anything is fetched.
+func TestChartPrimaryMustBeItsOwnService(t *testing.T) {
+	cases := []struct {
+		primary string
+		prepare func(*chartEnv)
+		mention string // "" registers
+	}{
+		{"example", nil, ""},
+		{"evil.example.org", nil, "does not name its primary"},
+		{"kubernetes.default.svc", nil, "does not name its primary"},
+		{"169.254.169.254", nil, "does not name its primary"},
+		{"EXAMPLE", nil, "does not name its primary"},
+		{"example:8080", nil, "does not name its primary"},
+		{"http://evil", nil, "does not name its primary"},
+		{"localhost", nil, "the platform keeps"},
+		{"kubernetes", nil, "the platform keeps"},
+		{"portal-api", nil, "the platform keeps"},
+		{"valkey", nil, "the platform keeps"}, // a protected service
+		{"example-web", nil, "renders no Service"},
+		{"chino", func(e *chartEnv) { e.store.apps["chino"] = model.App{Key: "chino", Title: "chino"} }, "registered app"},
+		{"search", func(e *chartEnv) {
+			e.api.workloads = fakeWorkloads{available: true, instances: []operator.Instance{{Name: "search", Group: "platform"}}}
+		}, "platform service"},
+	}
+	for _, c := range cases {
+		t.Run(c.primary, func(t *testing.T) {
+			e := newChartEnv(t)
+			e.api.cfg.ProtectedNames = []string{"postgres", "valkey"}
+			e.api.workloads = fakeWorkloads{available: true}
+			if c.prepare != nil {
+				c.prepare(e)
+			}
+			var fetched []string
+			e.api.registration.fetch = func(_ context.Context, proxyURL string) (Descriptor, error) {
+				fetched = append(fetched, proxyURL)
+				return decodeManifest(t, chartManifest), nil
+			}
+			e.seed("example", map[string]any{"chart": map[string]any{"ref": "oci://registry.example.org/charts/example", "version": "1.2.0"}}, nil)
+			status := readyStatus(e, "1.2.0", c.primary)
+			// The chart renders a Service by every name tested, but example-web:
+			// each refusal is its own rule, not the render check.
+			objects := []any{}
+			if c.primary != "example-web" {
+				objects = append(objects, map[string]any{"kind": "Service", "name": c.primary})
+			}
+			status["plan"].(map[string]any)["objects"] = objects
+			e.kube.SetStatus(addonPlural, "example", status)
+			e.api.syncChartAddons(context.Background())
+
+			regErr := e.api.registrationError("example")
+			if c.mention == "" {
+				if len(e.store.installs) != 1 || regErr != "" {
+					t.Fatalf("installs %d, error %q", len(e.store.installs), regErr)
+				}
+				return
+			}
+			if len(e.store.installs) != 0 || len(fetched) != 0 || !strings.Contains(regErr, c.mention) {
+				t.Errorf("installs %d, fetched %v, error %q — want a refusal mentioning %q", len(e.store.installs), fetched, regErr, c.mention)
+			}
+		})
+	}
+}
+
 func TestSyncChartAddonsRefusesToTakeOver(t *testing.T) {
 	setup := func(t *testing.T) *chartEnv {
 		e := newChartEnv(t)
