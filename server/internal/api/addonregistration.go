@@ -38,12 +38,16 @@ type regStep struct {
 
 // registrationSteps decides a pass from the resources and the registry:
 // register every ready addon, unregister every chart addon without a
-// resource. Whether a ready addon's registration changes anything is decided
-// once its manifest is read (needsRegistration).
+// resource. A resource being deleted counts as gone. Whether a ready addon's
+// registration changes anything is decided once its manifest is read
+// (needsRegistration).
 func registrationSteps(items []operator.ChartAddon, registered []model.Addon) []regStep {
 	present := map[string]bool{}
 	var out []regStep
 	for _, it := range items {
+		if it.Deleting {
+			continue
+		}
 		present[it.Name] = true
 		if it.Phase == operator.ChartPhaseReady {
 			out = append(out, regStep{name: it.Name})
@@ -157,7 +161,7 @@ func (a *API) registerChartAddon(ctx context.Context, ca operator.ChartAddon) er
 		return nil
 	case err != nil:
 		return err
-	case current.Phase != operator.ChartPhaseReady:
+	case current.Phase != operator.ChartPhaseReady || current.Deleting:
 		return nil
 	}
 	var reg registered
@@ -211,7 +215,7 @@ func (a *API) unregisterChartAddon(ctx context.Context, name string) {
 	defer a.registration.mu.Unlock()
 	// Gone for certain — read again under the lock, so an addon added a moment
 	// ago keeps its rows.
-	if _, err := a.charts.ChartAddon(ctx, name); !k8s.IsNotFound(err) {
+	if current, err := a.charts.ChartAddon(ctx, name); err == nil && !current.Deleting || err != nil && !k8s.IsNotFound(err) {
 		return
 	}
 	removed, err := a.removeChartRegistration(ctx, name)

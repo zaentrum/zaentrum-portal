@@ -19,13 +19,15 @@ func TestRegistrationSteps(t *testing.T) {
 		{Name: "example", Phase: "Ready"},
 		{Name: "sample", Phase: "Planned", Suspend: true}, // planned only: nothing to register
 		{Name: "alpha", Phase: "Ready"},
-		{Name: "beta", Phase: "Degraded"}, // not ready (yet, or any more): left as it is
+		{Name: "beta", Phase: "Degraded"},               // not ready (yet, or any more): left as it is
+		{Name: "going", Phase: "Ready", Deleting: true}, // a finalizer holds it: as good as gone
 	}
 	registered := []model.Addon{
 		{Key: "example", ChartRef: "oci://registry.example.org/charts/example"},
 		{Key: "beta", ChartRef: "oci://registry.example.org/charts/beta"},
 		{Key: "gone", ChartRef: "oci://registry.example.org/charts/gone"},
 		{Key: "legacy"}, // added by address: no resource to lose
+		{Key: "going", ChartRef: "oci://registry.example.org/charts/going"},
 	}
 	var got []string
 	for _, s := range registrationSteps(items, registered) {
@@ -35,7 +37,7 @@ func TestRegistrationSteps(t *testing.T) {
 			got = append(got, "+"+s.name)
 		}
 	}
-	if strings.Join(got, " ") != "+alpha +example -gone" {
+	if strings.Join(got, " ") != "+alpha +example -going -gone" {
 		t.Errorf("steps = %v", got)
 	}
 }

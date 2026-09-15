@@ -27,13 +27,19 @@ import (
 // An admin adds an addon by its chart — a reference, optionally a version or a
 // digest, non-secret values and secret inputs. portal-api writes a
 // ZaentrumAddon with suspend: true, so the operator fetches and renders the
-// chart and reports a plan without applying anything, and writes the secret
-// inputs into the addon's values Secret, one key per dotted values path, which
-// it never reads back. Installing turns suspend off, and only once the plan for
-// the current generation is clean. When the operator reports the addon ready,
-// the registration loop registers it from its primary Service exactly like an
-// addon added by address (addonregistration.go). Removing deletes the resource
-// — garbage collection takes what it owns — and the addon's registry rows.
+// chart and reports a plan without applying anything. Installing turns suspend
+// off, and only once the plan for the current generation is clean. When the
+// operator reports the addon ready, the registration loop registers it from its
+// primary Service exactly like an addon added by address
+// (addonregistration.go). Removing deletes the resource — the operator and
+// garbage collection take what it owns — and the addon's registry rows.
+//
+// Secret inputs are create-only. Each write stores the inputs it carries in a
+// new immutable Secret and points their valuesFrom entries at it — a change
+// of spec, so the operator plans again. portal-api never reads, changes or
+// deletes a Secret; the operator collects the ones nothing references. A
+// request is checked in full, by portal-api and by the apiserver in a dry run,
+// before any Secret is created, so a refused request stores nothing.
 //
 // portal-api never renders a chart, never applies a workload and never
 // generates a value: the operator does all three.
@@ -45,19 +51,20 @@ type chartClient interface {
 	OperatorInfo(ctx context.Context) (operator.OperatorInfo, error)
 	ChartAddons(ctx context.Context) ([]operator.ChartAddon, error)
 	ChartAddon(ctx context.Context, name string) (*operator.ChartAddon, error)
-	CreateChartAddon(ctx context.Context, a *operator.ChartAddon) error
-	UpdateChartAddon(ctx context.Context, a *operator.ChartAddon) error
+	CreateChartAddon(ctx context.Context, a *operator.ChartAddon, dryRun bool) error
+	UpdateChartAddon(ctx context.Context, a *operator.ChartAddon, dryRun bool) error
 	DeleteChartAddon(ctx context.Context, name string) error
-	WriteAddonSecrets(ctx context.Context, addon string, set map[string]string, clear []string) error
-	KeepAddonSecrets(ctx context.Context, addon string) error
-	DeleteAddonSecrets(ctx context.Context, addon string) error
+	SetKeepValues(ctx context.Context, name string, keep bool) error
+	CreateValuesSecret(ctx context.Context, addon string, values map[string]string) (string, error)
 }
 
 // Chart addon limits.
 const (
 	maxAddonName    = 40      // a release name; Secrets and labels derive from it
 	maxChartRef     = 2048    // a URL, generously
-	maxSecretInputs = 64      // keys in one values Secret
+	maxSecretInputs = 64      // secret inputs of one addon, and of one request
+	maxValuesPath   = 250     // the CRD's limit on valuesFrom[].targetPath
+	maxSecretKey    = 253     // a key of a Secret
 	maxChartBody    = 1 << 20 // the resource must fit etcd with room to spare
 	updateAttempts  = 4       // read-modify-write retries on a conflict
 )
@@ -73,6 +80,10 @@ var (
 	// valuesPathSegment is one segment of a dotted values path. Together with
 	// the dots, a path is a valid Secret key.
 	valuesPathSegment = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	// secretKeyChars is what a key of a Secret is made of.
+	secretKeyChars = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
+	// secretName is a DNS-1123 subdomain: what a Secret may be called.
+	secretName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 )
 
 // badInput is a request refused before anything is written.
@@ -221,11 +232,11 @@ func isNullJSON(raw json.RawMessage) bool {
 	return len(t) == 0 || string(t) == "null"
 }
 
-// validValuesPath: a secret input is addressed by a dotted values path, which
-// is also its key in the values Secret.
+// validValuesPath: a secret input is addressed by a dotted values path — the
+// entry's targetPath, and its key in the Secret the input is written to.
 func validValuesPath(p string) error {
-	if p == "" || len(p) > 253 {
-		return bad("secret input %q: a dotted values path of at most 253 characters", p)
+	if p == "" || len(p) > maxValuesPath {
+		return bad("secret input %q: a dotted values path of at most %d characters", p, maxValuesPath)
 	}
 	for _, seg := range strings.Split(p, ".") {
 		if !valuesPathSegment.MatchString(seg) {
@@ -238,58 +249,123 @@ func validValuesPath(p string) error {
 	return nil
 }
 
-// validSecretValues checks the secret inputs a request sets.
-func validSecretValues(set map[string]string) error {
-	if len(set) > maxSecretInputs {
-		return bad("at most %d secret inputs", maxSecretInputs)
+// secretRefInput is a request's reference to a Secret the addon kept: a key of
+// a Secret whose name says it belongs to the addon.
+type secretRefInput struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
+}
+
+// inputChanges is what a request does to an addon's secret inputs: values to
+// store in a new Secret, references to Secrets that exist, paths to clear.
+type inputChanges struct {
+	set   map[string]string
+	refs  map[string]operator.SecretRef
+	clear []string
+}
+
+// parseInputChanges checks a request's secret inputs for an addon. A path is
+// set, referenced or cleared — never two of these at once.
+func parseInputChanges(addon string, set map[string]string, refs map[string]secretRefInput, clear []string) (inputChanges, error) {
+	c := inputChanges{set: set, refs: map[string]operator.SecretRef{}, clear: clear}
+	if len(set)+len(refs)+len(clear) > maxSecretInputs {
+		return c, bad("at most %d secret inputs in one request", maxSecretInputs)
 	}
-	for p, v := range set {
+	touched := map[string]string{}
+	claim := func(p, how string) error {
 		if err := validValuesPath(p); err != nil {
 			return err
 		}
-		if v == "" {
-			return bad("secret input %q is empty — clear it with clearSecrets instead", p)
+		if before, ok := touched[p]; ok {
+			return bad("secret input %q is both %s and %s", p, before, how)
 		}
+		touched[p] = how
+		return nil
+	}
+	for _, p := range sortedKeys(set) {
+		if err := claim(p, "set"); err != nil {
+			return c, err
+		}
+		if set[p] == "" {
+			return c, bad("secret input %q is empty — clear it with clearSecrets instead", p)
+		}
+	}
+	prefix := operator.AddonSecretPrefix(addon)
+	for _, p := range sortedKeys(refs) {
+		if err := claim(p, "referenced"); err != nil {
+			return c, err
+		}
+		name, key := strings.TrimSpace(refs[p].Name), strings.TrimSpace(refs[p].Key)
+		if key == "" {
+			key = p
+		}
+		switch {
+		case !strings.HasPrefix(name, prefix) || len(name) > 253 || !secretName.MatchString(name):
+			return c, bad("secret input %q: a reference names a Secret of the addon, %s…", p, prefix)
+		case len(key) > maxSecretKey || !secretKeyChars.MatchString(key):
+			return c, bad("secret input %q: %q is no key of a Secret", p, key)
+		}
+		c.refs[p] = operator.SecretRef{Name: name, Key: key}
+	}
+	for _, p := range clear {
+		if err := claim(p, "cleared"); err != nil {
+			return c, err
+		}
+	}
+	return c, nil
+}
+
+// apply points an addon's secret inputs where the changes say; secret is the
+// Secret the set values are stored in.
+func (c inputChanges) apply(ca *operator.ChartAddon, secret string) error {
+	for _, p := range sortedKeys(c.refs) {
+		ca.SetSecretInput(p, c.refs[p])
+	}
+	for _, p := range sortedKeys(c.set) {
+		ca.SetSecretInput(p, operator.SecretRef{Name: secret, Key: p})
+	}
+	for _, p := range c.clear {
+		ca.ClearSecretInput(p)
+	}
+	if n := len(ca.SecretInputs()); n > maxSecretInputs {
+		return bad("at most %d secret inputs; the addon would have %d", maxSecretInputs, n)
 	}
 	return nil
 }
 
-// secretInputs splits valuesFrom into the entries portal-api manages — one per
-// secret input, in the addon's values Secret, valuesKey = targetPath = the
-// dotted path — and the rest, which it keeps as they are.
-func secretInputs(addon string, vf []operator.ValuesFrom) (paths []string, others []operator.ValuesFrom) {
-	secret := operator.ValuesSecretName(addon)
-	for _, e := range vf {
-		if e.Kind == "Secret" && e.Name == secret && e.ValuesKey != "" && e.ValuesKey == e.TargetPath {
-			paths = append(paths, e.TargetPath)
-			continue
-		}
-		others = append(others, e)
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	sort.Strings(paths)
-	return paths, others
+	sort.Strings(keys)
+	return keys
 }
 
-// withSecretInputs is others followed by one entry per distinct path, in path
-// order. valuesFrom applies in order, so a secret input overrides a values
-// document someone else referenced.
-func withSecretInputs(addon string, others []operator.ValuesFrom, paths []string) []operator.ValuesFrom {
-	seen := map[string]bool{}
-	var uniq []string
-	for _, p := range paths {
-		if !seen[p] {
-			seen[p] = true
-			uniq = append(uniq, p)
-		}
+// pendingSecret stands in for the name of the Secret a write stores its secret
+// inputs in, in the dry run that validates the write before that Secret exists.
+func pendingSecret(addon string) string { return operator.ValuesSecretPrefix(addon) + "pending" }
+
+// orphanedSecret is a write that failed after its secret inputs were stored:
+// the Secret exists, and nothing references it.
+type orphanedSecret struct {
+	err    error
+	secret string
+}
+
+func (e *orphanedSecret) Error() string {
+	return e.err.Error() + " — the secret inputs had been stored in Secret " + e.secret +
+		", which nothing references; the operator removes it"
+}
+
+func (e *orphanedSecret) Unwrap() error { return e.err }
+
+// orphaned says, with err, that secret was left behind; err alone without one.
+func orphaned(err error, secret string) error {
+	if err == nil || secret == "" {
+		return err
 	}
-	sort.Strings(uniq)
-	out := append([]operator.ValuesFrom(nil), others...)
-	for _, p := range uniq {
-		out = append(out, operator.ValuesFrom{
-			Kind: "Secret", Name: operator.ValuesSecretName(addon), ValuesKey: p, TargetPath: p,
-		})
-	}
-	return out
+	return &orphanedSecret{err: err, secret: secret}
 }
 
 // installable answers whether an addon's plan permits installing it: the
@@ -391,7 +467,7 @@ func (a *API) updateChartAddon(ctx context.Context, name string, change func(*op
 		} else if err != nil {
 			return nil, err
 		}
-		err = a.charts.UpdateChartAddon(ctx, ca)
+		err = a.charts.UpdateChartAddon(ctx, ca, false)
 		if err == nil {
 			return ca, nil
 		}
@@ -451,23 +527,25 @@ func (a *API) addonChartsStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // createAddonChart handles POST /api/portal/addon-charts
-// {name?, chart, version?, digest?, values?, secretValues?}.
+// {name?, chart, version?, digest?, values?, secretValues?, secretRefs?}.
 //
-// It writes the secret inputs, then creates the ZaentrumAddon — or updates the
-// one of that name — suspended, so the operator plans it and applies nothing.
-// Values are replaced; secret inputs are added to those already set, because a
-// client cannot send back what it can never read.
+// It creates the ZaentrumAddon — or updates the one of that name — suspended,
+// so the operator plans it and applies nothing. Values are replaced; secret
+// inputs are added to those already set, because a client cannot send back
+// what it can never read. secretRefs point inputs at Secrets the addon kept
+// when it was removed before.
 func (a *API) createAddonChart(w http.ResponseWriter, r *http.Request) {
 	if !a.chartsReady(w) {
 		return
 	}
 	var body struct {
-		Name         string            `json:"name"`
-		Chart        string            `json:"chart"`
-		Version      string            `json:"version"`
-		Digest       string            `json:"digest"`
-		Values       json.RawMessage   `json:"values"`
-		SecretValues map[string]string `json:"secretValues"`
+		Name         string                    `json:"name"`
+		Chart        string                    `json:"chart"`
+		Version      string                    `json:"version"`
+		Digest       string                    `json:"digest"`
+		Values       json.RawMessage           `json:"values"`
+		SecretValues map[string]string         `json:"secretValues"`
+		SecretRefs   map[string]secretRefInput `json:"secretRefs"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxChartBody)).Decode(&body); err != nil {
 		badRequest(w, "invalid json: "+err.Error())
@@ -486,8 +564,9 @@ func (a *API) createAddonChart(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = validAddonName(name)
 	}
+	var inputs inputChanges
 	if err == nil {
-		err = validSecretValues(body.SecretValues)
+		inputs, err = parseInputChanges(name, body.SecretValues, body.SecretRefs, nil)
 	}
 	if err != nil {
 		writeChartError(w, err)
@@ -514,39 +593,47 @@ func (a *API) createAddonChart(w http.ResponseWriter, r *http.Request) {
 		writeChartError(w, err)
 		return
 	}
-	var set []string
-	for p := range body.SecretValues {
-		set = append(set, p)
+	change := func(ca *operator.ChartAddon, secret string) error {
+		ca.Chart, ca.Values, ca.Suspend = chart, values, true
+		return inputs.apply(ca, secret)
 	}
-	if len(set) > 0 {
-		if err := a.charts.WriteAddonSecrets(ctx, name, body.SecretValues, nil); err != nil {
+	fresh := func(secret string) (*operator.ChartAddon, error) {
+		ca := &operator.ChartAddon{Name: name}
+		return ca, change(ca, secret)
+	}
+	// Checked in full — here, and by the apiserver in a dry run — before a
+	// secret input is stored: a refused request leaves no Secret behind.
+	secret := ""
+	if len(inputs.set) > 0 {
+		var candidate *operator.ChartAddon
+		if existing == nil {
+			if candidate, err = fresh(pendingSecret(name)); err == nil {
+				err = a.charts.CreateChartAddon(ctx, candidate, true)
+			}
+		} else if err = change(existing, pendingSecret(name)); err == nil {
+			err = a.charts.UpdateChartAddon(ctx, existing, true)
+		}
+		if err == nil {
+			secret, err = a.charts.CreateValuesSecret(ctx, name, inputs.set)
+		}
+		if err != nil {
 			writeChartError(w, err)
 			return
 		}
 	}
 	var written *operator.ChartAddon
 	if existing == nil {
-		written = &operator.ChartAddon{
-			Name: name, Chart: chart, Values: values, Suspend: true,
-			ValuesFrom: withSecretInputs(name, nil, set),
+		if written, err = fresh(secret); err == nil {
+			err = a.charts.CreateChartAddon(ctx, written, false)
 		}
-		err = a.charts.CreateChartAddon(ctx, written)
 		if k8s.IsConflict(err) {
 			err = &conflictError{msg: fmt.Sprintf("an addon %q was created meanwhile — read it and try again", name)}
 		}
 	} else {
-		written, err = a.updateChartAddon(ctx, name, func(ca *operator.ChartAddon) error {
-			current, others := secretInputs(name, ca.ValuesFrom)
-			if len(current)+len(set) > maxSecretInputs {
-				return bad("at most %d secret inputs", maxSecretInputs)
-			}
-			ca.Chart, ca.Values, ca.Suspend = chart, values, true
-			ca.ValuesFrom = withSecretInputs(name, others, append(current, set...))
-			return nil
-		})
+		written, err = a.updateChartAddon(ctx, name, func(ca *operator.ChartAddon) error { return change(ca, secret) })
 	}
 	if err != nil {
-		writeChartError(w, err)
+		writeChartError(w, orphaned(err, secret))
 		return
 	}
 	writeJSON(w, http.StatusAccepted, accepted(written))
@@ -554,20 +641,22 @@ func (a *API) createAddonChart(w http.ResponseWriter, r *http.Request) {
 
 // chartAddonView is GET /api/portal/addon-charts/{name}: the resource as the
 // settings console and zae show it. No secret value — secretKeys names the
-// inputs that are set, read from the resource's valuesFrom.
+// inputs that are set and secretRefs where each is read from, both taken from
+// the resource's valuesFrom.
 type chartAddonView struct {
-	Name               string                    `json:"name"`
-	Chart              operator.ChartSource      `json:"chart"`
-	Suspended          bool                      `json:"suspended"`
-	Phase              string                    `json:"phase"`
-	Message            string                    `json:"message"`
-	Generation         int64                     `json:"generation"`
-	ObservedGeneration int64                     `json:"observedGeneration"`
-	Plan               json.RawMessage           `json:"plan"`
-	Components         []operator.ChartComponent `json:"components"`
-	LastAppliedChart   *operator.ChartSource     `json:"lastAppliedChart"`
-	Values             json.RawMessage           `json:"values"`
-	SecretKeys         []string                  `json:"secretKeys"`
+	Name               string                        `json:"name"`
+	Chart              operator.ChartSource          `json:"chart"`
+	Suspended          bool                          `json:"suspended"`
+	Phase              string                        `json:"phase"`
+	Message            string                        `json:"message"`
+	Generation         int64                         `json:"generation"`
+	ObservedGeneration int64                         `json:"observedGeneration"`
+	Plan               json.RawMessage               `json:"plan"`
+	Components         []operator.ChartComponent     `json:"components"`
+	LastAppliedChart   *operator.ChartSource         `json:"lastAppliedChart"`
+	Values             json.RawMessage               `json:"values"`
+	SecretKeys         []string                      `json:"secretKeys"`
+	SecretRefs         map[string]operator.SecretRef `json:"secretRefs"`
 	// Registered: the registry holds the addon, registered from its chart.
 	Registered        bool   `json:"registered"`
 	RegistrationError string `json:"registrationError,omitempty"`
@@ -593,12 +682,12 @@ func (a *API) getAddonChart(w http.ResponseWriter, r *http.Request) {
 		writeChartError(w, err)
 		return
 	}
-	paths, _ := secretInputs(name, ca.ValuesFrom)
+	inputs := ca.SecretInputs()
 	view := chartAddonView{
 		Name: name, Chart: ca.Chart, Suspended: ca.Suspend, Phase: ca.Phase, Message: ca.Message,
 		Generation: ca.Generation, ObservedGeneration: ca.ObservedGeneration,
 		Plan: ca.PlanRaw, Components: nonNil(ca.Components), LastAppliedChart: ca.LastAppliedChart,
-		Values: ca.Values, SecretKeys: nonNil(paths),
+		Values: ca.Values, SecretKeys: sortedKeys(inputs), SecretRefs: inputs,
 		RegistrationError: a.registrationError(name),
 	}
 	if ad, err := a.addons.GetAddon(ctx, name); err == nil && ad.ChartRef != "" {
@@ -647,13 +736,13 @@ func (a *API) installAddonChart(w http.ResponseWriter, r *http.Request) {
 }
 
 // patchAddonChart handles PATCH /api/portal/addon-charts/{name}
-// {chart?, version?, digest?, values?, secretValues?, clearSecrets?, suspend?}:
-// upgrade or reconfigure.
+// {chart?, version?, digest?, values?, secretValues?, secretRefs?,
+// clearSecrets?, suspend?}: upgrade or reconfigure.
 //
 // A new chart, version or digest suspends the addon — the operator plans it
 // and the admin installs the plan — unless suspend: false is sent. Values are
-// replaced when present (null removes them). Secret inputs are written before
-// the resource references them, and cleared only after it no longer does.
+// replaced when present (null removes them). Only the secret inputs the request
+// names are touched: every other valuesFrom entry keeps its place and fields.
 func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
 	if !a.chartsReady(w) {
 		return
@@ -664,32 +753,29 @@ func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Chart        *string           `json:"chart"`
-		Version      *string           `json:"version"`
-		Digest       *string           `json:"digest"`
-		Values       json.RawMessage   `json:"values"` // absent: unchanged; null: none
-		SecretValues map[string]string `json:"secretValues"`
-		ClearSecrets []string          `json:"clearSecrets"`
-		Suspend      *bool             `json:"suspend"`
+		Chart        *string                   `json:"chart"`
+		Version      *string                   `json:"version"`
+		Digest       *string                   `json:"digest"`
+		Values       json.RawMessage           `json:"values"` // absent: unchanged; null: none
+		SecretValues map[string]string         `json:"secretValues"`
+		SecretRefs   map[string]secretRefInput `json:"secretRefs"`
+		ClearSecrets []string                  `json:"clearSecrets"`
+		Suspend      *bool                     `json:"suspend"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxChartBody)).Decode(&body); err != nil {
 		badRequest(w, "invalid json: "+err.Error())
 		return
 	}
-	var values json.RawMessage
-	err := validSecretValues(body.SecretValues)
-	if err == nil && body.Values != nil {
+	var (
+		values json.RawMessage
+		err    error
+	)
+	if body.Values != nil {
 		values, err = parseValues(body.Values)
 	}
-	for _, p := range body.ClearSecrets {
-		if err != nil {
-			break
-		}
-		if err = validValuesPath(p); err == nil {
-			if _, both := body.SecretValues[p]; both {
-				err = bad("secret input %q is both set and cleared", p)
-			}
-		}
+	var inputs inputChanges
+	if err == nil {
+		inputs, err = parseInputChanges(name, body.SecretValues, body.SecretRefs, body.ClearSecrets)
 	}
 	if err != nil {
 		writeChartError(w, err)
@@ -700,24 +786,15 @@ func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
 	a.registration.mu.Lock()
 	defer a.registration.mu.Unlock()
 
-	if _, err := a.charts.ChartAddon(ctx, name); k8s.IsNotFound(err) {
+	current, err := a.charts.ChartAddon(ctx, name)
+	if k8s.IsNotFound(err) {
 		a.chartMissing(ctx, w, name)
 		return
 	} else if err != nil {
 		writeChartError(w, err)
 		return
 	}
-	var set []string
-	for p := range body.SecretValues {
-		set = append(set, p)
-	}
-	if len(set) > 0 {
-		if err := a.charts.WriteAddonSecrets(ctx, name, body.SecretValues, nil); err != nil {
-			writeChartError(w, err)
-			return
-		}
-	}
-	written, err := a.updateChartAddon(ctx, name, func(ca *operator.ChartAddon) error {
+	change := func(ca *operator.ChartAddon, secret string) error {
 		changed := false
 		if body.Chart != nil || body.Version != nil || body.Digest != nil {
 			ref, version, digest := ca.Chart.Ref, ca.Chart.Version, ca.Chart.Digest
@@ -747,21 +824,9 @@ func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
 		if body.Values != nil {
 			ca.Values = values
 		}
-		current, others := secretInputs(name, ca.ValuesFrom)
-		keep := append([]string(nil), set...)
-		cleared := map[string]bool{}
-		for _, p := range body.ClearSecrets {
-			cleared[p] = true
+		if err := inputs.apply(ca, secret); err != nil {
+			return err
 		}
-		for _, p := range current {
-			if !cleared[p] {
-				keep = append(keep, p)
-			}
-		}
-		if len(withSecretInputs(name, nil, keep)) > maxSecretInputs {
-			return bad("at most %d secret inputs", maxSecretInputs)
-		}
-		ca.ValuesFrom = withSecretInputs(name, others, keep)
 		switch {
 		case body.Suspend != nil:
 			ca.Suspend = *body.Suspend
@@ -769,16 +834,28 @@ func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
 			ca.Suspend = true // plan the new chart first
 		}
 		return nil
-	})
-	if err != nil {
+	}
+	// Checked in full — here, and by the apiserver in a dry run — before a
+	// secret input is stored: a refused request leaves no Secret behind.
+	if err := change(current, pendingSecret(name)); err != nil {
 		writeChartError(w, err)
 		return
 	}
-	if len(body.ClearSecrets) > 0 {
-		if err := a.charts.WriteAddonSecrets(ctx, name, nil, body.ClearSecrets); err != nil {
+	secret := ""
+	if len(inputs.set) > 0 {
+		err := a.charts.UpdateChartAddon(ctx, current, true)
+		if err == nil {
+			secret, err = a.charts.CreateValuesSecret(ctx, name, inputs.set)
+		}
+		if err != nil {
 			writeChartError(w, err)
 			return
 		}
+	}
+	written, err := a.updateChartAddon(ctx, name, func(ca *operator.ChartAddon) error { return change(ca, secret) })
+	if err != nil {
+		writeChartError(w, orphaned(err, secret))
+		return
 	}
 	if body.Suspend != nil && !*body.Suspend {
 		a.kickRegistration()
@@ -788,12 +865,13 @@ func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
 
 // removeAddonChart handles DELETE /api/portal/addon-charts/{name}?keepValues=.
 //
-// keepValues first marks the values Secret and the operator's generated one to
-// outlive the addon; then the ZaentrumAddon is deleted — garbage collection
-// takes the workloads and everything else it owns — and so are the addon's
-// registry rows. Without keepValues both Secrets are deleted too, whether or
-// not the operator ever came to own them. A plan-only addon is cancelled the
-// same way.
+// keepValues first annotates the ZaentrumAddon keep-values; the operator's
+// finalizer then keeps the Secrets with its secret inputs and generated values
+// when the resource goes. Then the ZaentrumAddon is deleted — the operator and
+// garbage collection take the workloads and everything else it owns — and so
+// are the addon's registry rows. portal-api touches no Secret. An addon that
+// does not exist is answered 404 before anything happens; a plan-only addon is
+// cancelled the same way.
 func (a *API) removeAddonChart(w http.ResponseWriter, r *http.Request) {
 	if !a.chartsReady(w) {
 		return
@@ -816,37 +894,32 @@ func (a *API) removeAddonChart(w http.ResponseWriter, r *http.Request) {
 	a.registration.mu.Lock()
 	defer a.registration.mu.Unlock()
 
-	if keep {
-		// Before the resource goes: garbage collection follows an owner
-		// reference the moment its owner is deleted.
-		if err := a.charts.KeepAddonSecrets(ctx, name); err != nil {
-			writeChartError(w, err)
-			return
-		}
-	}
-	deleted := true
-	if err := a.charts.DeleteChartAddon(ctx, name); k8s.IsNotFound(err) {
-		deleted = false
+	ca, err := a.charts.ChartAddon(ctx, name)
+	if k8s.IsNotFound(err) {
+		a.chartMissing(ctx, w, name)
+		return
 	} else if err != nil {
 		writeChartError(w, err)
 		return
 	}
-	var warnings []string
-	if !keep {
-		if err := a.charts.DeleteAddonSecrets(ctx, name); err != nil {
-			warnings = append(warnings, "the addon's values Secrets could not be deleted: "+err.Error())
+	// The annotation is the operator's instruction when the resource goes: set
+	// it first — and take away one an earlier attempt left.
+	if keep != ca.KeepValues {
+		if err := a.charts.SetKeepValues(ctx, name, keep); err != nil {
+			writeChartError(w, err)
+			return
 		}
+	}
+	if err := a.charts.DeleteChartAddon(ctx, name); err != nil && !k8s.IsNotFound(err) {
+		writeChartError(w, err)
+		return
 	}
 	removed, err := a.removeChartRegistration(ctx, name)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
-	if !deleted && removed == nil {
-		a.chartMissing(ctx, w, name)
-		return
-	}
-	out := map[string]any{"name": name, "resource": deleted, "keptValues": keep, "warnings": nonNil(warnings)}
+	out := map[string]any{"name": name, "resource": true, "keptValues": keep}
 	if removed != nil {
 		out["removed"] = map[string]any{
 			"tiles": removed.Tiles, "rows": removed.Rows, "space": strings.Join(removed.Spaces, ","),

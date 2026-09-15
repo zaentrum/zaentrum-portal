@@ -1,14 +1,16 @@
 // Package k8sfake is an in-memory apiserver for tests. It serves namespaced
 // custom resources and Secrets with the semantics portal-api relies on:
 // resourceVersion conflicts on update, generation bumps on spec changes, JSON
-// merge patch, and owner-reference garbage collection on delete.
+// merge patch, server-side dry runs, generateName, and owner-reference garbage
+// collection on delete.
 //
-// Reading a Secret — get, list or watch — fails the test. portal-api writes
-// secret inputs and never reads them back; this is where that is enforced.
+// Secrets are create-only for portal-api: reading, changing or deleting one —
+// get, list, watch, update, patch or delete — fails the test.
 package k8sfake
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,7 +28,7 @@ import (
 
 // Call is one request the fake served.
 type Call struct {
-	Method, Path, ContentType, Body string
+	Method, Path, Query, ContentType, Accept, Body string
 }
 
 // Server is the fake apiserver.
@@ -37,6 +39,7 @@ type Server struct {
 	mu      sync.Mutex
 	rv      int
 	objects map[string]map[string]any // "<plural>/<name>" → object
+	deleted map[string]map[string]any // "<plural>/<name>" → the object as it was deleted
 	secrets map[string]map[string]any // name → Secret
 	calls   []Call
 
@@ -44,6 +47,13 @@ type Server struct {
 	Unserved map[string]bool
 	// Forbidden plurals (or "secrets") answer 403, like a Role without them.
 	Forbidden map[string]bool
+	// Validate stands in for the CRD's schema: an error refuses a create or
+	// update — dry run or not — with 422 Invalid.
+	Validate func(plural string, obj map[string]any) error
+	// Fail answers a request with an error before the fake looks at it, when
+	// it says so: a failure injected at exactly one step. It runs with the fake
+	// locked and must not call the fake.
+	Fail func(c Call) (code int, message string, fail bool)
 }
 
 // New starts a fake apiserver that stops with the test.
@@ -51,6 +61,7 @@ func New(t testing.TB) *Server {
 	s := &Server{
 		t:         t,
 		objects:   map[string]map[string]any{},
+		deleted:   map[string]map[string]any{},
 		secrets:   map[string]map[string]any{},
 		Unserved:  map[string]bool{},
 		Forbidden: map[string]bool{},
@@ -90,6 +101,29 @@ func (s *Server) Object(plural, name string) map[string]any {
 	return nil
 }
 
+// Deleted is a copy of a custom resource as it was when it was deleted; nil
+// when it was not.
+func (s *Server) Deleted(plural, name string) map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if o, ok := s.deleted[plural+"/"+name]; ok {
+		return clone(o)
+	}
+	return nil
+}
+
+// Generation is a stored custom resource's metadata.generation; 0 when absent.
+func (s *Server) Generation(plural, name string) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.objects[plural+"/"+name]
+	if !ok {
+		return 0
+	}
+	gen, _ := strconv.ParseInt(fmt.Sprint(meta(o)["generation"]), 10, 64)
+	return gen
+}
+
 // Remove deletes a custom resource the way someone else would — kubectl, a
 // deploy repository — including garbage collection of what it owns.
 func (s *Server) Remove(plural, name string) {
@@ -125,6 +159,18 @@ func (s *Server) Secret(name string) map[string]any {
 	return nil
 }
 
+// SecretNames lists the stored Secrets' names, sorted.
+func (s *Server) SecretNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := make([]string, 0, len(s.secrets))
+	for n := range s.secrets {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // PutSecret seeds a Secret.
 func (s *Server) PutSecret(obj map[string]any) {
 	s.mu.Lock()
@@ -144,17 +190,23 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls = append(s.calls, Call{Method: r.Method, Path: r.URL.Path, ContentType: r.Header.Get("Content-Type"), Body: string(body)})
+	c := Call{
+		Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery,
+		ContentType: r.Header.Get("Content-Type"), Accept: r.Header.Get("Accept"), Body: string(body),
+	}
+	s.calls = append(s.calls, c)
+	if s.Fail != nil {
+		if code, msg, fail := s.Fail(c); fail {
+			status(w, code, http.StatusText(code), msg)
+			return
+		}
+	}
 
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	switch {
 	// /api/v1/namespaces/<ns>/secrets[/<name>]
 	case len(parts) >= 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces" && parts[4] == "secrets":
-		name := ""
-		if len(parts) == 6 {
-			name = parts[5]
-		}
-		s.serveSecret(w, r, name, body)
+		s.serveSecret(w, r, len(parts) == 6, body)
 	// /apis/<group>/<version>/namespaces/<ns>/<plural>[/<name>]
 	case len(parts) >= 6 && parts[0] == "apis" && parts[3] == "namespaces":
 		name := ""
@@ -167,58 +219,41 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) serveSecret(w http.ResponseWriter, r *http.Request, name string, body []byte) {
-	if r.Method == http.MethodGet || r.URL.Query().Has("watch") {
-		s.t.Errorf("k8sfake: portal-api must never read a Secret: %s %s", r.Method, r.URL)
-		status(w, http.StatusForbidden, "Forbidden", "secrets are write-only for portal-api")
+func (s *Server) serveSecret(w http.ResponseWriter, r *http.Request, named bool, body []byte) {
+	if r.Method != http.MethodPost || named || r.URL.Query().Has("watch") {
+		s.t.Errorf("k8sfake: portal-api only ever creates Secrets, got %s %s", r.Method, r.URL)
+		status(w, http.StatusForbidden, "Forbidden", "secrets are create-only for portal-api")
 		return
 	}
 	if s.Forbidden["secrets"] {
 		status(w, http.StatusForbidden, "Forbidden", "secrets is forbidden")
 		return
 	}
-	switch {
-	case r.Method == http.MethodPost && name == "":
-		var obj map[string]any
-		if err := decode(body, &obj); err != nil {
-			status(w, http.StatusBadRequest, "BadRequest", err.Error())
-			return
-		}
-		n := str(meta(obj)["name"])
-		if _, ok := s.secrets[n]; ok {
-			status(w, http.StatusConflict, "AlreadyExists", fmt.Sprintf("secrets %q already exists", n))
-			return
-		}
-		s.secrets[n] = obj
-		writeJSON(w, http.StatusCreated, obj)
-	case r.Method == http.MethodPatch && name != "":
-		cur, ok := s.secrets[name]
-		if !ok {
-			status(w, http.StatusNotFound, "NotFound", fmt.Sprintf("secrets %q not found", name))
-			return
-		}
-		if r.Header.Get("Content-Type") != "application/merge-patch+json" {
-			status(w, http.StatusUnsupportedMediaType, "UnsupportedMediaType", "k8sfake speaks merge patch only")
-			return
-		}
-		var patch any
-		if err := decode(body, &patch); err != nil {
-			status(w, http.StatusBadRequest, "BadRequest", err.Error())
-			return
-		}
-		next, _ := MergePatch(cur, patch).(map[string]any)
-		s.secrets[name] = next
-		writeJSON(w, http.StatusOK, next)
-	case r.Method == http.MethodDelete && name != "":
-		if _, ok := s.secrets[name]; !ok {
-			status(w, http.StatusNotFound, "NotFound", fmt.Sprintf("secrets %q not found", name))
-			return
-		}
-		delete(s.secrets, name)
-		writeJSON(w, http.StatusOK, map[string]any{"kind": "Status", "status": "Success"})
-	default:
-		status(w, http.StatusMethodNotAllowed, "MethodNotAllowed", r.Method)
+	var obj map[string]any
+	if err := decode(body, &obj); err != nil {
+		status(w, http.StatusBadRequest, "BadRequest", err.Error())
+		return
 	}
+	md := meta(obj)
+	n := str(md["name"])
+	if n == "" && str(md["generateName"]) != "" {
+		n = str(md["generateName"]) + suffix()
+		md["name"] = n
+	}
+	if n == "" {
+		status(w, http.StatusUnprocessableEntity, "Invalid", "metadata.name or metadata.generateName is required")
+		return
+	}
+	if _, ok := s.secrets[n]; ok {
+		status(w, http.StatusConflict, "AlreadyExists", fmt.Sprintf("secrets %q already exists", n))
+		return
+	}
+	s.secrets[n] = obj
+	if strings.Contains(r.Header.Get("Accept"), "as=PartialObjectMetadata") {
+		writeJSON(w, http.StatusCreated, map[string]any{"kind": "PartialObjectMetadata", "apiVersion": "meta.k8s.io/v1", "metadata": md})
+		return
+	}
+	writeJSON(w, http.StatusCreated, obj)
 }
 
 func (s *Server) serveResource(w http.ResponseWriter, r *http.Request, plural, name string, body []byte) {
@@ -230,6 +265,7 @@ func (s *Server) serveResource(w http.ResponseWriter, r *http.Request, plural, n
 		status(w, http.StatusForbidden, "Forbidden", plural+" is forbidden")
 		return
 	}
+	dry := r.URL.Query().Get("dryRun") == "All"
 	key := plural + "/" + name
 	switch {
 	case r.Method == http.MethodGet && name == "":
@@ -264,8 +300,15 @@ func (s *Server) serveResource(w http.ResponseWriter, r *http.Request, plural, n
 			status(w, http.StatusConflict, "AlreadyExists", fmt.Sprintf("%s %q already exists", plural, n))
 			return
 		}
+		if !s.valid(w, plural, obj) {
+			return
+		}
 		delete(obj, "status")
 		md["generation"] = json.Number("1")
+		if dry {
+			writeJSON(w, http.StatusCreated, obj)
+			return
+		}
 		s.rv++
 		md["resourceVersion"] = strconv.Itoa(s.rv)
 		s.objects[plural+"/"+n] = obj
@@ -281,13 +324,19 @@ func (s *Server) serveResource(w http.ResponseWriter, r *http.Request, plural, n
 			status(w, http.StatusBadRequest, "BadRequest", err.Error())
 			return
 		}
-		md := meta(obj)
-		switch rv := str(md["resourceVersion"]); {
+		switch rv := str(meta(obj)["resourceVersion"]); {
 		case rv == "":
 			status(w, http.StatusUnprocessableEntity, "Invalid", "metadata.resourceVersion: must be specified for an update")
 			return
 		case rv != str(meta(cur)["resourceVersion"]):
 			status(w, http.StatusConflict, "Conflict", "the object has been modified; please apply your changes to the latest version and try again")
+			return
+		}
+		if !s.valid(w, plural, obj) {
+			return
+		}
+		if dry {
+			writeJSON(w, http.StatusOK, obj)
 			return
 		}
 		s.store(key, cur, obj)
@@ -313,11 +362,24 @@ func (s *Server) serveResource(w http.ResponseWriter, r *http.Request, plural, n
 			return
 		}
 		delete(s.objects, key)
+		s.deleted[key] = clone(cur)
 		s.collect(str(cur["kind"]), name)
 		writeJSON(w, http.StatusOK, map[string]any{"kind": "Status", "status": "Success"})
 	default:
 		status(w, http.StatusMethodNotAllowed, "MethodNotAllowed", r.Method)
 	}
+}
+
+// valid runs the Validate hook; false when it answered the request.
+func (s *Server) valid(w http.ResponseWriter, plural string, obj map[string]any) bool {
+	if s.Validate == nil {
+		return true
+	}
+	if err := s.Validate(plural, clone(obj)); err != nil {
+		status(w, http.StatusUnprocessableEntity, "Invalid", err.Error())
+		return false
+	}
+	return true
 }
 
 // store writes next over cur as an update does: status stays the
@@ -375,6 +437,17 @@ func MergePatch(target, patch any) any {
 	return out
 }
 
+// suffix is what generateName appends: five lower-case letters and digits.
+func suffix() string {
+	const alphabet = "bcdfghjklmnpqrstvwxz2456789"
+	b := make([]byte, 5)
+	_, _ = rand.Read(b)
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return string(b)
+}
+
 func meta(obj map[string]any) map[string]any {
 	md, ok := obj["metadata"].(map[string]any)
 	if !ok {
@@ -387,18 +460,6 @@ func meta(obj map[string]any) map[string]any {
 func str(v any) string {
 	s, _ := v.(string)
 	return s
-}
-
-// Generation is a stored custom resource's metadata.generation; 0 when absent.
-func (s *Server) Generation(plural, name string) int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	o, ok := s.objects[plural+"/"+name]
-	if !ok {
-		return 0
-	}
-	gen, _ := strconv.ParseInt(fmt.Sprint(meta(o)["generation"]), 10, 64)
-	return gen
 }
 
 // decode keeps numbers exact (json.Number), like the apiserver does.

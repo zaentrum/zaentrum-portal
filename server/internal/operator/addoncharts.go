@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
-	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
 )
 
 // Chart addons.
@@ -16,10 +14,14 @@ import (
 // An addon can be a standard Helm chart that the zaentrum-operator installs
 // from one ZaentrumAddon resource in the platform namespace: the chart
 // reference, non-secret values, and valuesFrom entries naming where the secret
-// inputs are kept. portal-api writes that resource and the addon's values
-// Secret. It never renders a chart and never applies a workload — the operator
-// does both — and it never reads a Secret back: nothing needs the values once
-// they are written, so nothing here can fetch them.
+// inputs are kept. portal-api writes that resource. It never renders a chart
+// and never applies a workload — the operator does both.
+//
+// Secrets are create-only for portal-api. Every write of secret inputs creates
+// a new immutable Secret holding just those inputs and points their valuesFrom
+// entries at it. portal-api never reads, changes or deletes a Secret: a Secret
+// no entry references any more, and one whose addon is gone, is the
+// operator's to collect.
 
 const (
 	// AnnotationPrimary, in a chart's Chart.yaml, names the Service (port 80)
@@ -27,20 +29,21 @@ const (
 	AnnotationPrimary = "zaentrum.io/primary"
 	// AnnotationTitle is a chart's optional display title.
 	AnnotationTitle = "zaentrum.io/title"
-	// LabelKeep on a values Secret keeps it when its addon is removed.
-	LabelKeep = "zaentrum.io/keep"
+	// AnnotationKeepValues on a ZaentrumAddon asks the operator to keep the
+	// Secrets holding its values when the addon is deleted.
+	AnnotationKeepValues = "zaentrum.io/keep-values"
 )
 
 // ChartPhaseReady is the phase of an applied addon whose workloads are ready.
 const ChartPhaseReady = "Ready"
 
-// ValuesSecretName is the Secret holding an addon's secret inputs, one key per
-// dotted values path.
-func ValuesSecretName(addon string) string { return "zaentrum-addon-" + addon + "-values" }
+// AddonSecretPrefix starts the name of every Secret that belongs to an addon:
+// the only Secrets its valuesFrom may reference through portal-api.
+func AddonSecretPrefix(addon string) string { return "zaentrum-addon-" + addon + "-" }
 
-// GeneratedSecretName is the Secret the operator keeps the values it generated
-// for an addon in.
-func GeneratedSecretName(addon string) string { return "zaentrum-addon-" + addon + "-generated" }
+// ValuesSecretPrefix is the generateName of the Secrets secret inputs are
+// written to.
+func ValuesSecretPrefix(addon string) string { return AddonSecretPrefix(addon) + "values-" }
 
 // ChartSource is a chart reference: an oci:// ref with a version (its tag), or
 // an https:// link to a chart archive. Digest optionally pins the archive.
@@ -59,6 +62,18 @@ type ValuesFrom struct {
 	Optional   bool   `json:"optional,omitempty"`
 }
 
+// SecretRef is where a secret input is read from: a key of a Secret.
+type SecretRef struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
+}
+
+// ChartObject names one object a plan renders.
+type ChartObject struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
 // ChartPlan is the part of status.plan portal-api reasons about. The whole plan
 // is passed through untouched as ChartAddon.PlanRaw.
 type ChartPlan struct {
@@ -70,9 +85,20 @@ type ChartPlan struct {
 		Digest      string            `json:"digest"`
 		Annotations map[string]string `json:"annotations"`
 	} `json:"chart"`
-	ValuesSchema string   `json:"valuesSchema"`
-	ValuesErrors []string `json:"valuesErrors"`
-	Violations   []string `json:"violations"`
+	ValuesSchema string        `json:"valuesSchema"`
+	ValuesErrors []string      `json:"valuesErrors"`
+	Violations   []string      `json:"violations"`
+	Objects      []ChartObject `json:"objects"`
+}
+
+// Renders answers whether the plan renders an object of this kind and name.
+func (p *ChartPlan) Renders(kind, name string) bool {
+	for _, o := range p.Objects {
+		if o.Kind == kind && o.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // ChartComponent is one applied workload with its live readiness.
@@ -89,12 +115,18 @@ type ChartAddon struct {
 	Name            string
 	Generation      int64
 	ResourceVersion string
+	// Deleting: the resource is being deleted — a finalizer still holds it.
+	Deleting bool
+	// KeepValues: it carries the keep-values annotation.
+	KeepValues bool
 
-	// spec — the fields portal-api manages.
+	// spec — the fields portal-api manages. valuesFrom is kept entry by
+	// entry as read, so what portal-api does not manage is written back as it
+	// was: see SecretInputs, SetSecretInput and ClearSecretInput.
 	Chart      ChartSource
 	Values     json.RawMessage // spec.values; empty when unset
-	ValuesFrom []ValuesFrom
 	Suspend    bool
+	valuesFrom []map[string]any
 
 	// status — the operator's.
 	Phase              string
@@ -125,17 +157,90 @@ func (a *ChartAddon) Primary() string {
 	return a.Plan.Chart.Annotations[AnnotationPrimary]
 }
 
+// ValuesFrom is spec.valuesFrom, typed.
+func (a *ChartAddon) ValuesFrom() []ValuesFrom {
+	out := make([]ValuesFrom, 0, len(a.valuesFrom))
+	for _, e := range a.valuesFrom {
+		b, _ := json.Marshal(e)
+		var vf ValuesFrom
+		_ = json.Unmarshal(b, &vf)
+		out = append(out, vf)
+	}
+	return out
+}
+
+// isSecretInput answers whether a valuesFrom entry sets path from a Secret.
+func isSecretInput(e map[string]any, path string) bool {
+	kind, _ := e["kind"].(string)
+	target, _ := e["targetPath"].(string)
+	return kind == "Secret" && target != "" && (path == "" || target == path)
+}
+
+// SecretInputs maps every values path a Secret sets to where it is read from.
+func (a *ChartAddon) SecretInputs() map[string]SecretRef {
+	out := map[string]SecretRef{}
+	for _, e := range a.valuesFrom {
+		if !isSecretInput(e, "") {
+			continue
+		}
+		target, _ := e["targetPath"].(string)
+		name, _ := e["name"].(string)
+		key, _ := e["valuesKey"].(string)
+		if key == "" {
+			key = "values.yaml"
+		}
+		if _, seen := out[target]; !seen {
+			out[target] = SecretRef{Name: name, Key: key}
+		}
+	}
+	return out
+}
+
+// SetSecretInput points a values path at a key of a Secret. The path's entry
+// keeps its place and every field besides name and valuesKey; a path without
+// one gets a new entry at the end.
+func (a *ChartAddon) SetSecretInput(path string, ref SecretRef) {
+	kept := a.valuesFrom[:0:0]
+	set := false
+	for _, e := range a.valuesFrom {
+		if isSecretInput(e, path) {
+			if set {
+				continue // one entry per path
+			}
+			e["name"], e["valuesKey"] = ref.Name, ref.Key
+			set = true
+		}
+		kept = append(kept, e)
+	}
+	if !set {
+		kept = append(kept, map[string]any{"kind": "Secret", "name": ref.Name, "valuesKey": ref.Key, "targetPath": path})
+	}
+	a.valuesFrom = kept
+}
+
+// ClearSecretInput removes the Secret entries that set a values path.
+func (a *ChartAddon) ClearSecretInput(path string) {
+	kept := a.valuesFrom[:0:0]
+	for _, e := range a.valuesFrom {
+		if !isSecretInput(e, path) {
+			kept = append(kept, e)
+		}
+	}
+	a.valuesFrom = kept
+}
+
 type chartAddonObject struct {
 	Metadata struct {
-		Name            string `json:"name"`
-		Generation      int64  `json:"generation"`
-		ResourceVersion string `json:"resourceVersion"`
+		Name              string            `json:"name"`
+		Generation        int64             `json:"generation"`
+		ResourceVersion   string            `json:"resourceVersion"`
+		DeletionTimestamp *string           `json:"deletionTimestamp"`
+		Annotations       map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Spec struct {
-		Chart      ChartSource     `json:"chart"`
-		Values     json.RawMessage `json:"values"`
-		ValuesFrom []ValuesFrom    `json:"valuesFrom"`
-		Suspend    bool            `json:"suspend"`
+		Chart   ChartSource     `json:"chart"`
+		Values  json.RawMessage `json:"values"`
+		Suspend bool            `json:"suspend"`
 	} `json:"spec"`
 	Status struct {
 		Phase              string           `json:"phase"`
@@ -166,10 +271,20 @@ func parseChartAddon(raw []byte) (ChartAddon, error) {
 	}
 	a := ChartAddon{
 		Name: o.Metadata.Name, Generation: o.Metadata.Generation, ResourceVersion: o.Metadata.ResourceVersion,
-		Chart: o.Spec.Chart, ValuesFrom: o.Spec.ValuesFrom, Suspend: o.Spec.Suspend,
+		Deleting:   o.Metadata.DeletionTimestamp != nil,
+		KeepValues: o.Metadata.Annotations[AnnotationKeepValues] == "true",
+		Chart:      o.Spec.Chart, Suspend: o.Spec.Suspend,
 		Phase: o.Status.Phase, Message: o.Status.Message, ObservedGeneration: o.Status.ObservedGeneration,
 		LastAppliedChart: o.Status.LastAppliedChart, Components: o.Status.Components,
 		obj: obj,
+	}
+	if spec, ok := obj["spec"].(map[string]any); ok {
+		entries, _ := spec["valuesFrom"].([]any)
+		for _, e := range entries {
+			if m, ok := e.(map[string]any); ok {
+				a.valuesFrom = append(a.valuesFrom, m)
+			}
+		}
 	}
 	if !isNull(o.Spec.Values) {
 		a.Values = o.Spec.Values
@@ -210,10 +325,10 @@ func (a *ChartAddon) spec(current any) map[string]any {
 	} else {
 		spec["values"] = a.Values
 	}
-	if len(a.ValuesFrom) == 0 {
+	if len(a.valuesFrom) == 0 {
 		delete(spec, "valuesFrom")
 	} else {
-		spec["valuesFrom"] = a.ValuesFrom
+		spec["valuesFrom"] = a.valuesFrom
 	}
 	spec["suspend"] = a.Suspend
 	return spec
@@ -270,8 +385,10 @@ func (s *Service) ChartAddon(ctx context.Context, name string) (*ChartAddon, err
 }
 
 // CreateChartAddon creates a ZaentrumAddon from a's name and managed spec, and
-// updates a to the resource as created (its generation, among others).
-func (s *Service) CreateChartAddon(ctx context.Context, a *ChartAddon) error {
+// updates a to the resource as created (its generation, among others). A dry
+// run validates the create — everything the apiserver checks — and changes
+// nothing, a included.
+func (s *Service) CreateChartAddon(ctx context.Context, a *ChartAddon, dryRun bool) error {
 	if err := validName(a.Name); err != nil {
 		return err
 	}
@@ -288,8 +405,8 @@ func (s *Service) CreateChartAddon(ctx context.Context, a *ChartAddon) error {
 	if err != nil {
 		return err
 	}
-	raw, err := s.k8s.CreateResource(ctx, g, v, p, body)
-	if err != nil {
+	raw, err := s.k8s.CreateResource(ctx, g, v, p, body, dryRun)
+	if err != nil || dryRun {
 		return err
 	}
 	return a.refresh(raw)
@@ -308,8 +425,8 @@ func (a *ChartAddon) refresh(raw []byte) error {
 // UpdateChartAddon writes a's managed spec over the resource as it was read,
 // and updates a to the resource as written. A change made since the read is
 // answered with a conflict (k8s.IsConflict): read again and redo the change,
-// never overwrite.
-func (s *Service) UpdateChartAddon(ctx context.Context, a *ChartAddon) error {
+// never overwrite. A dry run validates the update and changes nothing.
+func (s *Service) UpdateChartAddon(ctx context.Context, a *ChartAddon, dryRun bool) error {
 	if a.obj == nil {
 		return errors.New("update of a ZaentrumAddon that was not read")
 	}
@@ -322,16 +439,16 @@ func (s *Service) UpdateChartAddon(ctx context.Context, a *ChartAddon) error {
 		return err
 	}
 	g, v, p := s.addonResource()
-	raw, err := s.k8s.UpdateResource(ctx, g, v, p, a.Name, body)
-	if err != nil {
+	raw, err := s.k8s.UpdateResource(ctx, g, v, p, a.Name, body, dryRun)
+	if err != nil || dryRun {
 		return err
 	}
 	return a.refresh(raw)
 }
 
-// DeleteChartAddon deletes a ZaentrumAddon. What it owns — workloads, the
-// generated Secret, a values Secret without the keep label — goes with it by
-// garbage collection.
+// DeleteChartAddon deletes a ZaentrumAddon. What it owns — workloads, and the
+// Secrets with its values unless it carries the keep-values annotation — goes
+// with it: the operator's finalizer and garbage collection see to that.
 func (s *Service) DeleteChartAddon(ctx context.Context, name string) error {
 	if err := validName(name); err != nil {
 		return err
@@ -340,102 +457,53 @@ func (s *Service) DeleteChartAddon(ctx context.Context, name string) error {
 	return s.k8s.DeleteResource(ctx, g, v, p, name)
 }
 
-// WriteAddonSecrets sets and clears keys in an addon's values Secret without
-// reading it: one merge patch when the Secret exists, a create when it does
-// not. Writing to a kept Secret makes it the addon's again (the keep label is
-// a decision made at removal, not a property of the values).
-func (s *Service) WriteAddonSecrets(ctx context.Context, addon string, set map[string]string, clear []string) error {
-	if err := validName(addon); err != nil {
+// SetKeepValues sets or removes the keep-values annotation of a ZaentrumAddon:
+// a metadata patch that leaves its spec, and so its generation, alone.
+func (s *Service) SetKeepValues(ctx context.Context, name string, keep bool) error {
+	if err := validName(name); err != nil {
 		return err
 	}
-	name := ValuesSecretName(addon)
-	data := map[string]any{}
-	for _, k := range clear {
-		data[k] = nil
-	}
-	for k, v := range set {
-		data[k] = base64.StdEncoding.EncodeToString([]byte(v))
-	}
-	if len(data) == 0 {
-		return nil
+	var value any // null removes the annotation
+	if keep {
+		value = "true"
 	}
 	patch, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{"labels": map[string]any{LabelAddon: addon, LabelKeep: nil}},
-		"data":     data,
+		"metadata": map[string]any{"annotations": map[string]any{AnnotationKeepValues: value}},
 	})
 	if err != nil {
 		return err
 	}
-	switch err := s.k8s.PatchSecret(ctx, name, patch); {
-	case err == nil:
-		return nil
-	case !k8s.IsNotFound(err):
-		return err
-	case len(set) == 0:
-		return nil // only clearing keys of a Secret that does not exist
+	g, v, p := s.addonResource()
+	return s.k8s.PatchResource(ctx, g, v, p, name, patch)
+}
+
+// CreateValuesSecret writes secret inputs into a new immutable Secret of the
+// addon — keyed by values path, labelled for the addon — and returns the name
+// the apiserver generated for it. It never writes to a Secret that exists.
+func (s *Service) CreateValuesSecret(ctx context.Context, addon string, values map[string]string) (string, error) {
+	if err := validName(addon); err != nil {
+		return "", err
 	}
-	created := map[string]string{}
-	for k, v := range set {
-		created[k] = base64.StdEncoding.EncodeToString([]byte(v))
+	if len(values) == 0 {
+		return "", errors.New("a values Secret without values")
 	}
-	obj, err := json.Marshal(map[string]any{
+	data := make(map[string]string, len(values))
+	for k, v := range values {
+		data[k] = base64.StdEncoding.EncodeToString([]byte(v))
+	}
+	body, err := json.Marshal(map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
 		"type":       "Opaque",
+		"immutable":  true,
 		"metadata": map[string]any{
-			"name":   name,
-			"labels": map[string]string{LabelAddon: addon},
+			"generateName": ValuesSecretPrefix(addon),
+			"labels":       map[string]string{LabelAddon: addon},
 		},
-		"data": created,
+		"data": data,
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err := s.k8s.CreateSecret(ctx, obj); k8s.IsConflict(err) {
-		return s.k8s.PatchSecret(ctx, name, patch) // created meanwhile
-	} else if err != nil {
-		return err
-	}
-	return nil
-}
-
-// KeepAddonSecrets makes an addon's values outlive the addon — the Secret
-// with its secret inputs and the one with the values the operator generated:
-// the keep label, so the operator stops owning them, and no owner reference,
-// so garbage collection has nothing to follow when the addon goes. A missing
-// Secret has nothing to keep.
-func (s *Service) KeepAddonSecrets(ctx context.Context, addon string) error {
-	if err := validName(addon); err != nil {
-		return err
-	}
-	patch, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{
-			"labels":          map[string]string{LabelKeep: "true"},
-			"ownerReferences": nil,
-		},
-	})
-	if err != nil {
-		return err
-	}
-	for _, name := range []string{ValuesSecretName(addon), GeneratedSecretName(addon)} {
-		if err := s.k8s.PatchSecret(ctx, name, patch); err != nil && !k8s.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
-}
-
-// DeleteAddonSecrets deletes an addon's values Secret and the one with its
-// generated values, whichever exist — also when a removal that kept them left
-// them without an owner for garbage collection to follow.
-func (s *Service) DeleteAddonSecrets(ctx context.Context, addon string) error {
-	if err := validName(addon); err != nil {
-		return err
-	}
-	for _, name := range []string{ValuesSecretName(addon), GeneratedSecretName(addon)} {
-		if err := s.k8s.DeleteSecret(ctx, name); err != nil && !k8s.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
+	return s.k8s.CreateSecret(ctx, body)
 }

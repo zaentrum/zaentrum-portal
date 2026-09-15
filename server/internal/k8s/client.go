@@ -3,8 +3,8 @@
 // pod's ServiceAccount: bearer token (re-read per request — projected tokens
 // rotate) + the mounted CA (distroless ships no system CA bundle). It exposes
 // only what the portal needs: list/scale/restart Deployments, list Pods,
-// get/list/create/update/patch/delete a namespaced Custom Resource, and WRITE a
-// Secret — there is deliberately no way to read one.
+// get/list/create/update/patch/delete a namespaced Custom Resource, and CREATE
+// a Secret — there is deliberately no way to read, change or delete one.
 package k8s
 
 import (
@@ -13,6 +13,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,16 +51,19 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("k8s %d %s", e.Code, e.Reason)
 }
 
-// NotFound / Forbidden / Conflict helpers for callers.
-func IsNotFound(err error) bool { a, ok := err.(*APIError); return ok && a.Code == http.StatusNotFound }
-func IsForbidden(err error) bool {
-	a, ok := err.(*APIError)
-	return ok && a.Code == http.StatusForbidden
-}
+// NotFound / Forbidden / Conflict helpers for callers. They see through
+// wrapped errors.
+func IsNotFound(err error) bool  { return hasCode(err, http.StatusNotFound) }
+func IsForbidden(err error) bool { return hasCode(err, http.StatusForbidden) }
 
 // IsConflict: an update carried a stale resourceVersion, or a create named an
 // object that already exists.
-func IsConflict(err error) bool { a, ok := err.(*APIError); return ok && a.Code == http.StatusConflict }
+func IsConflict(err error) bool { return hasCode(err, http.StatusConflict) }
+
+func hasCode(err error, code int) bool {
+	var a *APIError
+	return errors.As(err, &a) && a.Code == code
+}
 
 // Client is a namespaced in-cluster apiserver client.
 type Client struct {
@@ -130,14 +134,14 @@ func (c *Client) Namespace() string { return c.namespace }
 
 // do performs a request and returns the answer.
 func (c *Client) do(ctx context.Context, method, path, contentType string, body []byte) ([]byte, error) {
-	return c.send(ctx, method, path, contentType, body, true)
+	return c.send(ctx, method, path, contentType, "application/json", body, nil)
 }
 
 // send performs a request, re-reading the (rotating) SA token each time. With
-// keep false a successful answer is drained unread: a write to a Secret is
-// answered with the Secret, values included, and the caller must never hold
-// those. Error answers are Status objects and are always read.
-func (c *Client) send(ctx context.Context, method, path, contentType string, body []byte, keep bool) ([]byte, error) {
+// decode set, a successful answer is decoded into it as it streams and not
+// kept: a Secret's create is answered with the Secret, and the caller takes
+// only its name. Error answers are Status objects and are always read.
+func (c *Client) send(ctx context.Context, method, path, contentType, accept string, body []byte, decode any) ([]byte, error) {
 	if !c.inCluster {
 		return nil, ErrNotInCluster
 	}
@@ -154,7 +158,7 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, bod
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", accept)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -163,9 +167,11 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, bod
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if !keep && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
-		return nil, nil
+	if decode != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		body := io.LimitReader(resp.Body, maxResponseBytes)
+		err := json.NewDecoder(body).Decode(decode)
+		_, _ = io.Copy(io.Discard, body)
+		return nil, err
 	}
 	// Backstop: never buffer more than maxResponseBytes from any single response
 	// (pod logs are additionally capped server-side via limitBytes; normal API
@@ -382,24 +388,35 @@ func (c *Client) PatchResource(ctx context.Context, group, version, plural, name
 	return err
 }
 
+// dryRun is the query that makes a write validate — admission, schema, every
+// check the apiserver runs — without persisting anything.
+func dryRun(on bool) string {
+	if on {
+		return "?dryRun=All"
+	}
+	return ""
+}
+
 // GetResource GETs one namespaced custom resource (raw JSON).
 func (c *Client) GetResource(ctx context.Context, group, version, plural, name string) (json.RawMessage, error) {
 	p := fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s", group, version, c.namespace, plural, url.PathEscape(name))
 	return c.do(ctx, http.MethodGet, p, "", nil)
 }
 
-// CreateResource POSTs a namespaced custom resource and returns it as created.
-func (c *Client) CreateResource(ctx context.Context, group, version, plural string, obj []byte) (json.RawMessage, error) {
+// CreateResource POSTs a namespaced custom resource and returns it as created —
+// or, with dryRun, as it would be created.
+func (c *Client) CreateResource(ctx context.Context, group, version, plural string, obj []byte, dry bool) (json.RawMessage, error) {
 	p := fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s", group, version, c.namespace, plural)
-	return c.do(ctx, http.MethodPost, p, "application/json", obj)
+	return c.do(ctx, http.MethodPost, p+dryRun(dry), "application/json", obj)
 }
 
 // UpdateResource PUTs a namespaced custom resource. The body carries the
 // metadata.resourceVersion it was read at; a stale one is answered 409, so a
-// read-modify-write never overwrites a change it did not see.
-func (c *Client) UpdateResource(ctx context.Context, group, version, plural, name string, obj []byte) (json.RawMessage, error) {
+// read-modify-write never overwrites a change it did not see. With dryRun the
+// update is validated and not persisted.
+func (c *Client) UpdateResource(ctx context.Context, group, version, plural, name string, obj []byte, dry bool) (json.RawMessage, error) {
 	p := fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s", group, version, c.namespace, plural, url.PathEscape(name))
-	return c.do(ctx, http.MethodPut, p, "application/json", obj)
+	return c.do(ctx, http.MethodPut, p+dryRun(dry), "application/json", obj)
 }
 
 // DeleteResource deletes a namespaced custom resource. Dependents go by owner
@@ -410,32 +427,33 @@ func (c *Client) DeleteResource(ctx context.Context, group, version, plural, nam
 	return err
 }
 
-// ─── secrets: write-only ─────────────────────────────────────────────────────
+// ─── secrets: create-only ────────────────────────────────────────────────────
 //
-// portal-api writes the secret inputs an admin types and never reads them
-// back: there is no get, list or watch here, and every answer that would echo
-// a Secret is drained unread. Its Role grants create, patch and delete only.
+// portal-api writes the secret inputs an admin types into a new Secret each
+// time and never reads, changes or deletes a Secret: there is no get, list,
+// watch, patch, update or delete here. Its Role grants create only; the
+// operator collects Secrets nothing references any more.
 
-// CreateSecret creates a Secret in the client namespace.
-func (c *Client) CreateSecret(ctx context.Context, obj []byte) error {
+// partialMetadata asks the apiserver to answer with an object's metadata only.
+const partialMetadata = "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1,application/json"
+
+// CreateSecret creates a Secret in the client namespace and returns its name —
+// the one the apiserver generated when obj asks for a generateName. The answer
+// is requested as metadata only, and only metadata.name is taken from it.
+func (c *Client) CreateSecret(ctx context.Context, obj []byte) (string, error) {
 	p := fmt.Sprintf("/api/v1/namespaces/%s/secrets", c.namespace)
-	_, err := c.send(ctx, http.MethodPost, p, "application/json", obj, false)
-	return err
-}
-
-// PatchSecret applies a JSON merge patch to a Secret: keys set to null are
-// removed, the rest merged. Patching needs no read — the apiserver applies it.
-func (c *Client) PatchSecret(ctx context.Context, name string, mergePatch []byte) error {
-	p := fmt.Sprintf("/api/v1/namespaces/%s/secrets/%s", c.namespace, url.PathEscape(name))
-	_, err := c.send(ctx, http.MethodPatch, p, "application/merge-patch+json", mergePatch, false)
-	return err
-}
-
-// DeleteSecret deletes a Secret in the client namespace.
-func (c *Client) DeleteSecret(ctx context.Context, name string) error {
-	p := fmt.Sprintf("/api/v1/namespaces/%s/secrets/%s", c.namespace, url.PathEscape(name))
-	_, err := c.send(ctx, http.MethodDelete, p, "", nil, false)
-	return err
+	var created struct {
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+	}
+	if _, err := c.send(ctx, http.MethodPost, p, "application/json", partialMetadata, obj, &created); err != nil {
+		return "", err
+	}
+	if created.Metadata.Name == "" {
+		return "", fmt.Errorf("the apiserver created a Secret without saying its name")
+	}
+	return created.Metadata.Name, nil
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
