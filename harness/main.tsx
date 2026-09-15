@@ -8,8 +8,14 @@ import { SettingsConsole } from '../src/settings/SettingsConsole';
 
 // ?view=settings renders the registry console instead. Any portal view can be
 // added here — the point is that each one becomes viewable without a cluster.
-const view = new URLSearchParams(location.search).get('view');
+const params = new URLSearchParams(location.search);
+const view = params.get('view');
 const View = view === 'settings' ? SettingsConsole : OperatorConsole;
+
+// ?charts=off plays an older portal-api without chart addons, ?charts=nocrd a
+// cluster without the ZaentrumAddon resource. The mock server reads it from a
+// cookie, which the dev proxy passes on.
+document.cookie = `mock-charts=${params.get('charts') ?? ''}; path=/; SameSite=Lax`;
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

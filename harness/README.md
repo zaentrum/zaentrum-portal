@@ -33,6 +33,27 @@ badge, the containers column, and a setup checklist whose status the browser
 fetches through the app proxy (one summary carries markup on purpose, to show
 it renders as text).
 
+Chart addons are served by an in-memory stand-in for the operator: settings →
+addons → **add from a chart** walks the whole wizard. Any chart reference plans
+(e.g. `oci://registry.example.org/charts/notes` with version `1.2.0`, or
+`https://charts.example.org/notes-1.2.0.tgz`); the plan is generated from the
+chart's name and carries a values schema with a secret input, a generated one,
+an enum, a checkbox, a nested group and a JSON field. Until the database
+password is set the plan has a values error; a reference containing
+`privileged` plans with a violation, so a refusal renders. A plan turns current
+about a second after each change, an install brings its two workloads up one
+after the other, and the addon reads as registered a second after it is ready.
+`sample` is seeded installed and registered from chart 1.0.0, for the row
+actions: upgrade (plan, changes, apply or cancel), values, remove with "keep
+values". An address that collides with an addon added by address (`example`) is
+refused like the server refuses it.
+
+    http://localhost:8792/?view=settings               # chart addons available
+    http://localhost:8792/?view=settings&charts=off    # an older portal-api: no "+"
+    http://localhost:8792/?view=settings&charts=nocrd  # a cluster without the resource type
+
+The mock keeps its state in memory; restart it for the seeded state.
+
 The registry fixture mirrors what migrations 002/003/004 actually seed — every
 seeded app has an **empty** `proxyUrl`, which is the state that made the
 `embeddable` column worth adding: nothing in a fresh install can be hosted
