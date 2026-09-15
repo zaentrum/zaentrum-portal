@@ -232,12 +232,43 @@ func TestNormaliseChart(t *testing.T) {
 		{"https://user:pass@charts.example.org/example.tgz", "", "", "credentials"},
 		{"https://charts.example.org/example 1.tgz", "", "", "spaces"},
 		{"oci://registry.example.org/charts/example", "1.0.0", "sha256:ABC", "64 lower-case hex"},
+		{"https://charts.example.org/example-1.2.0.tgz?token=hunter2", "", "", "query or a fragment"},
+		{"https://charts.example.org/example-1.2.0.tgz?", "", "", "query or a fragment"},
+		{"https://charts.example.org/example-1.2.0.tgz#hunter2", "", "", "query or a fragment"},
+		{"oci://registry.example.org/charts/example:1.2.0?hunter2", "", "", "query or a fragment"},
+		{"https://hunter2@charts.example.org/example.tgz", "", "", "credentials"},
+		{"https://charts.example.org/%zzhunter2.tgz", "", "", "not a valid URL"},
 	}
 	for _, c := range refused {
 		_, err := normaliseChart(c.ref, c.version, c.digest)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("normaliseChart(%q, %q, %q) = %v, want an error mentioning %q", c.ref, c.version, c.digest, err, c.want)
 		}
+		if err != nil && strings.Contains(err.Error(), "hunter2") {
+			t.Errorf("a refusal repeats what the reference carried: %v", err)
+		}
+	}
+}
+
+// A link with a token in its query is refused, and the token appears in no
+// answer and no stored object.
+func TestChartLinkWithAQueryIsRefused(t *testing.T) {
+	e := newChartEnv(t)
+	installedExample(e, "")
+	for _, c := range []struct {
+		method, target string
+		body           map[string]any
+	}{
+		{http.MethodPost, "/api/portal/addon-charts", map[string]any{"name": "sample", "chart": "https://charts.example.org/sample-1.0.0.tgz?X-Amz-Signature=hunter2"}},
+		{http.MethodPatch, "/api/portal/addon-charts/example", map[string]any{"chart": "https://charts.example.org/example-1.3.0.tgz?token=hunter2"}},
+	} {
+		rec := e.do(c.method, c.target, c.body)
+		if rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), "hunter2") {
+			t.Errorf("%s %s = %d %s", c.method, c.target, rec.Code, rec.Body)
+		}
+	}
+	if e.kube.Object(addonPlural, "sample") != nil || e.kube.Generation(addonPlural, "example") != 1 {
+		t.Error("a refused chart link must not be stored")
 	}
 }
 

@@ -101,6 +101,10 @@ var errUnchanged = errors.New("unchanged")
 // it as a ZaentrumAddon carries it: an oci:// reference without a tag plus the
 // version it needs, or an https:// link to a chart archive, which is one
 // version and carries none.
+//
+// A reference with credentials, a query or a fragment is refused — a token in
+// a URL would be stored in the resource, shown and logged — and a refusal
+// never repeats the reference it refuses.
 func normaliseChart(ref, version, digest string) (operator.ChartSource, error) {
 	ref, version, digest = strings.TrimSpace(ref), strings.TrimSpace(version), strings.TrimSpace(digest)
 	switch {
@@ -112,16 +116,18 @@ func normaliseChart(ref, version, digest string) (operator.ChartSource, error) {
 		return operator.ChartSource{}, bad("chart reference must not contain spaces, backslashes or control characters")
 	}
 	u, err := url.Parse(ref)
-	if err != nil {
-		return operator.ChartSource{}, bad("chart %q is not a valid reference: %v", ref, err)
-	}
-	if u.User != nil {
+	switch {
+	case err != nil:
+		return operator.ChartSource{}, bad("chart reference is not a valid URL")
+	case u.User != nil:
 		return operator.ChartSource{}, bad("chart reference must not carry credentials")
+	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(ref, "?#"):
+		return operator.ChartSource{}, bad("chart reference must not carry a query or a fragment: whatever it holds would be stored with the addon")
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "oci":
 		repo := strings.Trim(u.Path, "/")
-		if u.Host == "" || repo == "" || u.RawQuery != "" || u.Fragment != "" {
+		if u.Host == "" || repo == "" {
 			return operator.ChartSource{}, bad("chart %q: an oci:// reference is a registry and a repository, e.g. oci://ghcr.io/example/charts/example", ref)
 		}
 		last := path.Base(repo)
@@ -146,7 +152,7 @@ func normaliseChart(ref, version, digest string) (operator.ChartSource, error) {
 		}
 		ref = "oci://" + u.Host + "/" + repo
 	case "https":
-		if u.Host == "" || u.Fragment != "" {
+		if u.Host == "" {
 			return operator.ChartSource{}, bad("chart %q: an https:// chart is a link to a chart archive", ref)
 		}
 		u.Scheme = "https"
