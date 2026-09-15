@@ -832,6 +832,13 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	if reg.addon != nil && reg.addon.ChartRef != "" {
+		// The platform keeps a chart addon registered from its chart; an
+		// install by address would make it an addon nobody upgrades.
+		http.Error(w, fmt.Sprintf("addon %q is installed from the chart %s — upgrade or reconfigure it as a chart addon", plan.App.Key, reg.addon.ChartRef),
+			http.StatusConflict)
+		return
+	}
 	claims, err := a.addons.WorkloadClaims(ctx)
 	if err != nil {
 		serverError(w, err)
@@ -895,11 +902,23 @@ type installedAddon struct {
 	// RefreshAvailable: the addon now serves a different manifest than the
 	// one installed — it was redeployed and its contributions may have moved.
 	RefreshAvailable bool `json:"refreshAvailable"`
+
+	// Chart is the Helm chart the operator installs the addon from; nil for
+	// an addon added by its address. Phase and Suspended are its
+	// ZaentrumAddon's (addoncharts.go).
+	Chart     *chartInfo `json:"chart"`
+	Phase     string     `json:"phase,omitempty"`
+	Suspended bool       `json:"suspended"`
+	// Registered: the registry holds the addon. A chart addon the operator
+	// has not made ready yet is listed with nothing registered.
+	Registered        bool   `json:"registered"`
+	RegistrationError string `json:"registrationError,omitempty"`
 }
 
 // listAddons handles GET /api/portal/addons: what the addons table records,
 // with each component's live state and whether a refresh would change
-// anything.
+// anything — merged with the ZaentrumAddons, so a chart addon shows its chart,
+// phase and components, and one not registered yet is listed too.
 func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	addons, err := a.addons.ListAddons(ctx)
@@ -908,6 +927,7 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	live, known := a.liveWorkloads(ctx)
+	charts := a.chartAddonsByName(ctx)
 	served := map[string]string{} // service → sha256 of the manifest it serves now
 	if len(addons) > 0 {
 		_, descs := a.discover(ctx)
@@ -921,7 +941,7 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
 		row := installedAddon{
 			Key: ad.Key, Title: ad.Title, ProxyURL: ad.Address, Version: ad.Version,
 			InstalledAt: ad.InstalledAt, RefreshedAt: ad.RefreshedAt,
-			Tiles: ad.Tiles, Slots: ad.Rows,
+			Tiles: ad.Tiles, Slots: ad.Rows, Registered: true,
 		}
 		if row.Title == "" {
 			row.Title = ad.Key
@@ -937,7 +957,27 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
 		if sum, ok := served[ad.Key]; ok && sum != ad.ManifestSHA256 {
 			row.RefreshAvailable = true
 		}
+		if ca, ok := charts[ad.Key]; ok {
+			if len(ca.Components) > 0 {
+				row.Components = chartComponentViews(ca, ad.Components, topics, live, known)
+			}
+			row.withChart(ca)
+			row.RegistrationError = a.registrationError(ad.Key)
+			delete(charts, ad.Key)
+		} else if ad.ChartRef != "" {
+			// Its resource is gone; the registration loop unregisters it.
+			row.Chart = &chartInfo{Ref: ad.ChartRef, Version: ad.ChartVersion}
+			row.RefreshAvailable = false
+		}
 		out = append(out, row)
+	}
+	names := make([]string, 0, len(charts))
+	for name := range charts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		out = append(out, a.chartOnlyRow(charts[name], live, known))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -971,6 +1011,13 @@ func (a *API) removeAddon(w http.ResponseWriter, r *http.Request) {
 	// applies: whatever space its tiles leave empty.
 	declaredSpace := ""
 	if ad, err := a.addons.GetAddon(ctx, key); err == nil {
+		if ad.ChartRef != "" {
+			// Its rows alone would be registered again within seconds: a
+			// chart addon is removed with its resource.
+			http.Error(w, fmt.Sprintf("addon %q is installed from the chart %s — remove it as a chart addon (DELETE /api/portal/addon-charts/%s)", key, ad.ChartRef, key),
+				http.StatusConflict)
+			return
+		}
 		if d, ok := storedManifest(*ad); ok && d.UI != nil && d.UI.Space != nil {
 			declaredSpace = strings.TrimSpace(d.UI.Space.Key)
 		}

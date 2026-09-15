@@ -34,7 +34,10 @@ type chartEnv struct {
 func newChartEnv(t *testing.T) *chartEnv {
 	t.Helper()
 	kube := k8sfake.New(t)
-	cfg := config.Config{OperatorGroup: "zaentrum.io", OperatorVersion: "v1alpha1", AddonPlural: addonPlural, AdminRole: "zaentrum-admin"}
+	cfg := config.Config{
+		OperatorGroup: "zaentrum.io", OperatorVersion: "v1alpha1", OperatorPlural: "zaentrums",
+		AddonPlural: addonPlural, AdminRole: "zaentrum-admin",
+	}
 	st := newFakeStore()
 	a := &API{addons: st, cfg: cfg, charts: operator.New(kube.Client("zaentrum"), cfg)}
 	a.registration.kick = make(chan struct{}, 1)

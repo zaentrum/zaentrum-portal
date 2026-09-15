@@ -124,7 +124,11 @@ func run() error {
 	// Registry surface. Register applies Authn per-route: the embedded-app proxy
 	// is open (a browser cannot attach a bearer to a module import / <link>),
 	// everything else requires a signed-in user.
-	api.New(st, cfg, opSvc, tap, br).Register(r, authMW)
+	registry := api.New(st, cfg, opSvc, tap, br)
+	registry.Register(r, authMW)
+	// Chart addons the operator reports ready are registered from their primary
+	// Service; outside a cluster this returns at once. Stops with bgCtx.
+	go registry.RunAddonRegistration(bgCtx)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

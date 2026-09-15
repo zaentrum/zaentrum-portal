@@ -90,6 +90,17 @@ func (s *Server) Object(plural, name string) map[string]any {
 	return nil
 }
 
+// Remove deletes a custom resource the way someone else would — kubectl, a
+// deploy repository — including garbage collection of what it owns.
+func (s *Server) Remove(plural, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if o, ok := s.objects[plural+"/"+name]; ok {
+		delete(s.objects, plural+"/"+name)
+		s.collect(str(o["kind"]), name)
+	}
+}
+
 // SetStatus replaces a custom resource's status, as its controller would:
 // resourceVersion moves, generation does not.
 func (s *Server) SetStatus(plural, name string, status map[string]any) {

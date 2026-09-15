@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -427,11 +428,14 @@ func (f *fakeAddonStore) ListSpaces(context.Context) ([]model.Space, error) {
 }
 
 func (f *fakeAddonStore) ListAddons(context.Context) ([]model.Addon, error) {
+	keys := make([]string, 0, len(f.addons))
+	for key := range f.addons {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
 	var out []model.Addon
-	for _, key := range []string{"example", "legacy"} {
-		if ad, ok := f.addons[key]; ok {
-			out = append(out, ad)
-		}
+	for _, key := range keys {
+		out = append(out, f.addons[key])
 	}
 	return out, nil
 }

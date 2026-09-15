@@ -872,9 +872,10 @@ type chartRegistration struct {
 	// kick wakes the loop before its next tick; nil when no loop runs.
 	kick chan struct{}
 
-	stateMu sync.Mutex
-	errors  map[string]string // addon → why its registration failed last
-	origin  string            // the portal's public origin, as last requested
+	stateMu   sync.Mutex
+	errors    map[string]string // addon → why its registration failed last
+	listError string            // why the last pass could not list the addons
+	origin    string            // the portal's public origin, as last requested
 
 	// fetch reads a manifest; fetchManifest unless a test substitutes one.
 	fetch func(ctx context.Context, proxyURL string) (Descriptor, error)

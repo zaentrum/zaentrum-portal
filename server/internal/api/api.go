@@ -54,6 +54,7 @@ type addonStore interface {
 
 func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap, br *dbbrowse.Browser) *API {
 	a := &API{st: st, addons: st, cfg: cfg, op: op, tap: tap, br: br}
+	a.registration.kick = make(chan struct{}, 1)
 	if op != nil {
 		a.workloads = op // never a typed nil inside the interface
 		a.charts = op
