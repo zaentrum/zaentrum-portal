@@ -254,7 +254,7 @@ export function AddonChartWizard({
             {clash && !blocked && (
               <Text variant="dim">an addon named {clash.key} is planned already; planning this chart replaces that plan.</Text>
             )}
-            <Field label="values" hint="optional, JSON — non-secret values; secret inputs are asked for with the plan">
+            <Field label="values" hint="optional, JSON — plain values; secret inputs are asked for with the plan, and any found here are offered to be moved">
               <Textarea rows={5} value={valuesText} placeholder={'{\n  "worker": { "replicas": 2 }\n}'} onChange={(e) => setValuesText(e.target.value)} />
             </Field>
           </>
@@ -277,6 +277,10 @@ export function AddonChartWizard({
               }}
               onSecret={(path, value) => change({ secretValues: { [path]: value } })}
               onClearSecret={(path) => change({ clearSecrets: [path] })}
+              onMoveSecrets={(secrets, next) => {
+                setValues(next);
+                change({ values: next, secretValues: secrets });
+              }}
             />
             {pending > 0 && <Text variant="dim">saving the change…</Text>}
           </>

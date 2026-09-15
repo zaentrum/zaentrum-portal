@@ -3,9 +3,10 @@
 // settings console renders the nodes, and `npm test` checks the mapping.
 //
 // Conventions a chart follows (docs: extending/charts.md):
-//   writeOnly: true on a string       → a secret input, typed into a password
-//                                        field and written to the addon's
-//                                        values Secret, never shown back
+//   writeOnly: true                   → secret: on a string, a secret input,
+//                                        typed into a password field and stored
+//                                        in a Secret, never shown back; on an
+//                                        object, every string under it is one
 //   x-zaentrum-generate: <kind>        → the operator generates it when unset
 //   title, description, default, enum, required → drive the form
 //
@@ -43,6 +44,9 @@ export interface FieldNode {
   options?: { label: string; value: string }[];
   // generate: the operator generates the value when none is given.
   generate?: string;
+  // writeOnly: the chart marks it secret. A string is a secret input; anything
+  // else cannot be kept in a Secret and is a plain value.
+  writeOnly?: boolean;
 }
 
 export interface GroupNode {
@@ -88,8 +92,9 @@ function label(v: unknown): string {
   return typeof v === 'string' ? v : JSON.stringify(v);
 }
 
-function node(key: string, prop: ValuesSchema, parent: string, required: boolean): FormNode {
+function node(key: string, prop: ValuesSchema, parent: string, required: boolean, secretScope: boolean): FormNode {
   const path = parent ? `${parent}.${key}` : key;
+  const writeOnly = secretScope || prop.writeOnly === true;
   const base = {
     path,
     key,
@@ -99,9 +104,10 @@ function node(key: string, prop: ValuesSchema, parent: string, required: boolean
   };
   const type = typeOf(prop);
   if (type === 'object' && isObject(prop.properties)) {
-    return { kind: 'group', ...base, children: children(prop, path) };
+    return { kind: 'group', ...base, children: children(prop, path, writeOnly) };
   }
   const field: FieldNode = { kind: 'field', ...base, control: 'json' };
+  if (writeOnly) field.writeOnly = true;
   if (prop.default !== undefined) field.default = prop.default;
   if (typeof prop['x-zaentrum-generate'] === 'string' && prop['x-zaentrum-generate']) {
     field.generate = prop['x-zaentrum-generate'];
@@ -114,24 +120,24 @@ function node(key: string, prop: ValuesSchema, parent: string, required: boolean
   } else if (type === 'integer' || type === 'number') {
     field.control = type;
   } else if (type === 'string') {
-    field.control = prop.writeOnly === true ? 'secret' : 'text';
+    field.control = writeOnly ? 'secret' : 'text';
   }
   return field;
 }
 
-function children(schema: ValuesSchema, parent: string): FormNode[] {
+function children(schema: ValuesSchema, parent: string, secretScope: boolean): FormNode[] {
   const props = isObject(schema.properties) ? schema.properties : {};
   const required = new Set(Array.isArray(schema.required) ? schema.required : []);
   return Object.entries(props)
     .filter(([key, prop]) => !key.includes('.') && isObject(prop))
-    .map(([key, prop]) => node(key, prop, parent, required.has(key)));
+    .map(([key, prop]) => node(key, prop, parent, required.has(key), secretScope));
 }
 
 // schemaNodes is the form for a values schema; [] without one. The platform's
 // own top-level key is not the admin's to set.
 export function schemaNodes(schema: ValuesSchema | null): FormNode[] {
   if (!schema) return [];
-  return children(schema, '').filter((n) => n.path !== 'zaentrum');
+  return children(schema, '', schema.writeOnly === true).filter((n) => n.path !== 'zaentrum');
 }
 
 // fields is every field of a form, depth first.
@@ -144,6 +150,34 @@ export function secretPaths(nodes: FormNode[]): string[] {
   return fields(nodes)
     .filter((f) => f.control === 'secret')
     .map((f) => f.path);
+}
+
+// plainSecrets are the secret inputs the values carry as plain values — pasted,
+// or set before the chart said they are secret — by path, as the text a
+// secret input would hold.
+export function plainSecrets(nodes: FormNode[], values: Values): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const path of secretPaths(nodes)) {
+    const v = getPath(values, path);
+    if (v === undefined || v === null) continue;
+    out[path] = typeof v === 'string' ? v : JSON.stringify(v);
+  }
+  return out;
+}
+
+// withoutSecrets is the values without anything at a secret input's path: what
+// may be shown, and what may be stored as plain values.
+export function withoutSecrets(nodes: FormNode[], values: Values): Values {
+  return secretPaths(nodes).reduce((v, path) => setPath(v, path, undefined), values);
+}
+
+// withSecretsOf puts back into edited values the secret inputs original holds
+// as plain values: an editor that never showed them must not drop them.
+export function withSecretsOf(nodes: FormNode[], original: Values, edited: Values): Values {
+  return secretPaths(nodes).reduce((v, path) => {
+    const kept = getPath(original, path);
+    return kept === undefined || getPath(edited, path) !== undefined ? v : setPath(v, path, kept);
+  }, edited);
 }
 
 // getPath reads a dotted path; undefined when any segment is missing.

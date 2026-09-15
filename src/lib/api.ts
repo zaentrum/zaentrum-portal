@@ -252,6 +252,8 @@ export interface AddonChart {
   lastAppliedChart: ChartSource | null;
   values: Record<string, unknown> | null;
   secretKeys: string[];
+  // secretRefs: where each secret input is read from — a key of a Secret.
+  secretRefs?: Record<string, { name: string; key: string }>;
   registered: boolean;
   registrationError?: string;
 }

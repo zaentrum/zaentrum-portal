@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button, Checkbox, Field, Input, Modal, Text } from '@nalet/design-system';
 import { CircleCheck, ListChecks, Rocket, Save, Trash2, Undo2 } from 'lucide-react';
-import { usePortalApi, type InstalledAddon } from '../lib/api';
+import { usePortalApi, type ChartSource, type InstalledAddon } from '../lib/api';
 import { installBlockers, planCurrent, upgradePlanned } from '../lib/addons';
 import type { Values } from '../lib/valuesForm';
 import { ChartPlan, ChartProgress, ChartValues } from './ChartPlan';
@@ -18,6 +18,9 @@ export function UpgradeChartDialog({ addon, onClose, onChanged }: { addon: Insta
   const [stage, setStage] = useState<'choose' | 'plan' | 'apply'>(upgradePlanned(addon) ? 'plan' : 'choose');
   const { chart, error: loadErr, reload } = useAddonChart(addon.key, stage === 'choose' ? 0 : CHART_POLL_MS);
   const running = chart?.lastAppliedChart ?? addon.chart?.lastApplied ?? null;
+  // The spec as it was before this dialog planned the upgrade: cancelling puts
+  // exactly that back, a pinned digest included.
+  const [before, setBefore] = useState<ChartSource | null>(null);
   const oci = (chart?.chart.ref ?? addon.chart?.ref ?? '').toLowerCase().startsWith('oci://');
   const [version, setVersion] = useState('');
   const [link, setLink] = useState('');
@@ -46,6 +49,7 @@ export function UpgradeChartDialog({ addon, onClose, onChanged }: { addon: Insta
 
   const plan = () =>
     run('plan', async () => {
+      if (chart) setBefore(chart.chart);
       const body: Record<string, unknown> = oci ? { version: version.trim() } : { chart: link.trim() };
       if (digest.trim()) body.digest = digest.trim();
       await api(path(addon.key), { method: 'PATCH', body: JSON.stringify(body) });
@@ -62,14 +66,17 @@ export function UpgradeChartDialog({ addon, onClose, onChanged }: { addon: Insta
       await reload();
     });
 
-  // Back to the chart that runs, and reconciling again.
+  // Back to the spec before the upgrade — or, for an upgrade planned before this
+  // dialog opened, to the chart that runs, unpinned — and reconciling again.
   const revert = () =>
     run('revert', async () => {
-      if (running) {
-        await api(path(addon.key), {
-          method: 'PATCH',
-          body: JSON.stringify({ chart: running.ref, version: running.version ?? '', digest: running.digest ?? '', suspend: false }),
-        });
+      const back: Record<string, unknown> | null = before
+        ? { chart: before.ref, version: before.version ?? '', digest: before.digest ?? '' }
+        : running
+          ? { chart: running.ref, version: running.version ?? '' }
+          : null;
+      if (back) {
+        await api(path(addon.key), { method: 'PATCH', body: JSON.stringify({ ...back, suspend: false }) });
         onChanged();
       }
       onClose();
@@ -243,6 +250,11 @@ export function ChartValuesDialog({ addon, onClose, onChanged }: { addon: Instal
                 return next;
               });
             }}
+            onMoveSecrets={(moved, next) => {
+              setValues(next);
+              setSecrets((s) => ({ ...s, ...moved }));
+              setClears((c) => c.filter((k) => !(k in moved)));
+            }}
           />
         )}
         {Object.keys(secrets).length + clears.length > 0 && (
@@ -283,16 +295,15 @@ export function RemoveChartDialog({
   const [keep, setKeep] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const { chart } = useAddonChart(planOnly ? null : addon.key, 0);
+  const kept = [...new Set(Object.values(chart?.secretRefs ?? {}).map((r) => r.name))].sort();
 
   async function remove() {
     setBusy(true);
     setErr(null);
     try {
-      const r = await api<{ warnings?: string[] }>(`${path(addon.key)}?keepValues=${keep && !planOnly}`, { method: 'DELETE' });
-      const warnings = r?.warnings ?? [];
-      onRemoved(
-        `${planOnly ? 'cancelled' : 'removed'} ${addon.key}${keep && !planOnly ? ' — its values Secrets are kept' : ''}${warnings.length ? ` (${warnings.join('; ')})` : ''}`,
-      );
+      await api(`${path(addon.key)}?keepValues=${keep && !planOnly}`, { method: 'DELETE' });
+      onRemoved(`${planOnly ? 'cancelled' : 'removed'} ${addon.key}${keep && !planOnly ? ' — the operator keeps its values Secrets' : ''}`);
     } catch (e) {
       setErr(errText(e));
     } finally {
@@ -300,8 +311,6 @@ export function RemoveChartDialog({
     }
   }
 
-  const values = `zaentrum-addon-${addon.key}-values`;
-  const generated = `zaentrum-addon-${addon.key}-generated`;
   return (
     <Modal
       open
@@ -327,11 +336,15 @@ export function RemoveChartDialog({
               The operator deletes everything the chart installed — its workloads, services, volume claims and the data
               in them. The portal deletes the addon’s app, tiles and slot rows.
             </Text>
-            <Field
-              hint={`the Secrets ${values} (secret inputs) and ${generated} (values the operator generated) stay in the namespace, labelled zaentrum.io/keep=true; values that are not secret go with the addon. Unchecked, both Secrets are deleted too.`}
-            >
+            <Field hint="the operator keeps the Secrets with the addon's secret inputs and the values it generated, labelled zaentrum.io/keep=true; plain values go with the addon. Unchecked, those Secrets go too.">
               <Checkbox label="keep values" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
             </Field>
+            {keep && kept.length > 0 && (
+              <Text variant="dim" as="p">
+                kept secret inputs: <span className="set__mono">{kept.join(', ')}</span> — adding the addon again can read them
+                again by reference (secretRefs, or zae addon add --secret-ref).
+              </Text>
+            )}
           </>
         )}
         {err && <span className="set__err">{err}</span>}

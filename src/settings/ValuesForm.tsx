@@ -97,7 +97,13 @@ function FieldView({ field, values, secretKeys, disabled, onValues, onSecret, on
       )}
     </span>
   );
-  const hint = [field.description, field.control !== 'secret' && !field.generate ? placeholder(field) : '']
+  const hint = [
+    field.description,
+    field.control !== 'secret' && !field.generate ? placeholder(field) : '',
+    field.writeOnly && field.control !== 'secret'
+      ? 'the chart marks it secret, but only text can be kept in a Secret: it is stored with the plain values'
+      : '',
+  ]
     .filter(Boolean)
     .join(' — ');
 
@@ -198,7 +204,7 @@ function FieldView({ field, values, secretKeys, disabled, onValues, onSecret, on
       );
     default:
       return (
-        <Field label={label} hint={field.description || undefined} error={error ?? undefined} required={field.required && !field.generate}>
+        <Field label={label} hint={(field.writeOnly ? hint : field.description) || undefined} error={error ?? undefined} required={field.required && !field.generate}>
           <Input
             type={field.control === 'text' ? 'text' : 'number'}
             value={draft ?? (inputValue(field, values) as string)}

@@ -10,9 +10,12 @@ import {
   parseSchema,
   parseValuesText,
   placeholder,
+  plainSecrets,
   schemaNodes,
   secretPaths,
   setPath,
+  withSecretsOf,
+  withoutSecrets,
 } from './valuesForm.ts';
 import type { FieldNode, GroupNode } from './valuesForm.ts';
 import { defaultChartName, installBlockers, isPlanOnly, phaseLabel, portLabel, upgradePlanned, withAddonDefaults } from './addons.ts';
@@ -80,6 +83,56 @@ test('schemaNodes maps a values schema to form controls', () => {
     { label: 'debug', value: '"debug"' },
   ]);
   assert.deepEqual(secretPaths(nodes), ['config.password', 'config.key']);
+});
+
+// writeOnly is one rule wherever it is written: every string under it is a
+// secret input; what is not a string cannot be kept in a Secret.
+test('writeOnly reaches every string under it', () => {
+  const nodes = schemaNodes(
+    parseSchema(
+      JSON.stringify({
+        type: 'object',
+        properties: {
+          credentials: {
+            type: 'object',
+            writeOnly: true,
+            properties: {
+              user: { type: 'string' },
+              token: { type: 'string' },
+              port: { type: 'integer' },
+              nested: { type: 'object', properties: { key: { type: 'string' } } },
+            },
+          },
+          'a.b': { type: 'string', writeOnly: true },
+          list: { type: 'array', writeOnly: true, items: { type: 'object', properties: { token: { type: 'string', writeOnly: true } } } },
+          plain: { type: 'string' },
+        },
+      }),
+    ).schema,
+  );
+  assert.deepEqual(secretPaths(nodes), ['credentials.user', 'credentials.token', 'credentials.nested.key']);
+  const byPath = new Map(fields(nodes).map((f) => [f.path, f]));
+  assert.equal(byPath.get('credentials.port')?.control, 'integer', 'a number cannot be a secret input');
+  assert.equal(byPath.get('credentials.port')?.writeOnly, true, 'but the form says the chart calls it secret');
+  assert.equal(byPath.get('list')?.control, 'json');
+  assert.equal(byPath.get('list')?.writeOnly, true);
+  assert.equal(byPath.get('plain')?.writeOnly, undefined);
+});
+
+// Secret inputs pasted as plain values are found, can be moved out, and are
+// never shown by an editor of the plain values — nor dropped by one.
+test('secret inputs among plain values', () => {
+  const nodes = schemaNodes(parseSchema(schema).schema);
+  const pasted = parseValuesText('{"replicas":2,"config":{"password":"pasted-in-clear","url":"https://example.org"}}').values!;
+  assert.deepEqual(plainSecrets(nodes, pasted), { 'config.password': 'pasted-in-clear' });
+  assert.deepEqual(plainSecrets(nodes, { config: { key: 12345 } }), { 'config.key': '12345' }, 'a secret input is text');
+  const shown = withoutSecrets(nodes, pasted);
+  assert.deepEqual(shown, { replicas: 2, config: { url: 'https://example.org' } });
+  assert.ok(!JSON.stringify(shown).includes('pasted-in-clear'));
+  const edited = { replicas: 3, config: { url: 'https://example.org' } };
+  assert.deepEqual(withSecretsOf(nodes, pasted, edited), { replicas: 3, config: { url: 'https://example.org', password: 'pasted-in-clear' } });
+  assert.deepEqual(withSecretsOf(nodes, pasted, { replicas: 3, config: { password: 'typed again' } }), { replicas: 3, config: { password: 'typed again' } });
+  assert.deepEqual(plainSecrets(nodes, withoutSecrets(nodes, pasted)), {});
 });
 
 test('parseSchema tolerates a chart without a schema and refuses a broken one', () => {

@@ -2,10 +2,20 @@ import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Badge, Button, Spinner, Table, Text, Textarea } from '@nalet/design-system';
 import type { TableColumn } from '@nalet/design-system';
-import { Braces, ListTree, X } from 'lucide-react';
+import { ArrowRightLeft, Braces, ListTree, X } from 'lucide-react';
 import type { AddonChart, ChartComponentStatus, ChartWorkload } from '../lib/api';
 import { chartPhaseTone, componentsProgress, phaseLabel, planCurrent, portLabel } from '../lib/addons';
-import { parseSchema, parseValuesText, schemaNodes, secretPaths, setPath, type Values } from '../lib/valuesForm';
+import {
+  parseSchema,
+  parseValuesText,
+  plainSecrets,
+  schemaNodes,
+  secretPaths,
+  setPath,
+  withSecretsOf,
+  withoutSecrets,
+  type Values,
+} from '../lib/valuesForm';
 import { ValuesForm } from './ValuesForm';
 
 // ChartPlan renders what the operator planned for a chart addon: the chart,
@@ -177,7 +187,9 @@ export function ChartProgress({ chart, children }: { chart: AddonChart; children
 
 // ChartValues edits a chart addon's values: the form its schema describes, or
 // the values as JSON — for a chart without a schema, and for values the form
-// does not cover. Secret inputs exist only in the form.
+// does not cover. Secret inputs exist only in the form: the JSON never shows
+// one, and a secret input found among the plain values — pasted, say — is
+// offered to be moved where it belongs.
 export function ChartValues({
   chart,
   values,
@@ -186,6 +198,7 @@ export function ChartValues({
   onValues,
   onSecret,
   onClearSecret,
+  onMoveSecrets,
 }: {
   chart: AddonChart;
   values: Values;
@@ -194,6 +207,9 @@ export function ChartValues({
   onValues: (next: Values) => void;
   onSecret: (path: string, value: string) => void;
   onClearSecret: (path: string) => void;
+  // onMoveSecrets stores these secret inputs as secret inputs, and the values
+  // without them.
+  onMoveSecrets: (secrets: Record<string, string>, values: Values) => void;
 }) {
   const { schema, error: schemaError } = useMemo(() => parseSchema(chart.plan?.valuesSchema), [chart.plan?.valuesSchema]);
   const nodes = useMemo(() => schemaNodes(schema), [schema]);
@@ -205,6 +221,8 @@ export function ChartValues({
   // not show can still be cleared.
   const formSecrets = new Set(secretPaths(nodes));
   const otherSecrets = secretKeys.filter((k) => !formSecrets.has(k));
+  const plain = plainSecrets(nodes, values);
+  const plainPaths = Object.keys(plain);
 
   return (
     <div className="set__values-editor">
@@ -227,6 +245,26 @@ export function ChartValues({
           </Button>
         )}
       </div>
+      {plainPaths.length > 0 && (
+        <div className="set__notice set__notice--warning" role="alert">
+          <b>secret inputs stored as plain values</b>
+          <Text variant="dim">
+            the chart marks {plainPaths.join(', ')} secret, but the values carry {plainPaths.length === 1 ? 'it' : 'them'} in
+            plain text, readable by anyone who can read the addon.
+          </Text>
+          <span>
+            <Button
+              size="sm"
+              variant="default"
+              leading={<ArrowRightLeft size={13} />}
+              disabled={disabled}
+              onClick={() => onMoveSecrets(plain, withoutSecrets(nodes, values))}
+            >
+              move to secret inputs
+            </Button>
+          </span>
+        </div>
+      )}
       {showForm ? (
         <ValuesForm
           nodes={nodes}
@@ -242,7 +280,7 @@ export function ChartValues({
           <>
             <Textarea
               rows={8}
-              value={jsonDraft ?? (Object.keys(values).length ? JSON.stringify(values, null, 2) : '')}
+              value={jsonDraft ?? (Object.keys(withoutSecrets(nodes, values)).length ? JSON.stringify(withoutSecrets(nodes, values), null, 2) : '')}
               placeholder={'{\n  "worker": { "replicas": 2 }\n}'}
               disabled={disabled}
               invalid={!!jsonError}
@@ -257,11 +295,12 @@ export function ChartValues({
                 }
                 setJsonError(null);
                 setJsonDraft(null);
-                onValues(r.values ?? {});
+                // What this editor never showed, it does not drop.
+                onValues(withSecretsOf(nodes, values, r.values ?? {}));
               }}
             />
             {jsonError && <span className="set__err">{jsonError}</span>}
-            <Text variant="dim">non-secret values only — secret inputs are set in the form.</Text>
+            <Text variant="dim">plain values only — secret inputs are set in the form and never shown here.</Text>
           </>
         )
       )}
