@@ -30,6 +30,12 @@ import (
 
 const registrationEvery = 15 * time.Second
 
+// registrationMinGap is the least time between the starts of two passes a kick
+// brings about: a kick asks for a pass soon, and however often it comes — a
+// console polling an addon that does not register, say — passes do not follow
+// each other faster than this.
+const registrationMinGap = 5 * time.Second
+
 // regStep is one addon the loop looks at in a pass.
 type regStep struct {
 	name       string
@@ -84,15 +90,29 @@ func (a *API) RunAddonRegistration(ctx context.Context) {
 	if a.charts == nil || !a.charts.Available() {
 		return
 	}
+	gap := a.registration.minGap
+	if gap <= 0 {
+		gap = registrationMinGap
+	}
 	ticker := time.NewTicker(registrationEvery)
 	defer ticker.Stop()
 	for {
+		started := time.Now()
 		a.syncChartAddons(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		case <-a.registration.kick:
+			if wait := time.Until(started.Add(gap)); wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
 		}
 	}
 }

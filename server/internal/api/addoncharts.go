@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -975,6 +976,8 @@ type chartRegistration struct {
 	mu sync.Mutex
 	// kick wakes the loop before its next tick; nil when no loop runs.
 	kick chan struct{}
+	// minGap overrides registrationMinGap, for tests.
+	minGap time.Duration
 
 	stateMu   sync.Mutex
 	errors    map[string]string // addon → why its registration failed last

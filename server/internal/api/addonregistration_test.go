@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -257,6 +258,7 @@ func TestRunAddonRegistration(t *testing.T) {
 	}
 	e.seed("example", map[string]any{"chart": map[string]any{"ref": "oci://registry.example.org/charts/example", "version": "1.2.0"}}, nil)
 	e.kube.SetStatus(addonPlural, "example", readyStatus(e, "1.2.0", "example"))
+	e.api.registration.minGap = time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -288,6 +290,48 @@ func TestRunAddonRegistration(t *testing.T) {
 	case <-returned:
 	case <-time.After(time.Second):
 		t.Fatal("outside a cluster the loop must return at once")
+	}
+}
+
+// A console polls an addon that is ready and will not register: every read
+// kicks the loop, and the loop still passes no more than once per gap.
+func TestKicksDoNotDriveRegistrationPasses(t *testing.T) {
+	e := newChartEnv(t)
+	e.api.workloads = fakeWorkloads{available: true}
+	var fetches atomic.Int32
+	e.api.registration.fetch = func(context.Context, string) (Descriptor, error) {
+		fetches.Add(1) // one per pass: the addon never registers
+		return decodeManifest(t, strings.ReplaceAll(chartManifest, `"service": "example"`, `"service": "other"`)), nil
+	}
+	e.seed("example", map[string]any{"chart": map[string]any{"ref": "oci://registry.example.org/charts/example", "version": "1.2.0"}}, nil)
+	e.kube.SetStatus(addonPlural, "example", readyStatus(e, "1.2.0", "example"))
+	e.api.registration.minGap = 300 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		e.api.RunAddonRegistration(ctx)
+		close(done)
+	}()
+	for deadline := time.Now().Add(3 * time.Second); fetches.Load() < 1; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("no first pass")
+		}
+	}
+	start := time.Now()
+	polls := 0
+	for time.Since(start) < 950*time.Millisecond {
+		if rec := e.do(http.MethodGet, "/api/portal/addon-charts/example", nil); rec.Code != http.StatusOK {
+			t.Fatal(rec.Body)
+		}
+		polls++
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	passes := fetches.Load() - 1
+	if passes < 1 || passes > 4 {
+		t.Errorf("%d polls in %s brought %d passes, want 1 to 4 with a %s gap", polls, time.Since(start).Round(time.Millisecond), passes, e.api.registration.minGap)
 	}
 }
 
