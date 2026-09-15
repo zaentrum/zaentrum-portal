@@ -112,9 +112,9 @@ type Browser struct {
 	pass    string
 	// suffix turns a curated table's logical database name into this
 	// environment's physical one ("" in production, "_beta" on beta).
-	suffix  string
-	mu      sync.Mutex
-	pools   map[string]*pgxpool.Pool
+	suffix string
+	mu     sync.Mutex
+	pools  map[string]*pgxpool.Pool
 }
 
 // New constructs a browser from the portal-api's datasource config. The DSN must

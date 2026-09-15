@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	defaultMax       = 500     // ring-buffer capacity
-	payloadCap       = 4000    // bytes of (scrubbed) payload kept per event
+	defaultMax       = 500  // ring-buffer capacity
+	payloadCap       = 4000 // bytes of (scrubbed) payload kept per event
 	tapGroupPrefix   = "portal-event-tap"
 	defaultPrefix    = "stube." // the platform's topic namespace
 	discoverEvery    = 15 * time.Second
@@ -62,8 +62,8 @@ type Event struct {
 type TopicInfo struct {
 	Topic      string   `json:"topic"`
 	Partitions int      `json:"partitions"`
-	Consumers  []string `json:"consumers"`          // consumer groups bound to it (live)
-	Seen       int      `json:"seen"`               // events observed by the tap this session
+	Consumers  []string `json:"consumers"`           // consumer groups bound to it (live)
+	Seen       int      `json:"seen"`                // events observed by the tap this session
 	LastEvent  string   `json:"lastEvent,omitempty"` // RFC3339 of the most recent observed event
 }
 
