@@ -35,6 +35,13 @@ const inst = (name, group, broken, labels = {}) => ({
   alwaysPull: true,
   group,
   reason: broken ? 'ImagePullBackOff' : '',
+  // What a client waits on: the spec generation, the one the Deployment
+  // controller has acted on, and the rollout-restart stamp. A broken workload
+  // is mid-rollout here — observed one behind — which is exactly the state
+  // the replica counters describe wrongly.
+  generation: broken ? 4 : 3,
+  observedGeneration: 3,
+  restartedAt: '2026-09-21T08:00:00Z',
   ...labels,
 });
 
@@ -51,7 +58,8 @@ const instances = [
 
 const operator = JSON.stringify({
   available: true,
-  operator: { present: true, name: 'zaentrum', channel: 'stable', version: 'v0.3.0', phase: 'Degraded', components: [] },
+  operator: { present: true, name: 'zaentrum', channel: 'stable', version: 'v0.3.0', phase: 'Degraded',
+    components: [], generation: 7, observedGeneration: 7 },
   instances,
 });
 

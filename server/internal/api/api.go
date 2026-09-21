@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -196,6 +197,14 @@ func (a *API) operatorGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"available": true, "operator": info, "instances": instances})
 }
 
+// The four writes below answer with what the write produced — a generation —
+// rather than 204. A client that changes the platform and then waits has
+// nothing else to wait on: the replica counters describe whatever pods exist,
+// including the ones from before the write, so a wait keyed on them reports
+// success while the rollout has not started. 204 is kept nowhere; the SPA
+// ignores the body either way, and an older client that expects no body reads
+// one it does not look at.
+
 func (a *API) operatorPatch(w http.ResponseWriter, r *http.Request) {
 	if !a.operatorReady(w) {
 		return
@@ -208,22 +217,36 @@ func (a *API) operatorPatch(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-	if err := a.op.SetOperator(r.Context(), body.Version, body.Channel, body.UpdateMode); err != nil {
+	out, err := a.op.SetOperator(r.Context(), body.Version, body.Channel, body.UpdateMode)
+	if err != nil {
 		badRequest(w, err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (a *API) operatorApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	if !a.operatorReady(w) {
 		return
 	}
-	if err := a.op.ApplyUpdate(r.Context()); err != nil {
-		badRequest(w, err.Error())
+	// The body is optional: version names the update the caller decided on, so
+	// that applying one the operator has since replaced is refused instead of
+	// rolling the platform to a version nobody chose.
+	var body struct {
+		Version string `json:"version"`
+	}
+	if !decodeOptional(w, r, &body) {
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	out, err := a.op.ApplyUpdate(r.Context(), strings.TrimSpace(body.Version))
+	switch {
+	case errors.Is(err, operator.ErrUpdateChanged):
+		http.Error(w, err.Error(), http.StatusConflict)
+	case err != nil:
+		badRequest(w, err.Error())
+	default:
+		writeJSON(w, http.StatusOK, out)
+	}
 }
 
 func (a *API) instanceScale(w http.ResponseWriter, r *http.Request) {
@@ -236,22 +259,30 @@ func (a *API) instanceScale(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-	if err := a.op.Scale(r.Context(), chi.URLParam(r, "name"), body.Replicas); err != nil {
-		badRequest(w, err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	out, err := a.op.Scale(r.Context(), chi.URLParam(r, "name"), body.Replicas)
+	a.instanceWrote(w, out, err)
 }
 
 func (a *API) instanceRestart(w http.ResponseWriter, r *http.Request) {
 	if !a.operatorReady(w) {
 		return
 	}
-	if err := a.op.Restart(r.Context(), chi.URLParam(r, "name")); err != nil {
+	out, err := a.op.Restart(r.Context(), chi.URLParam(r, "name"))
+	a.instanceWrote(w, out, err)
+}
+
+// instanceWrote answers a scale or a restart. A workload this namespace does
+// not run is 404 — definitive, and a different thing from a refusal, which is
+// what "protected" is and stays.
+func (a *API) instanceWrote(w http.ResponseWriter, out operator.Write, err error) {
+	switch {
+	case errors.Is(err, operator.ErrNoWorkload):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case err != nil:
 		badRequest(w, err.Error())
-		return
+	default:
+		writeJSON(w, http.StatusOK, out)
 	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // operatorReady guards the write actions when instance management is unavailable.
@@ -561,6 +592,19 @@ func decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		badRequest(w, "invalid json: "+err.Error())
+		return false
+	}
+	return true
+}
+
+// decodeOptional reads a body a caller may leave out entirely — an empty body
+// leaves dst as it was. Anything actually sent must still parse, unknown
+// fields and all: "optional" is about the body, not about its contents.
+func decodeOptional(w http.ResponseWriter, r *http.Request, dst any) bool {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) {
 		badRequest(w, "invalid json: "+err.Error())
 		return false
 	}

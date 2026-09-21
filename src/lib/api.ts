@@ -112,6 +112,15 @@ export interface Instance {
   // deployment channel stamped them. Grouping metadata only.
   addon?: string;
   component?: string;
+  // What a client waits on. The replica counters above cannot answer "has my
+  // rollout started?" — for a few seconds after a restart they describe the
+  // pods from BEFORE it. generation counts spec changes, observedGeneration
+  // says which one the Deployment controller has acted on, and restartedAt is
+  // the rollout-restart stamp ('' when there is none). Optional here because
+  // a portal-api that predates them sends none.
+  generation?: number;
+  observedGeneration?: number;
+  restartedAt?: string;
 }
 export interface OperatorComponent {
   name: string;
@@ -132,6 +141,10 @@ export interface OperatorInfo {
   currentVersion?: string;
   availableUpdate?: string;
   components?: OperatorComponent[];
+  // The same gate one level up: the spec generation of the operator's
+  // resource, and the one its status was written for.
+  generation?: number;
+  observedGeneration?: number;
 }
 export interface OperatorState {
   available: boolean;

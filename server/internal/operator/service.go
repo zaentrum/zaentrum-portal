@@ -10,6 +10,7 @@ package operator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -80,7 +81,49 @@ type Instance struct {
 	// to select anything.
 	Addon     string `json:"addon,omitempty"`
 	Component string `json:"component,omitempty"`
+	// Generation and ObservedGeneration are what makes a wait exact.
+	//
+	// The replica counters alone cannot answer "has my rollout started?": for
+	// a few seconds after a restart they describe the pods from BEFORE it —
+	// ready=1, updated=1, all of it true, all of it about the old pod. A
+	// client that waits on them reports success while the thing it asked for
+	// has not begun. Generation counts spec changes, ObservedGeneration says
+	// which one the Deployment controller has acted on, and a write answers
+	// with the generation it produced (see Write), so the two together are a
+	// gate the old pods cannot pass.
+	Generation         int64 `json:"generation"`
+	ObservedGeneration int64 `json:"observedGeneration"`
+	// RestartedAt is the rollout-restart stamp on the pod template, empty when
+	// there is none. A restart moves it, so a client can also tell ITS restart
+	// from one somebody else asked for.
+	RestartedAt string `json:"restartedAt"`
 }
+
+// Write is what a write to one workload produced: the Deployment generation to
+// wait for, and — for a restart — the stamp it wrote.
+type Write struct {
+	Name        string `json:"name"`
+	Generation  int64  `json:"generation"`
+	RestartedAt string `json:"restartedAt,omitempty"`
+}
+
+// Update is what a write to the platform produced: the version the operator's
+// resource now asks for, and the generation that write made.
+type Update struct {
+	Version    string `json:"version"`
+	Generation int64  `json:"generation"`
+}
+
+// ErrNoWorkload: this namespace runs no Deployment by that name. Definitive,
+// and different in kind from a refusal — the API answers it 404 so a client
+// can branch on it instead of parsing a message.
+var ErrNoWorkload = errors.New("no such workload")
+
+// ErrUpdateChanged: the update on the shelf is no longer the one the caller
+// named. The channel moved, or the operator discovered another one since the
+// caller looked. Applying it anyway would roll the platform to a version
+// nobody asked for, so the write is refused (409) and the caller looks again.
+var ErrUpdateChanged = errors.New("the available update changed")
 
 // Grouping labels. They are read, never written, and never used as selectors:
 // selectors are immutable, and a label that could move pods would make adding
@@ -107,6 +150,13 @@ type OperatorInfo struct {
 	CurrentVersion  string      `json:"currentVersion"`
 	AvailableUpdate string      `json:"availableUpdate"`
 	Components      []Component `json:"components"`
+	// Generation and ObservedGeneration are the same gate the workloads carry,
+	// one level up: the spec generation of the operator's resource, and the one
+	// its status was written for. A client that changed the platform waits
+	// until the operator has reconciled ITS write, not merely until something
+	// reports Ready.
+	Generation         int64 `json:"generation"`
+	ObservedGeneration int64 `json:"observedGeneration"`
 	// Note surfaces a hint when the CR is absent or unreadable (e.g. demo mode).
 	Note string `json:"note,omitempty"`
 }
@@ -142,13 +192,16 @@ func (s *Service) Instances(ctx context.Context) ([]Instance, error) {
 			Phase: phaseWithReason(
 				phaseOf(desired, int(d.Status.ReadyReplicas), int(d.Status.UpdatedReplicas)),
 				unhealthyReason(pods, d)),
-			Protected:       s.protected[d.Metadata.Name],
-			OperatorManaged: ownedByZaentrum(d),
-			Group:           groupOf(d),
-			Reason:          unhealthyReason(pods, d),
-			AlwaysPull:      strings.EqualFold(pull, "Always") || strings.HasSuffix(img, ":latest"),
-			Addon:           addon,
-			Component:       component,
+			Protected:          s.protected[d.Metadata.Name],
+			OperatorManaged:    ownedByZaentrum(d),
+			Group:              groupOf(d),
+			Reason:             unhealthyReason(pods, d),
+			AlwaysPull:         strings.EqualFold(pull, "Always") || strings.HasSuffix(img, ":latest"),
+			Addon:              addon,
+			Component:          component,
+			Generation:         d.Metadata.Generation,
+			ObservedGeneration: d.Status.ObservedGeneration,
+			RestartedAt:        d.RestartedAt(),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -160,66 +213,101 @@ func (s *Service) Instances(ctx context.Context) ([]Instance, error) {
 // deployment is owned by the Zaentrum CR, it patches the CR's spec.replicas map
 // (durable — the operator reconciles it); otherwise it scales the Deployment
 // directly (the demo/plain-manifest case).
-func (s *Service) Scale(ctx context.Context, name string, replicas int) error {
+func (s *Service) Scale(ctx context.Context, name string, replicas int) (Write, error) {
 	if err := validName(name); err != nil {
-		return err
+		return Write{}, err
 	}
 	if s.protected[name] {
-		return fmt.Errorf("%q is a protected (stateful) service and cannot be scaled from here", name)
+		return Write{}, fmt.Errorf("%q is a protected (stateful) service and cannot be scaled from here", name)
 	}
 	if replicas < 0 || replicas > 20 {
-		return fmt.Errorf("replicas must be between 0 and 20")
+		return Write{}, fmt.Errorf("replicas must be between 0 and 20")
+	}
+	// One read answers two questions: does this workload exist at all — a
+	// caller that names one we do not run gets 404, not a refusal — and who
+	// owns it, which decides where the write goes.
+	d, err := s.k8s.GetDeployment(ctx, name)
+	if err != nil {
+		if k8s.IsNotFound(err) {
+			return Write{}, fmt.Errorf("%w: %s", ErrNoWorkload, name)
+		}
+		return Write{}, err
 	}
 	// Prefer the CR path only when an operator owns THIS deployment (else a raw
 	// scale would be reverted by the operator's periodic re-apply).
-	if info, _ := s.operatorInfo(ctx); info.Present {
-		if d, err := s.k8s.GetDeployment(ctx, name); err == nil && ownedByZaentrum(*d) {
-			patch := []byte(fmt.Sprintf(`{"spec":{"replicas":{%q:%d}}}`, name, replicas))
-			return s.k8s.PatchResource(ctx, s.cfg.OperatorGroup, s.cfg.OperatorVersion, s.cfg.OperatorPlural, info.Name, patch)
+	if info, _ := s.operatorInfo(ctx); info.Present && ownedByZaentrum(*d) {
+		patch := []byte(fmt.Sprintf(`{"spec":{"replicas":{%q:%d}}}`, name, replicas))
+		if _, err := s.k8s.PatchResource(ctx, s.cfg.OperatorGroup, s.cfg.OperatorVersion, s.cfg.OperatorPlural, info.Name, patch); err != nil {
+			return Write{}, err
 		}
+		// The Deployment is untouched here: the operator will rewrite it on
+		// its next reconcile. Its generation now is therefore a lower bound —
+		// it lets a waiter reject a stale status, and the replica count it is
+		// waiting for is what actually says the change landed.
+		return Write{Name: name, Generation: d.Metadata.Generation, RestartedAt: d.RestartedAt()}, nil
 	}
-	return s.k8s.ScaleDeployment(ctx, name, replicas)
+	patched, err := s.k8s.ScaleDeployment(ctx, name, replicas)
+	if err != nil {
+		if k8s.IsNotFound(err) {
+			return Write{}, fmt.Errorf("%w: %s", ErrNoWorkload, name)
+		}
+		return Write{}, err
+	}
+	return Write{Name: name, Generation: patched.Metadata.Generation, RestartedAt: patched.RestartedAt()}, nil
 }
 
 // Restart rolls a deployment (re-pulling :latest with imagePullPolicy:Always).
 // Guarded against protected deployments.
-func (s *Service) Restart(ctx context.Context, name string) error {
+func (s *Service) Restart(ctx context.Context, name string) (Write, error) {
 	if err := validName(name); err != nil {
-		return err
+		return Write{}, err
 	}
 	if s.protected[name] {
-		return fmt.Errorf("%q is a protected (stateful) service and cannot be restarted from here", name)
+		return Write{}, fmt.Errorf("%q is a protected (stateful) service and cannot be restarted from here", name)
 	}
-	return s.k8s.RestartDeployment(ctx, name, s.now().UTC().Format(time.RFC3339))
+	d, err := s.k8s.RestartDeployment(ctx, name, s.now().UTC().Format(time.RFC3339))
+	if err != nil {
+		if k8s.IsNotFound(err) {
+			return Write{}, fmt.Errorf("%w: %s", ErrNoWorkload, name)
+		}
+		return Write{}, err
+	}
+	// The generation this stamp produced, and the stamp itself: a waiter needs
+	// both, because "ready" is true of the pods that were already running.
+	return Write{Name: name, Generation: d.Metadata.Generation, RestartedAt: d.RestartedAt()}, nil
 }
 
 // ─── operator (desired state via the Zaentrum CR) ───────────────────────────────
 
 // zaentrumList is the minimal decode of a Zaentrum CR collection.
 type zaentrumList struct {
-	Items []struct {
-		Metadata struct {
-			Name string `json:"name"`
-		} `json:"metadata"`
-		Spec struct {
-			Channel  string `json:"channel"`
-			Version  string `json:"version"`
-			Hostname string `json:"hostname"`
-			Update   struct {
-				Mode string `json:"mode"`
-			} `json:"update"`
-		} `json:"spec"`
-		Status struct {
-			Phase           string `json:"phase"`
-			CurrentVersion  string `json:"currentVersion"`
-			AvailableUpdate string `json:"availableUpdate"`
-			Components      []struct {
-				Name  string `json:"name"`
-				Ready bool   `json:"ready"`
-				Image string `json:"image"`
-			} `json:"components"`
-		} `json:"status"`
-	} `json:"items"`
+	Items []zaentrumCR `json:"items"`
+}
+
+type zaentrumCR struct {
+	Metadata struct {
+		Name       string `json:"name"`
+		Generation int64  `json:"generation"`
+	} `json:"metadata"`
+	Spec struct {
+		Channel  string `json:"channel"`
+		Version  string `json:"version"`
+		Hostname string `json:"hostname"`
+		Update   struct {
+			Mode string `json:"mode"`
+		} `json:"update"`
+	} `json:"spec"`
+	Status struct {
+		Phase              string `json:"phase"`
+		CurrentVersion     string `json:"currentVersion"`
+		AvailableUpdate    string `json:"availableUpdate"`
+		ObservedGeneration int64  `json:"observedGeneration"`
+		Components         []struct {
+			Name  string `json:"name"`
+			Ready bool   `json:"ready"`
+			Image string `json:"image"`
+		} `json:"components"`
+	} `json:"status"`
 }
 
 // OperatorInfo returns the Zaentrum CR summary, or {Present:false} + a note when the
@@ -252,25 +340,29 @@ func (s *Service) operatorInfo(ctx context.Context) (OperatorInfo, error) {
 		comps = append(comps, Component{Name: c.Name, Ready: c.Ready, Image: c.Image})
 	}
 	return OperatorInfo{
-		Present:         true,
-		Name:            it.Metadata.Name,
-		Channel:         it.Spec.Channel,
-		Version:         it.Spec.Version,
-		UpdateMode:      it.Spec.Update.Mode,
-		Hostname:        it.Spec.Hostname,
-		Phase:           it.Status.Phase,
-		CurrentVersion:  it.Status.CurrentVersion,
-		AvailableUpdate: it.Status.AvailableUpdate,
-		Components:      comps,
+		Present:            true,
+		Name:               it.Metadata.Name,
+		Channel:            it.Spec.Channel,
+		Version:            it.Spec.Version,
+		UpdateMode:         it.Spec.Update.Mode,
+		Hostname:           it.Spec.Hostname,
+		Phase:              it.Status.Phase,
+		CurrentVersion:     it.Status.CurrentVersion,
+		AvailableUpdate:    it.Status.AvailableUpdate,
+		Components:         comps,
+		Generation:         it.Metadata.Generation,
+		ObservedGeneration: it.Status.ObservedGeneration,
 	}, nil
 }
 
 // SetOperator patches the Zaentrum CR spec (version/channel/update mode). Empty
-// fields are left unchanged. Requires an operator to be present.
-func (s *Service) SetOperator(ctx context.Context, version, channel, updateMode *string) error {
+// fields are left unchanged. Requires an operator to be present. It answers
+// with the version the resource now asks for and the generation the patch
+// made, so a caller can wait for the operator to reconcile THIS write.
+func (s *Service) SetOperator(ctx context.Context, version, channel, updateMode *string) (Update, error) {
 	info, _ := s.operatorInfo(ctx)
 	if !info.Present {
-		return fmt.Errorf("no operator instance to configure")
+		return Update{}, fmt.Errorf("no operator instance to configure")
 	}
 	spec := map[string]any{}
 	if version != nil {
@@ -283,24 +375,57 @@ func (s *Service) SetOperator(ctx context.Context, version, channel, updateMode 
 		spec["update"] = map[string]any{"mode": *updateMode}
 	}
 	if len(spec) == 0 {
-		return fmt.Errorf("nothing to change")
+		return Update{}, fmt.Errorf("nothing to change")
 	}
 	patch, _ := json.Marshal(map[string]any{"spec": spec})
-	return s.k8s.PatchResource(ctx, s.cfg.OperatorGroup, s.cfg.OperatorVersion, s.cfg.OperatorPlural, info.Name, patch)
+	return s.patchOperator(ctx, info.Name, patch)
 }
 
 // ApplyUpdate pins spec.version to the channel's available update (status.availableUpdate),
 // i.e. "update now" — the operator then rolls every service to that tag.
-func (s *Service) ApplyUpdate(ctx context.Context) error {
+//
+// expect, when given, is the update the caller saw when it decided. If the
+// operator has since discovered another one — because the channel changed, or
+// because a newer release landed — the write is refused with ErrUpdateChanged
+// rather than rolling the platform to a version nobody chose.
+func (s *Service) ApplyUpdate(ctx context.Context, expect string) (Update, error) {
 	info, _ := s.operatorInfo(ctx)
 	if !info.Present {
-		return fmt.Errorf("no operator instance to update")
+		return Update{}, fmt.Errorf("no operator instance to update")
 	}
 	if info.AvailableUpdate == "" {
-		return fmt.Errorf("no update available")
+		return Update{}, fmt.Errorf("no update available")
+	}
+	if expect != "" && expect != info.AvailableUpdate {
+		return Update{}, fmt.Errorf("%w: %s is on the %s channel now, not %s",
+			ErrUpdateChanged, info.AvailableUpdate, channelOr(info.Channel), expect)
 	}
 	patch := []byte(fmt.Sprintf(`{"spec":{"version":%q}}`, info.AvailableUpdate))
-	return s.k8s.PatchResource(ctx, s.cfg.OperatorGroup, s.cfg.OperatorVersion, s.cfg.OperatorPlural, info.Name, patch)
+	return s.patchOperator(ctx, info.Name, patch)
+}
+
+// patchOperator applies a patch to the operator's resource and reads back what
+// the apiserver made of it.
+func (s *Service) patchOperator(ctx context.Context, name string, patch []byte) (Update, error) {
+	raw, err := s.k8s.PatchResource(ctx, s.cfg.OperatorGroup, s.cfg.OperatorVersion, s.cfg.OperatorPlural, name, patch)
+	if err != nil {
+		return Update{}, err
+	}
+	var cr zaentrumCR
+	if err := json.Unmarshal(raw, &cr); err != nil {
+		// The write landed; only the answer was unreadable. Say so rather than
+		// reporting a failure that did not happen — a caller that retried would
+		// be applying it twice.
+		return Update{}, nil
+	}
+	return Update{Version: cr.Spec.Version, Generation: cr.Metadata.Generation}, nil
+}
+
+func channelOr(c string) string {
+	if strings.TrimSpace(c) == "" {
+		return "configured"
+	}
+	return c
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────

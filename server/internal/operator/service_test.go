@@ -2,6 +2,7 @@ package operator
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/zaentrum/zaentrum-portal/server/internal/config"
@@ -60,14 +61,19 @@ func TestPodMatchesByLabels(t *testing.T) {
 
 func TestScaleGuards(t *testing.T) {
 	s := newSvc(t)
-	if err := s.Scale(context.Background(), "postgres", 2); err == nil {
+	if _, err := s.Scale(context.Background(), "postgres", 2); err == nil {
 		t.Error("scaling a protected service should error before any k8s call")
 	}
-	if err := s.Scale(context.Background(), "chino-api", 99); err == nil {
+	if _, err := s.Scale(context.Background(), "chino-api", 99); err == nil {
 		t.Error("out-of-range replicas should error")
 	}
-	if err := s.Restart(context.Background(), "kafka"); err == nil {
+	if _, err := s.Restart(context.Background(), "kafka"); err == nil {
 		t.Error("restarting a protected service should error")
+	}
+	// A protected workload is refused, not reported as missing: the two mean
+	// opposite things to a caller, and the refusal is the platform's own rule.
+	if _, err := s.Scale(context.Background(), "postgres", 2); errors.Is(err, ErrNoWorkload) {
+		t.Error("a protected service must not be reported as absent")
 	}
 }
 

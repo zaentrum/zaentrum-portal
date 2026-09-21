@@ -208,12 +208,23 @@ type Container struct {
 	ImagePullPolicy string `json:"imagePullPolicy"`
 }
 
+// RestartedAtAnnotation is the pod-template stamp a rollout restart writes.
+// kubectl writes the same one, so a restart from the console and one from a
+// terminal are the same event and are told apart by its value.
+const RestartedAtAnnotation = "kubectl.kubernetes.io/restartedAt"
+
 type Deployment struct {
 	Metadata struct {
-		Name            string            `json:"name"`
-		Labels          map[string]string `json:"labels"`
-		OwnerReferences []OwnerRef        `json:"ownerReferences"`
-		CreationTime    time.Time         `json:"creationTimestamp"`
+		Name   string            `json:"name"`
+		Labels map[string]string `json:"labels"`
+		// Generation counts spec changes; Status.ObservedGeneration says which
+		// one the Deployment controller has acted on. Together they are the
+		// only honest answer to "has my rollout started?" — the replica
+		// counters describe whatever pods exist, including the ones from
+		// before the write.
+		Generation      int64      `json:"generation"`
+		OwnerReferences []OwnerRef `json:"ownerReferences"`
+		CreationTime    time.Time  `json:"creationTimestamp"`
 	} `json:"metadata"`
 	Spec struct {
 		Replicas *int32 `json:"replicas"`
@@ -221,17 +232,27 @@ type Deployment struct {
 			MatchLabels map[string]string `json:"matchLabels"`
 		} `json:"selector"`
 		Template struct {
+			Metadata struct {
+				Annotations map[string]string `json:"annotations"`
+			} `json:"metadata"`
 			Spec struct {
 				Containers []Container `json:"containers"`
 			} `json:"spec"`
 		} `json:"template"`
 	} `json:"spec"`
 	Status struct {
-		Replicas          int32 `json:"replicas"`
-		ReadyReplicas     int32 `json:"readyReplicas"`
-		UpdatedReplicas   int32 `json:"updatedReplicas"`
-		AvailableReplicas int32 `json:"availableReplicas"`
+		ObservedGeneration int64 `json:"observedGeneration"`
+		Replicas           int32 `json:"replicas"`
+		ReadyReplicas      int32 `json:"readyReplicas"`
+		UpdatedReplicas    int32 `json:"updatedReplicas"`
+		AvailableReplicas  int32 `json:"availableReplicas"`
 	} `json:"status"`
+}
+
+// RestartedAt is the rollout-restart stamp on the pod template, or "" when the
+// Deployment has never been restarted this way.
+func (d *Deployment) RestartedAt() string {
+	return d.Spec.Template.Metadata.Annotations[RestartedAtAnnotation]
 }
 
 type deploymentList struct {
@@ -311,23 +332,41 @@ func (c *Client) GetDeployment(ctx context.Context, name string) (*Deployment, e
 	return &d, nil
 }
 
-// ScaleDeployment sets replicas via the scale subresource (JSON merge patch).
-func (c *Client) ScaleDeployment(ctx context.Context, name string, replicas int) error {
-	p := fmt.Sprintf("/apis/apps/v1/namespaces/%s/deployments/%s/scale", c.namespace, name)
+// ScaleDeployment sets replicas and returns the Deployment as patched.
+//
+// It patches the Deployment rather than its scale subresource, because the
+// answer is what the caller needs: the scale subresource replies with a Scale
+// object, whose metadata does NOT carry the Deployment's generation, and a
+// client that must wait for exactly this rollout has nothing to wait on. The
+// verb is the one a restart already needs (patch on deployments), so this asks
+// for no permission the portal did not already have.
+func (c *Client) ScaleDeployment(ctx context.Context, name string, replicas int) (*Deployment, error) {
+	p := fmt.Sprintf("/apis/apps/v1/namespaces/%s/deployments/%s", c.namespace, name)
 	body := []byte(fmt.Sprintf(`{"spec":{"replicas":%d}}`, replicas))
-	_, err := c.do(ctx, http.MethodPatch, p, "application/merge-patch+json", body)
-	return err
+	return decodeDeployment(c.do(ctx, http.MethodPatch, p, "application/merge-patch+json", body))
 }
 
 // RestartDeployment triggers a rollout restart (kubectl-compatible) by stamping
-// a restartedAt annotation on the pod template. `ts` is an RFC3339 timestamp
-// supplied by the caller. With :latest + imagePullPolicy:Always this re-pulls.
-func (c *Client) RestartDeployment(ctx context.Context, name, ts string) error {
+// a restartedAt annotation on the pod template, and returns the Deployment as
+// patched — its generation is the rollout a client waits for. `ts` is an
+// RFC3339 timestamp supplied by the caller. With :latest +
+// imagePullPolicy:Always this re-pulls.
+func (c *Client) RestartDeployment(ctx context.Context, name, ts string) (*Deployment, error) {
 	p := fmt.Sprintf("/apis/apps/v1/namespaces/%s/deployments/%s", c.namespace, name)
 	body := []byte(fmt.Sprintf(
-		`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":%q}}}}}`, ts))
-	_, err := c.do(ctx, http.MethodPatch, p, "application/strategic-merge-patch+json", body)
-	return err
+		`{"spec":{"template":{"metadata":{"annotations":{%q:%q}}}}}`, RestartedAtAnnotation, ts))
+	return decodeDeployment(c.do(ctx, http.MethodPatch, p, "application/strategic-merge-patch+json", body))
+}
+
+func decodeDeployment(data []byte, err error) (*Deployment, error) {
+	if err != nil {
+		return nil, err
+	}
+	var d Deployment
+	if err := json.Unmarshal(data, &d); err != nil {
+		return nil, err
+	}
+	return &d, nil
 }
 
 // PodLogs returns a pod container's recent logs (plain text, with timestamps).
@@ -381,11 +420,12 @@ func (c *Client) GetResourceList(ctx context.Context, group, version, plural str
 	return c.do(ctx, http.MethodGet, p, "", nil)
 }
 
-// PatchResource applies a JSON merge patch to a namespaced custom resource.
-func (c *Client) PatchResource(ctx context.Context, group, version, plural, name string, mergePatch []byte) error {
+// PatchResource applies a JSON merge patch to a namespaced custom resource and
+// returns it as patched — the caller reads the generation its write produced,
+// which is what makes a wait exact rather than hopeful.
+func (c *Client) PatchResource(ctx context.Context, group, version, plural, name string, mergePatch []byte) (json.RawMessage, error) {
 	p := fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s", group, version, c.namespace, plural, name)
-	_, err := c.do(ctx, http.MethodPatch, p, "application/merge-patch+json", mergePatch)
-	return err
+	return c.do(ctx, http.MethodPatch, p, "application/merge-patch+json", mergePatch)
 }
 
 // dryRun is the query that makes a write validate — admission, schema, every

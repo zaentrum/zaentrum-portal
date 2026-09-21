@@ -474,7 +474,8 @@ func (s *Service) SetKeepValues(ctx context.Context, name string, keep bool) err
 		return err
 	}
 	g, v, p := s.addonResource()
-	return s.k8s.PatchResource(ctx, g, v, p, name, patch)
+	_, err = s.k8s.PatchResource(ctx, g, v, p, name, patch)
+	return err
 }
 
 // CreateValuesSecret writes secret inputs into a new immutable Secret of the
