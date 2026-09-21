@@ -25,6 +25,10 @@ const inst = (name, group, broken, labels = {}) => ({
       ? `ghcr.io/zaentrum/${name}@sha256:56268318f11a2083bc3f03da3b7720ead6e1bdfb0f86da7de5746b1bcad3a7dd`
       : `ghcr.io/zaentrum/${name}:latest`,
   desiredReplicas: 1,
+  // status.replicas is the total across every ReplicaSet: a broken workload is
+  // mid-surge here, one new pod beside the old one, which is the state the
+  // other counters describe wrongly.
+  replicas: broken ? 2 : 1,
   readyReplicas: broken ? 0 : 1,
   updatedReplicas: 1,
   availableReplicas: broken ? 0 : 1,

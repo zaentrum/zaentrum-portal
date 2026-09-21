@@ -95,6 +95,11 @@ export interface Instance {
   name: string;
   image: string;
   desiredReplicas: number;
+  // status.replicas: the TOTAL pods across every ReplicaSet, not the count
+  // asked for. Mid-surge it exceeds desiredReplicas, and that difference is
+  // the only thing that says an old pod is still running. Optional because a
+  // portal-api that predates it sends none.
+  replicas?: number;
   readyReplicas: number;
   updatedReplicas: number;
   availableReplicas: number;

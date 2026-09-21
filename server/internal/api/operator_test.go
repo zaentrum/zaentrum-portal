@@ -92,7 +92,7 @@ func (e *opEnv) putDeployment(name string, replicas int, owned bool) {
 		},
 	})
 	e.kube.SetStatus("deployments", name, map[string]any{
-		"observedGeneration": 1, "replicas": replicas, "readyReplicas": replicas,
+		"observedGeneration": 1, "replicas": replicas + 1, "readyReplicas": replicas,
 		"updatedReplicas": replicas, "availableReplicas": replicas,
 	})
 }
@@ -132,6 +132,11 @@ func TestOperatorGetCarriesTheRolloutFields(t *testing.T) {
 	i := state.Instances[0]
 	if i.Generation != 1 || i.ObservedGeneration != 1 || i.RestartedAt != "2026-09-21T08:00:00Z" {
 		t.Errorf("workload rollout fields = %d/%d %q", i.Generation, i.ObservedGeneration, i.RestartedAt)
+	}
+	// status.replicas is the total across every ReplicaSet — here one more than
+	// the two asked for, because the rollout is mid-surge.
+	if i.Replicas != 3 || i.DesiredReplicas != 2 {
+		t.Errorf("replicas/desiredReplicas = %d/%d, want 3/2", i.Replicas, i.DesiredReplicas)
 	}
 	if state.Operator.Generation != 1 || state.Operator.ObservedGeneration != 1 {
 		t.Errorf("operator generations = %d/%d", state.Operator.Generation, state.Operator.ObservedGeneration)

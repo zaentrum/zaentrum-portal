@@ -82,7 +82,7 @@ func TestInstancesReportTheRolloutGeneration(t *testing.T) {
 	s, fake := rolloutService(t)
 	putDeployment(fake, "chino-api", 2, true, "2026-09-21T09:00:00Z")
 	fake.SetStatus(deployments, "chino-api", map[string]any{
-		"observedGeneration": 1, "replicas": 2, "readyReplicas": 2, "updatedReplicas": 2, "availableReplicas": 2,
+		"observedGeneration": 1, "replicas": 3, "readyReplicas": 2, "updatedReplicas": 2, "availableReplicas": 2,
 	})
 
 	list, err := s.Instances(context.Background())
@@ -95,6 +95,12 @@ func TestInstancesReportTheRolloutGeneration(t *testing.T) {
 	got := list[0]
 	if got.Generation != 1 || got.ObservedGeneration != 1 {
 		t.Errorf("generation/observedGeneration = %d/%d, want 1/1", got.Generation, got.ObservedGeneration)
+	}
+	// The total pod count is status.replicas, NOT the count asked for: mid-surge
+	// they differ, and that difference is the only thing that says an old pod is
+	// still there.
+	if got.Replicas != 3 || got.DesiredReplicas != 2 {
+		t.Errorf("replicas/desiredReplicas = %d/%d, want 3/2", got.Replicas, got.DesiredReplicas)
 	}
 	if got.RestartedAt != "2026-09-21T09:00:00Z" {
 		t.Errorf("restartedAt = %q", got.RestartedAt)
@@ -112,7 +118,7 @@ func TestInstancesReportTheRolloutGeneration(t *testing.T) {
 		}
 	}
 	raw, _ := json.Marshal(list[0])
-	for _, field := range []string{`"generation"`, `"observedGeneration"`, `"restartedAt"`} {
+	for _, field := range []string{`"generation"`, `"observedGeneration"`, `"restartedAt"`, `"replicas"`} {
 		if !contains(string(raw), field) {
 			t.Errorf("the DTO must carry %s: %s", field, raw)
 		}

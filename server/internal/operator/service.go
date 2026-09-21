@@ -55,9 +55,20 @@ func (s *Service) Available() bool { return s.k8s.InCluster() }
 // ─── DTOs (JSON to the UI) ───────────────────────────────────────────────────
 
 type Instance struct {
-	Name              string `json:"name"`
-	Image             string `json:"image"`
-	DesiredReplicas   int    `json:"desiredReplicas"`
+	Name            string `json:"name"`
+	Image           string `json:"image"`
+	DesiredReplicas int    `json:"desiredReplicas"`
+	// Replicas is status.replicas: the TOTAL pods this Deployment has, across
+	// every ReplicaSet — not the count it asks for, which is DesiredReplicas.
+	//
+	// It is the field that says whether a rollout is finished. With one replica
+	// the default strategy surges (maxSurge 1, maxUnavailable 0), so the new pod
+	// is created before the old one goes: for the whole of its startup
+	// updatedReplicas is 1, readyReplicas and availableReplicas are 1 — and all
+	// three are describing the OLD pod being counted alongside a new one that is
+	// still starting. Only replicas tells them apart: it is 2 until the old pod
+	// is gone. kubectl rollout status waits on exactly this.
+	Replicas          int    `json:"replicas"`
 	ReadyReplicas     int    `json:"readyReplicas"`
 	UpdatedReplicas   int    `json:"updatedReplicas"`
 	AvailableReplicas int    `json:"availableReplicas"`
@@ -185,6 +196,7 @@ func (s *Service) Instances(ctx context.Context) ([]Instance, error) {
 			Name:              d.Metadata.Name,
 			Image:             img,
 			DesiredReplicas:   desired,
+			Replicas:          int(d.Status.Replicas),
 			ReadyReplicas:     int(d.Status.ReadyReplicas),
 			UpdatedReplicas:   int(d.Status.UpdatedReplicas),
 			AvailableReplicas: int(d.Status.AvailableReplicas),
