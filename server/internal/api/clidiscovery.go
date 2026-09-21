@@ -104,10 +104,17 @@ func (a *API) discover(ctx context.Context) ([]byte, []Descriptor) {
 	discCache.mu.Unlock()
 
 	descs := collectDescriptors(ctx, a.capabilityCandidates(ctx))
-	body, _ := json.Marshal(map[string]any{
+	doc := map[string]any{
 		"capabilityVersion": capabilityVersion,
 		"services":          descs,
-	})
+	}
+	// An added field, not a new schema: capabilityVersion stays 1 because
+	// nothing a v1 client already reads changed shape. A CLI that predates
+	// `auth` ignores it and keeps asking for a bearer in the environment.
+	if auth := a.cliAuth(); auth != nil {
+		doc["auth"] = auth
+	}
+	body, _ := json.Marshal(doc)
 
 	discCache.mu.Lock()
 	discCache.fetched = time.Now()
@@ -115,6 +122,33 @@ func (a *API) discover(ctx context.Context) ([]byte, []Descriptor) {
 	discCache.descs = descs
 	discCache.mu.Unlock()
 	return body, descs
+}
+
+// cliAuth is how a CLI signs in to THIS instance: the issuer whose tokens the
+// API validates, and the client id a CLI should use for the device grant. The
+// CLI cannot guess either — a shared realm registers per-instance clients, and
+// the issuer may live under a path prefix on this very origin — so the
+// instance says both, the way it already tells its own SPA which client it is.
+//
+// Absent when there is nothing to sign in to: no issuer configured, or auth
+// disabled (the dev profile authorizes everyone). A CLI then sees no `auth`
+// field, which is exactly what an older portal looks like, and says so rather
+// than sending an operator into a login flow that authorizes nothing.
+//
+// Only public configuration: an issuer URL and a public client id, both of
+// which every browser that signs in here already sees.
+func (a *API) cliAuth() map[string]string {
+	if a.cfg.AuthDisabled || a.cfg.OIDCIssuer == "" {
+		return nil
+	}
+	clientID := a.cfg.CLIClientID
+	if clientID == "" {
+		clientID = "zae" // config defaults it; a blank override is not a reason to advertise nothing
+	}
+	return map[string]string{
+		"issuer":   a.cfg.OIDCIssuer,
+		"clientId": clientID,
+	}
 }
 
 // invalidateDiscovery drops the cache: an install or removal changed which

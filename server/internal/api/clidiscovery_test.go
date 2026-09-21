@@ -2,10 +2,13 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/zaentrum/zaentrum-portal/server/internal/config"
 )
 
 // The aggregator's contract: keep what validates, skip what doesn't, and let
@@ -58,5 +61,62 @@ func TestCollectDescriptorsEmptyIsEmptySlice(t *testing.T) {
 	got := collectDescriptors(context.Background(), nil)
 	if got == nil || len(got) != 0 {
 		t.Fatalf("want empty slice, got %#v", got)
+	}
+}
+
+// discoveryDoc renders the document for one configuration, cache cleared so
+// the previous test's answer cannot stand in for this one's.
+func discoveryDoc(t *testing.T, cfg config.Config) map[string]any {
+	t.Helper()
+	invalidateDiscovery()
+	t.Cleanup(invalidateDiscovery)
+	a := &API{addons: newFakeStore(), cfg: cfg}
+	body, _ := a.discover(context.Background())
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("discovery document is not JSON: %v (%s)", err, body)
+	}
+	return doc
+}
+
+// The CLI cannot guess where to sign in: a shared realm registers
+// per-instance clients and the issuer may sit under a path prefix. So a
+// configured instance says both — and says nothing when there is nothing to
+// sign in to, which is what an older portal looks like to a CLI.
+func TestCLIDiscoveryAdvertisesAuth(t *testing.T) {
+	doc := discoveryDoc(t, config.Config{
+		OIDCIssuer:  "https://media.example.org/auth/realms/zaentrum",
+		CLIClientID: "zae",
+	})
+	auth, ok := doc["auth"].(map[string]any)
+	if !ok {
+		t.Fatalf("want an auth object, got %#v", doc["auth"])
+	}
+	if auth["issuer"] != "https://media.example.org/auth/realms/zaentrum" || auth["clientId"] != "zae" {
+		t.Fatalf("auth does not carry issuer + clientId: %#v", auth)
+	}
+	// Backwards compatible: everything a v1 client already reads is unchanged.
+	if doc["capabilityVersion"] != float64(capabilityVersion) {
+		t.Fatalf("capabilityVersion changed: %#v", doc["capabilityVersion"])
+	}
+	if _, ok := doc["services"].([]any); !ok {
+		t.Fatalf("services must stay a list: %#v", doc["services"])
+	}
+
+	// An operator may register the client under another name.
+	doc = discoveryDoc(t, config.Config{OIDCIssuer: "https://media.example.org/auth/realms/zaentrum", CLIClientID: "zae-cli"})
+	if auth, _ := doc["auth"].(map[string]any); auth["clientId"] != "zae-cli" {
+		t.Fatalf("PORTAL_CLI_CLIENT_ID ignored: %#v", doc["auth"])
+	}
+}
+
+func TestCLIDiscoveryOmitsAuthWhenThereIsNothingToSignInTo(t *testing.T) {
+	for _, cfg := range []config.Config{
+		{}, // no issuer configured
+		{OIDCIssuer: "https://media.example.org/auth/realms/zaentrum", AuthDisabled: true}, // dev: everyone is an admin
+	} {
+		if doc := discoveryDoc(t, cfg); doc["auth"] != nil {
+			t.Fatalf("want no auth field for %+v, got %#v", cfg, doc["auth"])
+		}
 	}
 }

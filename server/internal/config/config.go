@@ -32,6 +32,13 @@ type Config struct {
 	// addon can manage only its extension seam, not the whole registry.
 	AddonRole string // PORTAL_ADDON_ROLE (default "zaentrum-addon")
 
+	// CLIClientID is the OIDC client a CLI signs in as, advertised in the CLI
+	// discovery document next to OIDCIssuer. Its own client, not the portal's:
+	// a CLI is a public client on a device with no browser redirect, so it
+	// needs the device grant, which the portal's browser client does not. An
+	// operator who registers it under another name points this at it.
+	CLIClientID string // PORTAL_CLI_CLIENT_ID (default "zae")
+
 	// Operator / instances console.
 	InstanceSelector string   // PORTAL_INSTANCE_SELECTOR — label filter for listed deployments (default "" = all in ns)
 	ProtectedNames   []string // PORTAL_PROTECT — deployments the UI must not scale/restart (default postgres,kafka,valkey,keycloak)
@@ -112,8 +119,9 @@ func Load() Config {
 		AudienceRequired: envBool(false, "OIDC_AUDIENCE_REQUIRED"),
 		AuthDisabled:     envBool(false, "AUTH_DISABLED"),
 
-		AdminRole: envDefault("zaentrum-admin", "PORTAL_ADMIN_ROLE"),
-		AddonRole: envDefault("zaentrum-addon", "PORTAL_ADDON_ROLE"),
+		AdminRole:   envDefault("zaentrum-admin", "PORTAL_ADMIN_ROLE"),
+		AddonRole:   envDefault("zaentrum-addon", "PORTAL_ADDON_ROLE"),
+		CLIClientID: envDefault("zae", "PORTAL_CLI_CLIENT_ID"),
 
 		InstanceSelector: env("PORTAL_INSTANCE_SELECTOR"),
 		ProtectedNames:   splitCSV(envDefault("postgres,kafka,valkey,keycloak", "PORTAL_PROTECT")),
