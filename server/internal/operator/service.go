@@ -150,6 +150,39 @@ type Component struct {
 	Image string `json:"image"`
 }
 
+// Install sources a controller can report. They are not a preference: each one
+// names a different thing an administrator has to go and do, which is the only
+// reason the field exists.
+const (
+	SourceOLM       = "olm"       // a subscription the cluster's lifecycle manager owns
+	SourceManifest  = "manifest"  // the pinned install manifest, applied by whoever holds it
+	SourceAppliance = "appliance" // baked into the appliance image; its own update carries it
+	SourceUnknown   = "unknown"   // the operator could not tell
+)
+
+// Controller is the operator's OWN controller — the process that reconciles
+// the CR, not anything the platform runs.
+//
+// It is reported so that an administrator can see what is in charge and
+// whether something newer exists. It is never changed from here: the
+// controller lives in its own namespace, outside this portal's permissions,
+// and is installed and upgraded outside the product — by OLM, by applying its
+// install manifest, or with the appliance. Showing the version and naming the
+// path is the product's whole job; performing it is not.
+type Controller struct {
+	// Image is what the controller pod runs, tag or digest.
+	Image string `json:"image,omitempty"`
+	// Version is the tag, else the short digest, else "unknown".
+	Version string `json:"version,omitempty"`
+	// Source is how it was installed: olm | manifest | appliance | unknown.
+	Source string `json:"source,omitempty"`
+	// AvailableUpdate is a newer version discovered on the channel, "" when
+	// there is none or the operator does not look.
+	AvailableUpdate string `json:"availableUpdate,omitempty"`
+	// ObservedAt is when the operator last looked.
+	ObservedAt string `json:"observedAt,omitempty"`
+}
+
 type OperatorInfo struct {
 	Present         bool        `json:"present"`
 	Name            string      `json:"name"`
@@ -168,6 +201,11 @@ type OperatorInfo struct {
 	// reports Ready.
 	Generation         int64 `json:"generation"`
 	ObservedGeneration int64 `json:"observedGeneration"`
+	// Controller is the operator's own controller, when the CR reports it.
+	// A pointer, and omitted from the JSON when nil, so a client can tell "this
+	// operator does not report it" — every operator older than the field —
+	// from "reported, and empty". The two need different words on screen.
+	Controller *Controller `json:"controller,omitempty"`
 	// Note surfaces a hint when the CR is absent or unreadable (e.g. demo mode).
 	Note string `json:"note,omitempty"`
 }
@@ -319,6 +357,16 @@ type zaentrumCR struct {
 			Ready bool   `json:"ready"`
 			Image string `json:"image"`
 		} `json:"components"`
+		// Controller is the operator reporting itself. A pointer: an operator
+		// that predates the field writes no `controller` key at all, and that
+		// is a different answer from an empty one.
+		Controller *struct {
+			Image           string `json:"image"`
+			Version         string `json:"version"`
+			Source          string `json:"source"`
+			AvailableUpdate string `json:"availableUpdate"`
+			ObservedAt      string `json:"observedAt"`
+		} `json:"controller"`
 	} `json:"status"`
 }
 
@@ -364,7 +412,69 @@ func (s *Service) operatorInfo(ctx context.Context) (OperatorInfo, error) {
 		Components:         comps,
 		Generation:         it.Metadata.Generation,
 		ObservedGeneration: it.Status.ObservedGeneration,
+		Controller:         controllerOf(it),
 	}, nil
+}
+
+// controllerOf reads status.controller, and answers nil for every way an
+// operator can fail to report one: the field absent (an older operator), or
+// present with nothing in it. Both mean "this operator cannot tell you what is
+// in charge", and a card rendered from the second would be a row of dashes
+// claiming to be information.
+//
+// What it does fill in is the version, when the controller reported an image
+// and no version for it: the tag identifies the build, so deriving it here
+// means the console and the CLI do not each have to.
+func controllerOf(it zaentrumCR) *Controller {
+	c := it.Status.Controller
+	if c == nil {
+		return nil
+	}
+	out := Controller{
+		Image:           strings.TrimSpace(c.Image),
+		Version:         strings.TrimSpace(c.Version),
+		Source:          strings.TrimSpace(c.Source),
+		AvailableUpdate: strings.TrimSpace(c.AvailableUpdate),
+		ObservedAt:      strings.TrimSpace(c.ObservedAt),
+	}
+	if out == (Controller{}) {
+		return nil
+	}
+	if out.Version == "" {
+		out.Version = versionFromImage(out.Image)
+	}
+	if out.Source == "" {
+		out.Source = SourceUnknown
+	}
+	return &out
+}
+
+// versionFromImage names a build the way the operator does: the tag, else the
+// head of the digest, else "unknown" — a reference with neither is pulled as
+// :latest, which says nothing about which build is running.
+func versionFromImage(image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return SourceUnknown
+	}
+	if at := strings.LastIndex(image, "@"); at >= 0 {
+		d := image[at+1:]
+		if alg, hex, ok := strings.Cut(d, ":"); ok && len(hex) > 12 {
+			return alg + ":" + hex[:12]
+		}
+		if d != "" {
+			return d
+		}
+		return SourceUnknown
+	}
+	name := image
+	if slash := strings.LastIndex(name, "/"); slash >= 0 {
+		name = name[slash+1:]
+	}
+	if _, tag, ok := strings.Cut(name, ":"); ok && tag != "" {
+		return tag
+	}
+	return SourceUnknown
 }
 
 // SetOperator patches the Zaentrum CR spec (version/channel/update mode). Empty

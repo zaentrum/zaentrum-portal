@@ -98,16 +98,26 @@ func (e *opEnv) putDeployment(name string, replicas int, owned bool) {
 }
 
 func (e *opEnv) putCR(availableUpdate string) {
+	e.putCRWithStatus(availableUpdate, nil)
+}
+
+// putCRWithStatus writes the CR with extra status fields folded in — the
+// operator's own controller, when the operator reports one.
+func (e *opEnv) putCRWithStatus(availableUpdate string, extra map[string]any) {
 	e.kube.Put("zaentrums", map[string]any{
 		"apiVersion": "zaentrum.io/v1alpha1", "kind": "Zaentrum",
 		"metadata": map[string]any{"name": "zaentrum"},
 		"spec": map[string]any{"version": "1.4.0", "channel": "stable",
 			"update": map[string]any{"mode": "manual"}},
 	})
-	e.kube.SetStatus("zaentrums", "zaentrum", map[string]any{
+	status := map[string]any{
 		"phase": "Ready", "currentVersion": "1.4.0", "availableUpdate": availableUpdate,
 		"observedGeneration": 1,
-	})
+	}
+	for k, v := range extra {
+		status[k] = v
+	}
+	e.kube.SetStatus("zaentrums", "zaentrum", status)
 }
 
 func TestOperatorGetCarriesTheRolloutFields(t *testing.T) {
@@ -146,6 +156,79 @@ func TestOperatorGetCarriesTheRolloutFields(t *testing.T) {
 		if !strings.Contains(rec.Body.String(), field) {
 			t.Errorf("the existing field %s must stay", field)
 		}
+	}
+}
+
+// The operator's own controller reaches the console read, whole, and carries
+// no write with it: the portal shows what is in charge and names where it is
+// updated, and the update happens outside the product.
+func TestOperatorGetCarriesTheController(t *testing.T) {
+	e := newOpEnv(t)
+	e.putCRWithStatus("1.5.0", map[string]any{"controller": map[string]any{
+		"image":           "ghcr.io/example/operator:v0.4.1",
+		"version":         "v0.4.1",
+		"source":          "olm",
+		"availableUpdate": "v0.5.0",
+		"observedAt":      "2026-09-22T08:00:00Z",
+	}})
+
+	rec := e.do(http.MethodGet, "/api/portal/operator", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET operator = %d %s", rec.Code, rec.Body)
+	}
+	var state struct {
+		Operator operator.OperatorInfo `json:"operator"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	c := state.Operator.Controller
+	if c == nil {
+		t.Fatalf("the controller must reach the console: %s", rec.Body)
+	}
+	if c.Image != "ghcr.io/example/operator:v0.4.1" || c.Version != "v0.4.1" ||
+		c.Source != operator.SourceOLM || c.AvailableUpdate != "v0.5.0" || c.ObservedAt != "2026-09-22T08:00:00Z" {
+		t.Errorf("controller = %+v", c)
+	}
+	// Reading it adds no write: the console offers no route that would update
+	// the controller, and must not grow one by accident.
+	for _, target := range []string{"/api/portal/operator/controller", "/api/portal/operator/controller/update"} {
+		if rec := e.do(http.MethodPost, target, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("POST %s = %d, want 404 — the portal never updates the controller", target, rec.Code)
+		}
+	}
+}
+
+// An operator that predates the field reports nothing, and the answer says
+// nothing rather than inventing blanks: the key is absent, so a client can
+// tell "not reported" from "reported empty" and word it differently.
+func TestOperatorGetOmitsAnUnreportedController(t *testing.T) {
+	for name, extra := range map[string]map[string]any{
+		"an older operator":         nil,
+		"an empty controller block": {"controller": map[string]any{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newOpEnv(t)
+			e.putCRWithStatus("", extra)
+
+			rec := e.do(http.MethodGet, "/api/portal/operator", nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET operator = %d %s", rec.Code, rec.Body)
+			}
+			if strings.Contains(rec.Body.String(), `"controller"`) {
+				t.Errorf("an unreported controller must be omitted: %s", rec.Body)
+			}
+			var state struct {
+				Operator operator.OperatorInfo `json:"operator"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &state); err != nil {
+				t.Fatal(err)
+			}
+			// Everything else about the console is unaffected.
+			if !state.Operator.Present || state.Operator.Controller != nil {
+				t.Errorf("operator = %+v", state.Operator)
+			}
+		})
 	}
 }
 

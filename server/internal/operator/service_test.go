@@ -3,6 +3,7 @@ package operator
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/zaentrum/zaentrum-portal/server/internal/config"
@@ -251,6 +252,77 @@ func TestPhaseWithReason(t *testing.T) {
 				t.Fatalf("phaseWithReason(%q,%q) = %q, want %q", c.phase, c.reason, got, c.expect)
 			}
 		})
+	}
+}
+
+// The controller the operator reports is the one thing in this console that
+// the console cannot change. What it has to get right is therefore the reading:
+// an operator that says nothing must not be made to look like one that said
+// "empty", because those two states get different words on screen.
+func TestControllerOf(t *testing.T) {
+	type raw struct{ image, version, source, update, at string }
+	cr := func(r *raw) zaentrumCR {
+		var it zaentrumCR
+		if r == nil {
+			return it
+		}
+		it.Status.Controller = &struct {
+			Image           string `json:"image"`
+			Version         string `json:"version"`
+			Source          string `json:"source"`
+			AvailableUpdate string `json:"availableUpdate"`
+			ObservedAt      string `json:"observedAt"`
+		}{Image: r.image, Version: r.version, Source: r.source, AvailableUpdate: r.update, ObservedAt: r.at}
+		return it
+	}
+
+	if got := controllerOf(cr(nil)); got != nil {
+		t.Errorf("an operator that reports no controller must answer nil, got %+v", got)
+	}
+	if got := controllerOf(cr(&raw{})); got != nil {
+		t.Errorf("a controller with nothing in it says no more than none at all, got %+v", got)
+	}
+	if got := controllerOf(cr(&raw{source: "  "})); got != nil {
+		t.Errorf("whitespace is not a report, got %+v", got)
+	}
+
+	full := controllerOf(cr(&raw{
+		image: " ghcr.io/example/operator:v0.4.1 ", version: "v0.4.1", source: "olm",
+		update: "v0.5.0", at: "2026-09-22T08:00:00Z"}))
+	if full == nil {
+		t.Fatal("a reported controller must survive")
+	}
+	if full.Image != "ghcr.io/example/operator:v0.4.1" || full.Version != "v0.4.1" ||
+		full.Source != SourceOLM || full.AvailableUpdate != "v0.5.0" || full.ObservedAt != "2026-09-22T08:00:00Z" {
+		t.Errorf("controller = %+v", full)
+	}
+
+	// A controller that named an image but no version still identifies its
+	// build; and one that did not say how it was installed is "unknown", which
+	// is a source the clients have wording for.
+	derived := controllerOf(cr(&raw{image: "ghcr.io/example/operator@sha256:" + strings.Repeat("a", 64)}))
+	if derived == nil || derived.Version != "sha256:aaaaaaaaaaaa" || derived.Source != SourceUnknown {
+		t.Errorf("derived controller = %+v", derived)
+	}
+	// An unrecognised source is passed through, not erased: a source this
+	// portal has not heard of is still the truth about the install.
+	if got := controllerOf(cr(&raw{source: "helm"})); got == nil || got.Source != "helm" {
+		t.Errorf("an unknown source must survive: %+v", got)
+	}
+}
+
+func TestVersionFromImage(t *testing.T) {
+	cases := map[string]string{
+		"ghcr.io/example/operator:v0.4.1":                            "v0.4.1",
+		"ghcr.io/example/operator@sha256:" + strings.Repeat("b", 64): "sha256:bbbbbbbbbbbb",
+		"ghcr.io/example/operator":                                   "unknown",
+		"":                                                           "unknown",
+		"operator:latest":                                            "latest",
+	}
+	for image, want := range cases {
+		if got := versionFromImage(image); got != want {
+			t.Errorf("versionFromImage(%q) = %q, want %q", image, got, want)
+		}
 	}
 }
 
