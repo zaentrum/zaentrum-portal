@@ -132,6 +132,19 @@ export interface OperatorComponent {
   ready: boolean;
   image: string;
 }
+// OperatorController is the operator's OWN controller — what reconciles the
+// CR, not anything the platform runs. Read-only here and everywhere: it is
+// installed and upgraded outside the product (OLM, its install manifest, the
+// appliance), so the console shows what runs and names the path, and offers
+// nothing that would imply it could do it. Every field is optional, and the
+// whole object is absent against an operator that does not report it.
+export interface OperatorController {
+  image?: string;
+  version?: string;
+  source?: string; // olm | manifest | appliance | unknown
+  availableUpdate?: string;
+  observedAt?: string;
+}
 // When present is false (the demo / no operator) the backend omits the rest and
 // may include a note, so the detail fields are optional.
 export interface OperatorInfo {
@@ -150,6 +163,9 @@ export interface OperatorInfo {
   // resource, and the one its status was written for.
   generation?: number;
   observedGeneration?: number;
+  // The controller in charge of all of the above, when the operator reports
+  // it. Absent against every operator older than the field.
+  controller?: OperatorController;
 }
 export interface OperatorState {
   available: boolean;

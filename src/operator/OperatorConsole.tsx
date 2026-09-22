@@ -12,8 +12,16 @@ import {
 } from '@nalet/design-system';
 import type { TableColumn } from '@nalet/design-system';
 import { Minus, Plus, RotateCw, RefreshCw, Lock, ArrowUpCircle } from 'lucide-react';
-import { usePortalApi, type OperatorState, type Instance, type InstalledAddon } from '../lib/api';
+import { usePortalApi, type OperatorState, type Instance, type InstalledAddon, type OperatorController } from '../lib/api';
 import { containersSummary, hasComponentGroups, phaseTone } from '../lib/addons';
+import {
+  controllerNote,
+  controllerPath,
+  controllerUpdate,
+  controllerVersion,
+  hasController,
+  notReportedNote,
+} from '../lib/controller';
 import './operator.css';
 
 const REFRESH_MS = 5000;
@@ -370,6 +378,9 @@ export function OperatorConsole() {
         </Card>
       )}
 
+      {/* the operator's own controller — read-only on purpose */}
+      {op?.present && state?.available && <ControllerCard controller={op.controller} />}
+
       {/* instances (observed state) */}
       {!state && !err && (
         <div className="op__state">
@@ -425,6 +436,59 @@ export function OperatorConsole() {
         )
       )}
     </div>
+  );
+}
+
+// ControllerCard is the operator's own controller: what is in charge, how it
+// got here, and whether something newer exists.
+//
+// It is read-only, and deliberately so. The controller runs in its own
+// namespace, outside the portal's permissions, and is installed and upgraded
+// outside the product — by OLM, by applying its install manifest, or with the
+// appliance. A button here could only ever fail, or worse, look like it
+// worked; naming the path is the honest thing the console can do. Every
+// operator older than the field reports nothing, and that says so too rather
+// than rendering a row of dashes.
+function ControllerCard({ controller }: { controller?: OperatorController }) {
+  const update = controllerUpdate(controller);
+  const { installed } = controllerPath(controller?.source);
+  return (
+    <Card
+      header={<span className="op__card-title">operator controller</span>}
+      headerAside={
+        update ? (
+          <Badge tone="blue" title="the controller is updated outside the platform">
+            update available: {update}
+          </Badge>
+        ) : undefined
+      }
+    >
+      {hasController(controller) ? (
+        <>
+          <div className="op__grid">
+            <Field label="version">
+              <span className="op__mono">{controllerVersion(controller)}</span>
+            </Field>
+            <Field label="installed by">
+              <Text>{installed}</Text>
+            </Field>
+            <Field label="image">
+              <span className="op__mono op__wrap">{controller?.image || '—'}</span>
+            </Field>
+            {controller?.observedAt && (
+              <Field label="observed">
+                <Text variant="dim">{controller.observedAt}</Text>
+              </Field>
+            )}
+          </div>
+          <Text variant="muted" className="op__ctl-note">
+            {controllerNote(controller?.source)}
+          </Text>
+        </>
+      ) : (
+        <Text variant="muted">{notReportedNote}</Text>
+      )}
+    </Card>
   );
 }
 

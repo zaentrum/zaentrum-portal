@@ -58,6 +58,21 @@
   color: var(--fg-dim, #6E7787);
 }
 
+/* The controller card's one sentence: what updates it, and that the platform
+   does not. It sits under the grid, not beside a control, because there is no
+   control — reading it is the whole interaction. */
+.op__ctl-note {
+  display: block;
+  margin-top: 16px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+/* A digest-pinned controller image is 71 characters; it wraps rather than
+   stretching the card. */
+.op__wrap {
+  overflow-wrap: anywhere;
+}
+
 .op__svc {
   display: inline-flex;
   align-items: center;

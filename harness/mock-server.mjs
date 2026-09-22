@@ -60,12 +60,36 @@ const instances = [
   { ...inst('leftover-job-runner', 'other', false), image: 'docker.io/library/busybox:latest' },
 ];
 
-const operator = JSON.stringify({
-  available: true,
-  operator: { present: true, name: 'zaentrum', channel: 'stable', version: 'v0.3.0', phase: 'Degraded',
-    components: [], generation: 7, observedGeneration: 7 },
-  instances,
-});
+// The operator's own controller, as status.controller reports it. The source
+// decides what the console tells an administrator to go and do, so the harness
+// can play each one — and `none` plays every operator older than the field,
+// which reports no controller at all.
+const controllers = {
+  olm: { image: 'ghcr.io/zaentrum/operator:v0.4.1', version: 'v0.4.1', source: 'olm',
+    availableUpdate: 'v0.5.0', observedAt: new Date().toISOString() },
+  manifest: { image: 'ghcr.io/zaentrum/operator@sha256:56268318f11a2083bc3f03da3b7720ead6e1bdfb0f86da7de5746b1bcad3a7dd',
+    version: 'sha256:56268318f11a', source: 'manifest', availableUpdate: '', observedAt: new Date().toISOString() },
+  appliance: { image: 'ghcr.io/zaentrum/operator:v0.4.1', version: 'v0.4.1', source: 'appliance',
+    availableUpdate: '', observedAt: new Date().toISOString() },
+  unknown: { image: 'ghcr.io/zaentrum/operator:v0.4.1', version: 'v0.4.1', source: 'unknown',
+    availableUpdate: '', observedAt: '' },
+};
+const controllerMode = (req) => (req.headers.cookie ?? '').match(/(?:^|;\s*)mock-controller=([a-z]*)/)?.[1] ?? '';
+
+const operatorState = (req) => {
+  const mode = controllerMode(req);
+  const controller = mode === 'none' ? null : (controllers[mode] ?? controllers.olm);
+  return {
+    available: true,
+    operator: {
+      present: true, name: 'zaentrum', channel: 'stable', version: 'v0.3.0', phase: 'Degraded',
+      components: [], generation: 7, observedGeneration: 7,
+      // Absent, not empty: an operator that predates the field sends no key.
+      ...(controller ? { controller } : {}),
+    },
+    instances,
+  };
+};
 
 // The registry, as seeded by migrations 002/003/004 — note every seeded app has
 // an EMPTY proxyUrl, which is the state that made the "embeddable" column worth
@@ -484,10 +508,7 @@ createServer(async (req, res) => {
   if (url.startsWith('/api/portal/apps/')) return json(res, 502, { error: 'app unreachable' });
   if (url.startsWith('/api/portal/apps')) return json(res, 200, apps);
   if (url.startsWith('/api/portal/spaces')) return json(res, 200, spaces);
-  if (url.startsWith('/api/portal/operator')) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(operator);
-  }
+  if (url.startsWith('/api/portal/operator')) return json(res, 200, operatorState(req));
   if (url.startsWith('/api/portal/addons') && req.method === 'GET') {
     // An older portal-api lists what the registry holds; this one merges the
     // chart addons, registered or not.

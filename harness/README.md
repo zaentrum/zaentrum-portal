@@ -54,6 +54,20 @@ refused like the server refuses it.
     http://localhost:8792/?view=settings&charts=off    # an older portal-api: no "+"
     http://localhost:8792/?view=settings&charts=nocrd  # a cluster without the resource type
 
+The operator console's controller card renders from `status.controller`, and
+every install source sends the reader somewhere different, so each one can be
+looked at — including the operator that reports nothing, which is every
+operator older than the field:
+
+    http://localhost:8792/?controller=olm        # a subscription, with an update on the channel
+    http://localhost:8792/?controller=manifest   # digest-pinned, applied from the install manifest
+    http://localhost:8792/?controller=appliance  # the appliance carries it
+    http://localhost:8792/?controller=unknown    # installed somehow; all three paths named
+    http://localhost:8792/?controller=none       # an older operator: nothing reported
+
+Nothing in that card is a control, whichever mode is on: the controller is
+updated outside the platform, and a button here could only look like it worked.
+
 The mock keeps its state in memory; restart it for the seeded state.
 
 The registry fixture mirrors what migrations 002/003/004 actually seed — every
