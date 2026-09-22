@@ -6,8 +6,10 @@ import {
   controllerNote,
   controllerPath,
   controllerUpdate,
+  controllerUpdateLabel,
   controllerVersion,
   hasController,
+  isVersionLike,
   notReportedNote,
 } from './controller.ts';
 import type { OperatorController } from './api.ts';
@@ -79,4 +81,39 @@ test('an update is only reported when it is newer than what runs', () => {
   // The channel offering what is already installed is not an update.
   assert.equal(controllerUpdate({ ...running, availableUpdate: 'v0.4.1' }), '');
   assert.equal(controllerUpdate(undefined), '');
+});
+
+// `v` and a digit is the release convention; dotted numbers are a release too;
+// everything else is a name that outlives the images it points at.
+test('a release is told apart from a moving tag', () => {
+  for (const v of ['v0.5.0', 'v1', 'V2.0.0', '1.5.0', '1.5', '2.0.0-rc1', '1.4.0+build.7']) {
+    assert.equal(isVersionLike(v), true, v);
+  }
+  for (const m of ['latest', 'stable', 'edge', 'main', 'nightly', 'sha-19ea431', '1', 'v', '', '  ', 'release-1.5', 'latest.1']) {
+    assert.equal(isVersionLike(m), false, m);
+  }
+  assert.equal(isVersionLike(undefined), false);
+});
+
+// Two different facts arrive in one field and cannot share a sentence. Live,
+// an install running :sha-19ea431 against a channel serving :latest rendered
+// as "update available: latest", which reads as a version number and names
+// nothing a reader can compare themselves against.
+test('a version is offered by name, a channel tag as a moved channel', () => {
+  const pinned: OperatorController = { version: 'v0.4.1', image: 'ghcr.io/example/operator:v0.4.1' };
+  assert.equal(controllerUpdateLabel({ ...pinned, availableUpdate: 'v0.5.0' }), 'update available: v0.5.0');
+  assert.equal(controllerUpdateLabel({ ...pinned, availableUpdate: '1.5.0' }), 'update available: 1.5.0');
+
+  const commit: OperatorController = { version: 'sha-19ea431', image: 'ghcr.io/example/operator:sha-19ea431' };
+  for (const tag of ['latest', 'stable', 'edge']) {
+    const label = controllerUpdateLabel({ ...commit, availableUpdate: tag });
+    assert.equal(label, `"${tag}" serves a different image`);
+    // Whatever it says, it must not read as a version being offered.
+    assert.ok(!label.includes(`update available: ${tag}`), label);
+  }
+
+  // Nothing to say stays nothing to say.
+  assert.equal(controllerUpdateLabel({ ...pinned, availableUpdate: '' }), '');
+  assert.equal(controllerUpdateLabel({ ...pinned, availableUpdate: 'v0.4.1' }), '');
+  assert.equal(controllerUpdateLabel(undefined), '');
 });

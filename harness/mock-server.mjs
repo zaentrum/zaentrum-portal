@@ -73,6 +73,11 @@ const controllers = {
     availableUpdate: '', observedAt: new Date().toISOString() },
   unknown: { image: 'ghcr.io/zaentrum/operator:v0.4.1', version: 'v0.4.1', source: 'unknown',
     availableUpdate: '', observedAt: '' },
+  // The live shape on demo and beta: pinned to a commit image, following a
+  // moving channel tag. `latest` is not a version anyone can be "on", so the
+  // card says the channel moved rather than naming it as an update.
+  moving: { image: 'ghcr.io/zaentrum/operator:sha-19ea431', version: 'sha-19ea431', source: 'manifest',
+    availableUpdate: 'latest', observedAt: new Date().toISOString() },
 };
 const controllerMode = (req) => (req.headers.cookie ?? '').match(/(?:^|;\s*)mock-controller=([a-z]*)/)?.[1] ?? '';
 

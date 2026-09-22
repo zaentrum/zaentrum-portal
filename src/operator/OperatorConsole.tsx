@@ -18,8 +18,10 @@ import {
   controllerNote,
   controllerPath,
   controllerUpdate,
+  controllerUpdateLabel,
   controllerVersion,
   hasController,
+  isVersionLike,
   notReportedNote,
 } from '../lib/controller';
 import './operator.css';
@@ -451,14 +453,26 @@ export function OperatorConsole() {
 // than rendering a row of dashes.
 function ControllerCard({ controller }: { controller?: OperatorController }) {
   const update = controllerUpdate(controller);
+  const label = controllerUpdateLabel(controller);
+  const moving = !!update && !isVersionLike(update);
   const { installed } = controllerPath(controller?.source);
   return (
     <Card
       header={<span className="op__card-title">operator controller</span>}
       headerAside={
-        update ? (
-          <Badge tone="blue" title="the controller is updated outside the platform">
-            update available: {update}
+        label ? (
+          <Badge
+            tone="blue"
+            title={
+              moving
+                ? // A moving tag is not a version you can be on: the channel this
+                  // install follows points somewhere else now, which is a fact
+                  // about the channel and not a fault.
+                  `the ${update} tag this install follows now points at a different image — the controller is updated outside the platform`
+                : 'the controller is updated outside the platform'
+            }
+          >
+            {label}
           </Badge>
         ) : undefined
       }

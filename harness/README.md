@@ -59,11 +59,16 @@ every install source sends the reader somewhere different, so each one can be
 looked at — including the operator that reports nothing, which is every
 operator older than the field:
 
-    http://localhost:8792/?controller=olm        # a subscription, with an update on the channel
+    http://localhost:8792/?controller=olm        # a subscription, with a VERSION on the channel
     http://localhost:8792/?controller=manifest   # digest-pinned, applied from the install manifest
     http://localhost:8792/?controller=appliance  # the appliance carries it
     http://localhost:8792/?controller=unknown    # installed somehow; all three paths named
+    http://localhost:8792/?controller=moving     # pinned to a commit, following a moving channel tag
     http://localhost:8792/?controller=none       # an older operator: nothing reported
+
+`moving` is the live shape on the demo: `availableUpdate` is a channel tag
+(`latest`), not a version, so the badge says the channel serves a different
+image instead of offering "latest" as if it were a release.
 
 Nothing in that card is a control, whichever mode is on: the controller is
 updated outside the platform, and a button here could only look like it worked.

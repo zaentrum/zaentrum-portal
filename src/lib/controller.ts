@@ -112,3 +112,34 @@ export function controllerUpdate(c: OperatorController | undefined): string {
   if (!update || update === controllerVersion(c)) return '';
   return update;
 }
+
+// isVersionLike reports whether a value names a release rather than a moving
+// tag: `v` and a digit (v0.5.0), or dotted numbers on their own (1.5.0,
+// 2.0.0-rc1). Everything else — latest, stable, edge — is a name that outlives
+// every image it points at.
+export function isVersionLike(value: string | undefined): boolean {
+  const v = (value ?? '').trim();
+  if (!v) return false;
+  // A leading v and a digit is the release convention, and settles it.
+  if (/^[vV][0-9]/.test(v)) return true;
+  // Otherwise: dotted numbers, with a pre-release or build suffix allowed —
+  // a suffix does not change what the value is.
+  return /^[0-9]+(\.[0-9]+)+([-+].*)?$/.test(v);
+}
+
+// controllerUpdateLabel is what the card says about an update, '' when there
+// is nothing to say.
+//
+// Two different facts arrive in one field and they cannot share a sentence. A
+// version is a point you are on or are not on, so "update available: v0.5.0"
+// is complete. A CHANNEL TAG is not: an install running :sha-19ea431 against a
+// channel serving :latest rendered as "update available: latest", which reads
+// as a version number and names nothing a reader can compare against. The tag
+// has not changed and never will — what it points at has, so that is what the
+// label says.
+export function controllerUpdateLabel(c: OperatorController | undefined): string {
+  const update = controllerUpdate(c);
+  if (!update) return '';
+  if (isVersionLike(update)) return `update available: ${update}`;
+  return `"${update}" serves a different image`;
+}
