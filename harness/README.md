@@ -73,6 +73,23 @@ image instead of offering "latest" as if it were a release.
 Nothing in that card is a control, whichever mode is on: the controller is
 updated outside the platform, and a button here could only look like it worked.
 
+The verification card renders from `operator.verification`, served by a
+stand-in for the operator verifying the platform. Each mode is a record the
+console starts from, and **verify now** plays the whole round trip in any of
+them: the request waits about a second and a half for the operator, the run
+takes four, and the toolbar says how it ended. A request made while a run is
+in progress waits for it, and one made while another waits joins it, as the
+server does:
+
+    http://localhost:8792/                          # failed after the last update (the degraded estate)
+    http://localhost:8792/?verification=passed      # passed, one warning
+    http://localhost:8792/?verification=running     # a run in progress; it ends a few seconds later
+    http://localhost:8792/?verification=requested   # a request waiting for the operator
+    http://localhost:8792/?verification=never       # no run reported, as every older operator
+    http://localhost:8792/?verification=off         # switched off: no button, and the last record
+    http://localhost:8792/?verification=unreadable  # a record portal-api could not read
+    http://localhost:8792/?verification=old         # a portal-api older than the field: no card
+
 The mock keeps its state in memory; restart it for the seeded state.
 
 The registry fixture mirrors what migrations 002/003/004 actually seed — every

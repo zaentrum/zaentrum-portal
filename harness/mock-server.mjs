@@ -81,9 +81,124 @@ const controllers = {
 };
 const controllerMode = (req) => (req.headers.cookie ?? '').match(/(?:^|;\s*)mock-controller=([a-z]*)/)?.[1] ?? '';
 
+// ─── verification ────────────────────────────────────────────────────────────
+//
+// A stand-in for the operator verifying the platform. ?verification= picks the
+// record the console starts from, and "verify now" plays the whole round trip:
+// the request waits VERIFY_WAIT_MS for the operator, the run takes
+// VERIFY_RUN_MS, and it ends the way the mode's record did — failed in the
+// default mode, which matches the degraded estate above. A request made while
+// a run is in progress waits for it; one made while another waits joins it.
+const VERIFY_WAIT_MS = 1500;
+const VERIFY_RUN_MS = 4000;
+const minutesAgo = (m) => new Date(Date.now() - m * 60_000).toISOString();
+
+const checksFor = (result) => [
+  { name: 'workloads ready', status: result === 'Failed' ? 'fail' : 'ok',
+    detail: result === 'Failed' ? '1/14 platform workloads ready — 13 in ImagePullBackOff' : '' },
+  { name: 'portal launchpad', status: 'ok', detail: '' },
+  { name: 'issuer discovery', status: 'warn', detail: 'answered in 1.8 s, over 1 s' },
+  { name: 'katalog-api health', status: result === 'Failed' ? 'fail' : 'ok',
+    detail: result === 'Failed' ? 'GET /actuator/health/readiness: connection refused' : '' },
+  { name: 'event bus', status: 'skip', detail: 'no bus is configured' },
+  ...['chino-api health', 'chino-stream health', 'packager health', 'transcoder health', 'database', 'cache',
+    'tls certificates', 'routes', 'addon registry'].map((name) => ({ name, status: 'ok', detail: '' })),
+];
+
+// ended is a finished record: the counts are the checks', as the operator's are.
+const ended = (result, base) => {
+  const checks = checksFor(result);
+  const count = (s) => checks.filter((c) => c.status === s).length;
+  const failed = count('fail');
+  return {
+    ...base, result, finishedAt: base.finishedAt || new Date().toISOString(),
+    passed: count('ok'), failed, warned: count('warn'), skipped: count('skip'), checks,
+    message: failed ? `${failed} of ${checks.length} checks failed` : `all ${checks.length - count('skip')} checks passed`,
+  };
+};
+const runBase = (trigger, request, startedAt) => ({
+  trigger, request, fingerprint: 'sha256:5626831', version: 'v0.3.0', startedAt, finishedAt: '',
+  job: `zaentrum-verify-${Math.random().toString(36).slice(2, 7)}`,
+});
+const running = (trigger, request) => ({
+  ...runBase(trigger, request, new Date().toISOString()),
+  result: 'Running', passed: 0, failed: 0, warned: 0, skipped: 0, checks: [], message: '',
+});
+
+// The record each mode starts from: the run, the annotation, and how a run
+// asked for in this mode ends.
+const seedVerification = (mode) => {
+  const update = (result, m) => ended(result, { ...runBase('update', '', minutesAgo(m + 2)), finishedAt: minutesAgo(m) });
+  switch (mode) {
+    case 'passed': return { record: update('Passed', 3), annotation: '', ends: 'Passed' };
+    case 'running': return { record: running('update', ''), annotation: '', ends: 'Passed' };
+    case 'requested': return { record: update('Passed', 50), annotation: 'harness-seed', ends: 'Passed' };
+    case 'never': return { record: null, annotation: '', ends: 'Passed' };
+    case 'off': return { record: update('Passed', 3 * 24 * 60), annotation: '', ends: 'Passed', off: true };
+    case 'unreadable': return { record: null, annotation: '', ends: 'Passed', unreadable: true };
+    default: return { record: update('Failed', 12), annotation: '', ends: 'Failed' };
+  }
+};
+
+let verify = null;
+const verificationMode = (req) => (req.headers.cookie ?? '').match(/(?:^|;\s*)mock-verification=([a-z]*)/)?.[1] ?? '';
+
+// verifyState is the stand-in operator, evaluated whenever it is read.
+const verifyState = (mode) => {
+  if (!verify || verify.mode !== mode) verify = { mode, requestedAt: Date.now(), ...seedVerification(mode) };
+  const v = verify;
+  const now = Date.now();
+  if (v.record?.result === 'Running' && now - Date.parse(v.record.startedAt) >= VERIFY_RUN_MS) {
+    v.record = ended(v.ends, { ...v.record, finishedAt: new Date().toISOString() });
+  }
+  const waiting = v.annotation && v.annotation !== v.record?.request;
+  if (waiting && !v.off && v.record?.result !== 'Running' && now - v.requestedAt >= VERIFY_WAIT_MS) {
+    v.record = running('request', v.annotation);
+  }
+  return v;
+};
+
+// verificationView is operator.verification as portal-api answers it.
+const verificationView = (mode) => {
+  const v = verifyState(mode);
+  if (v.unreadable) {
+    return { enabled: true, result: null,
+      note: "the operator's verification record cannot be read: json: cannot unmarshal string into Go struct field verificationRecord.passed of type int" };
+  }
+  const out = { enabled: !v.off, result: v.record ? v.record.result : null };
+  if (v.record) {
+    const { result, ...run } = v.record;
+    Object.assign(out, run);
+    if (result !== 'Running') {
+      out.condition = { status: result === 'Passed' ? 'True' : 'False',
+        reason: result === 'Passed' ? 'ChecksPassed' : 'ChecksFailed', lastTransitionTime: v.record.finishedAt };
+    }
+  }
+  if (v.annotation && v.annotation !== v.record?.request) out.pendingRequest = v.annotation;
+  return out;
+};
+
+// requestVerification answers POST /operator/verify as portal-api does.
+const requestVerification = (req, res) => {
+  const mode = verificationMode(req);
+  if (mode === 'old') return text(res, 404, '404 page not found');
+  const v = verifyState(mode);
+  if (v.off) {
+    return text(res, 409, 'verification is disabled: spec.verification.enabled is false on zaentrum, so the operator runs no checks — enable it to verify the platform');
+  }
+  const waiting = v.annotation && v.annotation !== v.record?.request;
+  if (!waiting) {
+    v.annotation = `harness-${Math.random().toString(36).slice(2, 10)}`;
+    v.requestedAt = Date.now();
+  }
+  console.log(`mock: verification requested — ${waiting ? 'joins' : 'writes'} request ${v.annotation}`);
+  return json(res, 202, { request: v.annotation });
+};
+
 const operatorState = (req) => {
   const mode = controllerMode(req);
   const controller = mode === 'none' ? null : (controllers[mode] ?? controllers.olm);
+  const vmode = verificationMode(req);
   return {
     available: true,
     operator: {
@@ -91,6 +206,8 @@ const operatorState = (req) => {
       components: [], generation: 7, observedGeneration: 7,
       // Absent, not empty: an operator that predates the field sends no key.
       ...(controller ? { controller } : {}),
+      // `old` is a portal-api older than verification, which sends no key.
+      ...(vmode === 'old' ? {} : { verification: verificationView(vmode) }),
     },
     instances,
   };
@@ -513,6 +630,7 @@ createServer(async (req, res) => {
   if (url.startsWith('/api/portal/apps/')) return json(res, 502, { error: 'app unreachable' });
   if (url.startsWith('/api/portal/apps')) return json(res, 200, apps);
   if (url.startsWith('/api/portal/spaces')) return json(res, 200, spaces);
+  if (pathname === '/api/portal/operator/verify' && req.method === 'POST') return requestVerification(req, res);
   if (url.startsWith('/api/portal/operator')) return json(res, 200, operatorState(req));
   if (url.startsWith('/api/portal/addons') && req.method === 'GET') {
     // An older portal-api lists what the registry holds; this one merges the

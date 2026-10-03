@@ -20,6 +20,10 @@ document.cookie = `mock-charts=${params.get('charts') ?? ''}; path=/; SameSite=L
 // reports its own controller — `none` being every operator older than the
 // field, which the console has to render too.
 document.cookie = `mock-controller=${params.get('controller') ?? ''}; path=/; SameSite=Lax`;
+// ?verification=passed|running|requested|never|off|unreadable|old picks the
+// record the platform's verification starts from (failed by default) — `old`
+// being a portal-api older than the field, which sends none.
+document.cookie = `mock-verification=${params.get('verification') ?? ''}; path=/; SameSite=Lax`;
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
