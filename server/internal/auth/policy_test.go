@@ -85,6 +85,11 @@ func TestAddonKeyIsTheServiceAccountsOwn(t *testing.T) {
 			"azp": "chino-web", "preferred_username": "service-account-sample", "realm_access": map[string]any{"roles": []string{"zaentrum-addon"}},
 		}, ""},
 		{"a client id that is no DNS label", authtest.ServiceAccount("Sample.Addon", "zaentrum-addon"), ""},
+		// A token that names no client is nobody's service account, whatever
+		// its username and claims say.
+		{"a token that names no client", map[string]any{
+			"preferred_username": "service-account-", "zaentrum_addon": "sample", "realm_access": map[string]any{"roles": []string{"zaentrum-addon"}},
+		}, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p, ok := signedIn(t, iss, c.claims)

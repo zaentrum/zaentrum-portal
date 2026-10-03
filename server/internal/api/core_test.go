@@ -23,10 +23,12 @@ func TestCoreEntriesCannotBeDeleted(t *testing.T) {
 	e.store.apps["wiki"] = model.App{Key: "wiki", Title: "wiki", Enabled: true}
 	e.store.spaces["scratch"] = model.Space{Key: "scratch", Title: "scratch", Audience: []string{}}
 
+	// The refusal says what to do instead — which the API says itself, before
+	// the store's own guard is reached.
 	for _, c := range []struct{ path, mention string }{
-		{"/api/portal/apps/chino", `app "chino" is a core entry`},
-		{"/api/portal/spaces/apps", `space "apps" is a core entry`},
-		{"/api/portal/spaces/manage", `space "manage" is a core entry`},
+		{"/api/portal/apps/chino", `app "chino" is a core entry of the platform and cannot be deleted — disable it instead`},
+		{"/api/portal/spaces/apps", `space "apps" is a core entry of the platform and cannot be deleted — the seed and every addon place their tiles there`},
+		{"/api/portal/spaces/manage", `space "manage" is a core entry of the platform and cannot be deleted — the seed and every addon place their tiles there`},
 	} {
 		rec := e.do(adminPortal, http.MethodDelete, c.path, nil)
 		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), c.mention) {

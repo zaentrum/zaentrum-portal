@@ -62,7 +62,8 @@ func (p Policy) adminClient(client string) bool {
 // own description says never to — signs in through a person's client, and a
 // service account it is not, so the role buys them nothing here.
 func (p Policy) addonKey(pr *Principal) string {
-	if pr.anonymous || p.AddonRole == "" || !pr.HasRole(p.AddonRole) || !serviceAccount(pr) {
+	// The synthetic dev principal names no client, so it is never one.
+	if p.AddonRole == "" || !pr.HasRole(p.AddonRole) || !serviceAccount(pr) {
 		return ""
 	}
 	key := pr.addonClaim
