@@ -28,7 +28,7 @@ import (
 )
 
 type API struct {
-	st     *store.Store
+	reg    registryStore
 	addons addonStore
 	cfg    config.Config
 	op     *operator.Service
@@ -57,8 +57,31 @@ type addonStore interface {
 	RegistrationErrors(ctx context.Context) (map[string]string, error)
 }
 
+// registryStore is the registry as the launchpad, the registry console, the
+// slot API and the app proxy use it. *store.Store implements it; tests
+// substitute an in-memory one, so the rules those handlers keep are tested
+// without a database.
+type registryStore interface {
+	Launchpad(ctx context.Context) (model.Launchpad, error)
+	ListApps(ctx context.Context) ([]model.App, error)
+	GetApp(ctx context.Context, key string) (*model.App, error)
+	UpsertApp(ctx context.Context, app model.App) error
+	DeleteApp(ctx context.Context, key string) error
+	ListSpaces(ctx context.Context) ([]model.Space, error)
+	UpsertSpace(ctx context.Context, sp model.Space) error
+	DeleteSpace(ctx context.Context, key string) error
+	ListTiles(ctx context.Context) ([]model.Tile, error)
+	UpsertTile(ctx context.Context, t model.Tile) error
+	DeleteTile(ctx context.Context, key string) error
+	ListExtensions(ctx context.Context) ([]model.Extension, error)
+	ListExtensionsForSlot(ctx context.Context, slot string) ([]model.Extension, error)
+	GetExtension(ctx context.Context, key string) (*model.Extension, error)
+	UpsertExtension(ctx context.Context, e model.Extension) error
+	DeleteExtension(ctx context.Context, key string) error
+}
+
 func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap, br *dbbrowse.Browser) *API {
-	a := &API{st: st, addons: st, cfg: cfg, op: op, tap: tap, br: br}
+	a := &API{reg: st, addons: st, cfg: cfg, op: op, tap: tap, br: br}
 	a.registration.kick = make(chan struct{}, 1)
 	if op != nil {
 		a.workloads = op // never a typed nil inside the interface
@@ -356,7 +379,7 @@ func (a *API) operatorReady(w http.ResponseWriter) bool {
 // ─── reads ───────────────────────────────────────────────────────────────────
 
 func (a *API) launchpad(w http.ResponseWriter, r *http.Request) {
-	lp, err := a.st.Launchpad(r.Context())
+	lp, err := a.reg.Launchpad(r.Context())
 	if err != nil {
 		serverError(w, err)
 		return
@@ -383,7 +406,7 @@ func (a *API) me(w http.ResponseWriter, r *http.Request) {
 // ─── apps ────────────────────────────────────────────────────────────────────
 
 func (a *API) listApps(w http.ResponseWriter, r *http.Request) {
-	apps, err := a.st.ListApps(r.Context())
+	apps, err := a.reg.ListApps(r.Context())
 	if err != nil {
 		serverError(w, err)
 		return
@@ -403,7 +426,7 @@ func (a *API) upsertApp(w http.ResponseWriter, r *http.Request) {
 	if app.Kind == "" {
 		app.Kind = "tool"
 	}
-	if err := a.st.UpsertApp(r.Context(), app); err != nil {
+	if err := a.reg.UpsertApp(r.Context(), app); err != nil {
 		serverError(w, err)
 		return
 	}
@@ -423,7 +446,7 @@ func (a *API) patchApp(w http.ResponseWriter, r *http.Request) {
 	if app.Kind == "" {
 		app.Kind = "tool"
 	}
-	if err := a.st.UpsertApp(r.Context(), app); err != nil {
+	if err := a.reg.UpsertApp(r.Context(), app); err != nil {
 		serverError(w, err)
 		return
 	}
@@ -431,7 +454,7 @@ func (a *API) patchApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) deleteApp(w http.ResponseWriter, r *http.Request) {
-	a.handleDelete(w, a.st.DeleteApp(r.Context(), chi.URLParam(r, "key")))
+	a.handleDelete(w, a.reg.DeleteApp(r.Context(), chi.URLParam(r, "key")))
 }
 
 // ─── UI extensions ─────────────────────────────────────────────────────────
@@ -439,7 +462,7 @@ func (a *API) deleteApp(w http.ResponseWriter, r *http.Request) {
 // slotExtensions serves the enabled contributions for one slot (product-app
 // read path — any signed-in user).
 func (a *API) slotExtensions(w http.ResponseWriter, r *http.Request) {
-	exts, err := a.st.ListExtensionsForSlot(r.Context(), chi.URLParam(r, "slot"))
+	exts, err := a.reg.ListExtensionsForSlot(r.Context(), chi.URLParam(r, "slot"))
 	if err != nil {
 		serverError(w, err)
 		return
@@ -448,7 +471,7 @@ func (a *API) slotExtensions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) listExtensions(w http.ResponseWriter, r *http.Request) {
-	exts, err := a.st.ListExtensions(r.Context())
+	exts, err := a.reg.ListExtensions(r.Context())
 	if err != nil {
 		serverError(w, err)
 		return
@@ -464,7 +487,7 @@ func (a *API) upsertExtension(w http.ResponseWriter, r *http.Request) {
 	if !validExtension(w, e, true) {
 		return
 	}
-	if err := a.st.UpsertExtension(r.Context(), normExtension(e)); err != nil {
+	if err := a.reg.UpsertExtension(r.Context(), normExtension(e)); err != nil {
 		serverError(w, err)
 		return
 	}
@@ -480,7 +503,7 @@ func (a *API) patchExtension(w http.ResponseWriter, r *http.Request) {
 	if !validExtension(w, e, false) {
 		return
 	}
-	if err := a.st.UpsertExtension(r.Context(), normExtension(e)); err != nil {
+	if err := a.reg.UpsertExtension(r.Context(), normExtension(e)); err != nil {
 		serverError(w, err)
 		return
 	}
@@ -488,7 +511,7 @@ func (a *API) patchExtension(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) deleteExtension(w http.ResponseWriter, r *http.Request) {
-	a.handleDelete(w, a.st.DeleteExtension(r.Context(), chi.URLParam(r, "key")))
+	a.handleDelete(w, a.reg.DeleteExtension(r.Context(), chi.URLParam(r, "key")))
 }
 
 // validExtension enforces the required fields and the kind enum. requireKey is
@@ -523,7 +546,7 @@ func normExtension(e model.Extension) model.Extension {
 // ─── spaces ──────────────────────────────────────────────────────────────────
 
 func (a *API) listSpaces(w http.ResponseWriter, r *http.Request) {
-	spaces, err := a.st.ListSpaces(r.Context())
+	spaces, err := a.reg.ListSpaces(r.Context())
 	if err != nil {
 		serverError(w, err)
 		return
@@ -540,7 +563,7 @@ func (a *API) upsertSpace(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "space requires key and title")
 		return
 	}
-	if err := a.st.UpsertSpace(r.Context(), sp); err != nil {
+	if err := a.reg.UpsertSpace(r.Context(), sp); err != nil {
 		serverError(w, err)
 		return
 	}
@@ -557,7 +580,7 @@ func (a *API) patchSpace(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "space requires title")
 		return
 	}
-	if err := a.st.UpsertSpace(r.Context(), sp); err != nil {
+	if err := a.reg.UpsertSpace(r.Context(), sp); err != nil {
 		serverError(w, err)
 		return
 	}
@@ -565,13 +588,13 @@ func (a *API) patchSpace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) deleteSpace(w http.ResponseWriter, r *http.Request) {
-	a.handleDelete(w, a.st.DeleteSpace(r.Context(), chi.URLParam(r, "key")))
+	a.handleDelete(w, a.reg.DeleteSpace(r.Context(), chi.URLParam(r, "key")))
 }
 
 // ─── tiles ───────────────────────────────────────────────────────────────────
 
 func (a *API) listTiles(w http.ResponseWriter, r *http.Request) {
-	tiles, err := a.st.ListTiles(r.Context())
+	tiles, err := a.reg.ListTiles(r.Context())
 	if err != nil {
 		serverError(w, err)
 		return
@@ -587,7 +610,7 @@ func (a *API) upsertTile(w http.ResponseWriter, r *http.Request) {
 	if !a.validTile(w, t, false) {
 		return
 	}
-	if err := a.st.UpsertTile(r.Context(), t); err != nil {
+	if err := a.reg.UpsertTile(r.Context(), t); err != nil {
 		a.tileWriteError(w, err)
 		return
 	}
@@ -603,7 +626,7 @@ func (a *API) patchTile(w http.ResponseWriter, r *http.Request) {
 	if !a.validTile(w, t, true) {
 		return
 	}
-	if err := a.st.UpsertTile(r.Context(), t); err != nil {
+	if err := a.reg.UpsertTile(r.Context(), t); err != nil {
 		a.tileWriteError(w, err)
 		return
 	}
@@ -611,7 +634,7 @@ func (a *API) patchTile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) deleteTile(w http.ResponseWriter, r *http.Request) {
-	a.handleDelete(w, a.st.DeleteTile(r.Context(), chi.URLParam(r, "key")))
+	a.handleDelete(w, a.reg.DeleteTile(r.Context(), chi.URLParam(r, "key")))
 }
 
 func (a *API) validTile(w http.ResponseWriter, t model.Tile, patch bool) bool {
@@ -810,9 +833,9 @@ func (a *API) supportBundle(w http.ResponseWriter, r *http.Request) {
 		sections["config"] = a.configSummary()
 	}
 	if on("registry") {
-		apps, _ := a.st.ListApps(ctx)
-		spaces, _ := a.st.ListSpaces(ctx)
-		tiles, _ := a.st.ListTiles(ctx)
+		apps, _ := a.reg.ListApps(ctx)
+		spaces, _ := a.reg.ListSpaces(ctx)
+		tiles, _ := a.reg.ListTiles(ctx)
 		sections["registry"] = map[string]any{
 			"apps": nonNil(apps), "spaces": nonNil(spaces), "tiles": nonNil(tiles),
 		}

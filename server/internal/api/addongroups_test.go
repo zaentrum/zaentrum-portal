@@ -405,10 +405,21 @@ type fakeAddonStore struct {
 	removal   store.AddonRemoval
 	mu        sync.Mutex
 	regErrors map[string]string
+
+	// The rest of the registry, for the handlers registry_fake_test.go
+	// serves from it.
+	spaces     map[string]model.Space
+	tiles      map[string]model.Tile
+	extensions map[string]model.Extension
 }
 
 func newFakeStore() *fakeAddonStore {
-	return &fakeAddonStore{apps: map[string]model.App{}, addons: map[string]model.Addon{}, claims: map[string]string{}, regErrors: map[string]string{}}
+	return &fakeAddonStore{
+		apps: map[string]model.App{}, addons: map[string]model.Addon{}, claims: map[string]string{}, regErrors: map[string]string{},
+		spaces:     map[string]model.Space{"apps": {Key: "apps", Title: "apps"}},
+		tiles:      map[string]model.Tile{},
+		extensions: map[string]model.Extension{},
+	}
 }
 
 func (f *fakeAddonStore) SetRegistrationError(_ context.Context, name, msg string) error {
@@ -437,6 +448,7 @@ func (f *fakeAddonStore) ListApps(context.Context) ([]model.App, error) {
 	for _, a := range f.apps {
 		out = append(out, a)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
 }
 
@@ -448,7 +460,17 @@ func (f *fakeAddonStore) GetApp(_ context.Context, key string) (*model.App, erro
 }
 
 func (f *fakeAddonStore) ListSpaces(context.Context) ([]model.Space, error) {
-	return []model.Space{{Key: "apps", Title: "apps"}}, nil
+	out := make([]model.Space, 0, len(f.spaces))
+	for _, sp := range f.spaces {
+		out = append(out, sp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Order != out[j].Order {
+			return out[i].Order < out[j].Order
+		}
+		return out[i].Key < out[j].Key
+	})
+	return out, nil
 }
 
 func (f *fakeAddonStore) ListAddons(context.Context) ([]model.Addon, error) {

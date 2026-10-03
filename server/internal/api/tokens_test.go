@@ -41,7 +41,7 @@ func newTokenEnv(t *testing.T) *tokenEnv {
 	}
 	st := newFakeStore()
 	op := operator.New(kube.Client("zaentrum"), cfg)
-	a := &API{addons: st, cfg: cfg, op: op, charts: op, workloads: op}
+	a := &API{reg: st, addons: st, cfg: cfg, op: op, charts: op, workloads: op}
 	a.registration.kick = make(chan struct{}, 1)
 	jwt, err := auth.NewJWTVerifier(context.Background(), iss.URL, "", cfg.AdminRole, false, false)
 	if err != nil {
@@ -123,6 +123,9 @@ func TestMeSaysWhetherTheConsoleIsTheCallers(t *testing.T) {
 func TestAdminRoutesTakeOnlyThePortalsClients(t *testing.T) {
 	e := newTokenEnv(t)
 	routes := []struct{ method, path string }{
+		{http.MethodGet, "/api/portal/apps"},
+		{http.MethodGet, "/api/portal/spaces"},
+		{http.MethodGet, "/api/portal/tiles"},
 		{http.MethodGet, "/api/portal/operator"},
 		{http.MethodGet, "/api/portal/addons"},
 		{http.MethodGet, "/api/portal/addon-charts"},
@@ -151,5 +154,24 @@ func TestAdminRoutesTakeOnlyThePortalsClients(t *testing.T) {
 	rec := e.do(adminMedia, http.MethodGet, "/api/portal/addons", nil)
 	if !strings.Contains(rec.Body.String(), `"chino-web"`) {
 		t.Errorf("refusal = %q", rec.Body)
+	}
+}
+
+// What anyone signed in may read stays readable with any client's token —
+// above all the slot rows chino-api reads with its user's media-app token.
+func TestReadsTakeAnySignedInUser(t *testing.T) {
+	e := newTokenEnv(t)
+	for _, path := range []string{"/api/portal/launchpad", "/api/portal/me", "/api/portal/slots/search.empty"} {
+		for name, claims := range map[string]map[string]any{
+			"viewer through the media app": viewerMedia, "viewer through the portal": viewerPortal,
+			"admin through the media app": adminMedia, "admin through the portal": adminPortal,
+		} {
+			if rec := e.do(claims, http.MethodGet, path, nil); rec.Code != http.StatusOK {
+				t.Errorf("GET %s as %s = %d %s", path, name, rec.Code, rec.Body)
+			}
+		}
+		if rec := e.do(nil, http.MethodGet, path, nil); rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET %s without a bearer = %d", path, rec.Code)
+		}
 	}
 }

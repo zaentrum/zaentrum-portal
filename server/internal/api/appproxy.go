@@ -49,7 +49,7 @@ const proxyTimeout = 60 * time.Second
 // address from the registry.
 func (a *API) appProxy(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
-	app, err := a.st.GetApp(r.Context(), key)
+	app, err := a.reg.GetApp(r.Context(), key)
 	if err != nil || app == nil {
 		writeErr(w, http.StatusNotFound, "no such app")
 		return

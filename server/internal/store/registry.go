@@ -192,9 +192,7 @@ func (s *Store) DeleteTile(ctx context.Context, key string) error {
 // ─── Launchpad assembly ──────────────────────────────────────────────────────
 
 // Launchpad assembles the ordered spaces with their tiles resolved for
-// rendering. A tile whose app is disabled, or that is itself disabled, or that
-// resolves to no destination, is included but marked Disabled (so "coming soon"
-// cards keep showing). Spaces with no tiles are omitted.
+// rendering (AssembleLaunchpad).
 func (s *Store) Launchpad(ctx context.Context) (model.Launchpad, error) {
 	spaces, err := s.ListSpaces(ctx)
 	if err != nil {
@@ -204,13 +202,22 @@ func (s *Store) Launchpad(ctx context.Context) (model.Launchpad, error) {
 	if err != nil {
 		return model.Launchpad{}, err
 	}
-	byApp := make(map[string]model.App, len(apps))
-	for _, a := range apps {
-		byApp[a.Key] = a
-	}
 	tiles, err := s.ListTiles(ctx)
 	if err != nil {
 		return model.Launchpad{}, err
+	}
+	return AssembleLaunchpad(spaces, apps, tiles), nil
+}
+
+// AssembleLaunchpad resolves the registry rows into the launchpad: the ordered
+// spaces with their tiles. A tile whose app is disabled, or that is itself
+// disabled, or that resolves to no destination, is included but marked
+// Disabled (so "coming soon" cards keep showing). Spaces with no tiles are
+// omitted. Pure, so the rule is tested without a database.
+func AssembleLaunchpad(spaces []model.Space, apps []model.App, tiles []model.Tile) model.Launchpad {
+	byApp := make(map[string]model.App, len(apps))
+	for _, a := range apps {
+		byApp[a.Key] = a
 	}
 
 	bySpace := make(map[string][]model.LaunchTile)
@@ -256,7 +263,7 @@ func (s *Store) Launchpad(ctx context.Context) (model.Launchpad, error) {
 			Key: sp.Key, Title: sp.Title, Order: sp.Order, Tiles: ts,
 		})
 	}
-	return lp, nil
+	return lp
 }
 
 // computeHref joins an app base_url with a tile target. An absolute or
@@ -359,6 +366,18 @@ func (s *Store) ListExtensionsForSlot(ctx context.Context, slot string) ([]model
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// GetExtension returns one contribution, enabled or not.
+func (s *Store) GetExtension(ctx context.Context, key string) (*model.Extension, error) {
+	e, err := scanExtension(s.pool.QueryRow(ctx, `SELECT `+extCols+` FROM ui_extensions WHERE key=$1`, key))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
 }
 
 func (s *Store) UpsertExtension(ctx context.Context, e model.Extension) error {
