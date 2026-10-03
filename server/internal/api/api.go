@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -477,11 +478,96 @@ func (a *API) slotExtensions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// The extension routes take an admin, who manages every row, or an addon's
+// service account, which manages its own addon's rows and nothing else: rows
+// keyed <addon>.<name> that carry its addon, that no one else owns, of an
+// addon installed here — and whose actions lead to its own API. An addon
+// writing another's rows, or a row an admin made by hand, is refused.
+
+// extensionCaller is the addon a caller of the extension routes writes for —
+// "" for an admin — and false for a caller who is neither.
+func extensionCaller(r *http.Request) (addon string, ok bool) {
+	p, _ := auth.PrincipalFrom(r.Context())
+	switch {
+	case p == nil:
+		return "", false
+	case p.Admin:
+		return "", true
+	case p.Addon != "":
+		return p.Addon, true
+	}
+	return "", false
+}
+
+// errNotTheAddons refuses an addon a row that is not its own.
+type errNotTheAddons struct{ msg string }
+
+func (e *errNotTheAddons) Error() string { return e.msg }
+
+func notTheAddons(format string, args ...any) error {
+	return &errNotTheAddons{msg: "forbidden: " + fmt.Sprintf(format, args...)}
+}
+
+// addonMayWrite checks that row is addon's to write.
+func (a *API) addonMayWrite(ctx context.Context, addon string, row model.Extension) error {
+	switch {
+	case row.Addon != "" && row.Addon != addon:
+		return notTheAddons("this token is addon %q's, and the row names addon %q — an addon writes its own rows", addon, row.Addon)
+	case !strings.HasPrefix(row.Key, addon+"."):
+		return notTheAddons("addon %q's rows are keyed %s.<name>; %q is not", addon, addon, row.Key)
+	}
+	switch existing, err := a.reg.GetExtension(ctx, row.Key); {
+	case err == nil && existing.Addon != addon:
+		return notTheAddons("row %q is not addon %q's — it belongs to %s", row.Key, addon, ownerOf(existing))
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return err
+	}
+	switch _, err := a.reg.GetApp(ctx, addon); {
+	case errors.Is(err, store.ErrNotFound):
+		return notTheAddons("addon %q is not installed on this instance — an admin adds it in settings → addons; its service account then keeps its own rows", addon)
+	case err != nil:
+		return err
+	}
+	return nil
+}
+
+func ownerOf(e *model.Extension) string {
+	if e.Addon == "" {
+		return "no addon: an admin made it"
+	}
+	return "addon " + strconv.Quote(e.Addon)
+}
+
+// extensionRefused answers a refused write: 403 for a row that is not the
+// caller's, 500 for a registry that did not answer.
+func extensionRefused(w http.ResponseWriter, err error) {
+	var nt *errNotTheAddons
+	if errors.As(err, &nt) {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	serverError(w, err)
+}
+
 func (a *API) listExtensions(w http.ResponseWriter, r *http.Request) {
+	addon, ok := extensionCaller(r)
+	if !ok {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	exts, err := a.reg.ListExtensions(r.Context())
 	if err != nil {
 		serverError(w, err)
 		return
+	}
+	if addon != "" {
+		own := exts[:0:0]
+		for _, e := range exts {
+			if e.Addon == addon {
+				own = append(own, e)
+			}
+		}
+		exts = own
 	}
 	writeJSON(w, http.StatusOK, nonNil(exts))
 }
@@ -506,6 +592,11 @@ func (a *API) patchExtension(w http.ResponseWriter, r *http.Request) {
 // writeExtension checks a row and stores it. requireKey is true on create
 // (POST) — PATCH takes the key from the path.
 func (a *API) writeExtension(w http.ResponseWriter, r *http.Request, e model.Extension, requireKey bool) {
+	addon, ok := extensionCaller(r)
+	if !ok {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	if requireKey && strings.TrimSpace(e.Key) == "" {
 		badRequest(w, "extension requires key")
 		return
@@ -514,7 +605,15 @@ func (a *API) writeExtension(w http.ResponseWriter, r *http.Request, e model.Ext
 		badRequest(w, "extension requires slot")
 		return
 	}
-	e, err := checkSlot(e, a.instanceOrigins(r), "")
+	actions := ""
+	if addon != "" {
+		if err := a.addonMayWrite(r.Context(), addon, e); err != nil {
+			extensionRefused(w, err)
+			return
+		}
+		e.Addon, actions = addon, proxyPath(addon)
+	}
+	e, err := checkSlot(e, a.instanceOrigins(r), actions)
 	if err != nil {
 		badRequest(w, "extension "+err.Error())
 		return
@@ -527,7 +626,27 @@ func (a *API) writeExtension(w http.ResponseWriter, r *http.Request, e model.Ext
 }
 
 func (a *API) deleteExtension(w http.ResponseWriter, r *http.Request) {
-	a.handleDelete(w, a.reg.DeleteExtension(r.Context(), chi.URLParam(r, "key")))
+	addon, ok := extensionCaller(r)
+	if !ok {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	key := chi.URLParam(r, "key")
+	if addon != "" {
+		existing, err := a.reg.GetExtension(r.Context(), key)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		case err != nil:
+			serverError(w, err)
+			return
+		case existing.Addon != addon || !strings.HasPrefix(key, addon+"."):
+			extensionRefused(w, notTheAddons("row %q is not addon %q's — it belongs to %s", key, addon, ownerOf(existing)))
+			return
+		}
+	}
+	a.handleDelete(w, a.reg.DeleteExtension(r.Context(), key))
 }
 
 // ─── spaces ──────────────────────────────────────────────────────────────────
