@@ -86,13 +86,16 @@ type ManifestUI struct {
 		Ord         int    `json:"ord"`
 	} `json:"tiles,omitempty"`
 	Slots []struct {
-		Key    string `json:"key"` // addon-local; stored as <addon>.<key>
-		Slot   string `json:"slot"`
-		Kind   string `json:"kind"`
-		Label  string `json:"label"`
-		Icon   string `json:"icon"`
-		URL    string `json:"url"` // relative to the portal origin, {q} etc. allowed
-		Method string `json:"method,omitempty"`
+		Key   string `json:"key"` // addon-local; stored as <addon>.<key>
+		Slot  string `json:"slot"`
+		Kind  string `json:"kind"` // link | action (slots.go)
+		Label string `json:"label"`
+		Icon  string `json:"icon"`
+		// URL is a path on the portal's origin, {q} etc. allowed — or an
+		// absolute URL on that origin. An action's leads to the addon's own
+		// API: /api/portal/apps/<addon>/….
+		URL    string `json:"url"`
+		Method string `json:"method,omitempty"` // POST, or empty
 		Ord    int    `json:"ord"`
 	} `json:"slots"`
 }
@@ -435,7 +438,10 @@ func canonicalManifest(d Descriptor) ([]byte, string) {
 // are relative to the portal ("/portal/app/<key>?q={q}") because an addon does
 // not know where it is installed; product apps may live on other hosts and
 // render rows as plain links, so the platform absolutises them here, at the
-// one moment it knows both.
+// one moment it knows both. A manifest's slot rows obey the slot rules
+// (slots.go) — an absolute URL is accepted on origin only, and an action
+// leads to the addon's own API — and one that breaks them refuses the
+// manifest rather than being dropped, so the admin sees why.
 func planAddon(proxyURL string, d Descriptor, spaceKey, origin string) (addonPlan, error) {
 	key := strings.TrimSpace(d.Service)
 	if key == "" {
@@ -524,26 +530,33 @@ func planAddon(proxyURL string, d Descriptor, spaceKey, origin string) (addonPla
 		plan.Tiles = append(plan.Tiles, tile(addonTilePrefix+key, title, desc, icon, "/portal/app/"+key, 900))
 	}
 	if ui != nil {
-		for _, s := range ui.Slots {
-			if s.Slot == "" || s.Label == "" {
-				continue // a contribution with nowhere to go or nothing to say
+		var origins []string
+		if origin != "" {
+			o, err := normaliseOrigin(origin)
+			if err != nil {
+				return addonPlan{}, fmt.Errorf("the portal's public origin: %w", err)
 			}
-			kind := s.Kind
-			if kind == "" {
-				kind = "link"
+			origin, origins = o, []string{o}
+		}
+		for i, s := range ui.Slots {
+			if s.Slot == "" || s.Label == "" || strings.TrimSpace(s.URL) == "" {
+				continue // a contribution with nowhere to go or nothing to say
 			}
 			local := s.Key
 			if local == "" {
 				local = s.Slot
 			}
-			u := s.URL
-			if strings.HasPrefix(u, "/") && origin != "" {
-				u = strings.TrimRight(origin, "/") + u
+			row, err := checkSlot(model.Extension{
+				Key: key + "." + local, Addon: key, Slot: s.Slot, Kind: s.Kind,
+				Label: s.Label, Icon: s.Icon, URL: s.URL, Method: s.Method, Order: s.Ord, Enabled: true,
+			}, origins, proxyPath(key))
+			if err != nil {
+				return addonPlan{}, invalid("ui.slots[%d]: %v", i, err)
 			}
-			plan.Rows = append(plan.Rows, model.Extension{
-				Key: key + "." + local, Addon: key, Slot: s.Slot, Kind: kind,
-				Label: s.Label, Icon: s.Icon, URL: u, Method: s.Method, Order: s.Ord, Enabled: true,
-			})
+			if strings.HasPrefix(row.URL, "/") && origin != "" {
+				row.URL = origin + row.URL
+			}
+			plan.Rows = append(plan.Rows, row)
 		}
 	}
 	return plan, nil
@@ -810,8 +823,23 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request) {
 	if space == "" {
 		space = a.defaultSpace(ctx)
 	}
+	// The origin slot URLs are made absolute with is the instance's own: the
+	// one this request came in on, or publicBase for a scripted install from
+	// inside the cluster — which, when the platform names its hostname, must
+	// be that one.
 	origin := strings.TrimSpace(body.PublicBase)
-	if origin == "" {
+	if origin != "" {
+		o, err := normaliseOrigin(origin)
+		if err != nil {
+			badRequest(w, "publicBase: "+err.Error())
+			return
+		}
+		if own := a.platformOrigin(ctx); own != "" && o != own {
+			badRequest(w, fmt.Sprintf("publicBase %s is not this platform's origin, %s", o, own))
+			return
+		}
+		origin = o
+	} else {
 		origin = requestOrigin(r)
 	}
 	plan, err := planAddon(proxyURL, d, space, origin)

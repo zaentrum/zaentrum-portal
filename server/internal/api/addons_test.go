@@ -173,14 +173,20 @@ func TestFetchManifestDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
-func TestPlanAddonKeepsAbsoluteSlotURLs(t *testing.T) {
-	m := `{"service":"ext","ui":{"slots":[{"slot":"search.empty","label":"go","url":"https://elsewhere.svc/x"}]}}`
+// An absolute slot URL on the portal's own origin passes through untouched;
+// one on any other host refuses the manifest (slots_test.go has the rules).
+func TestPlanAddonKeepsAbsoluteSlotURLsOnItsOrigin(t *testing.T) {
+	m := `{"service":"ext","ui":{"slots":[{"slot":"search.empty","label":"go","url":"https://media.example.org/portal/app/ext?q={q}"}]}}`
 	plan, err := planAddon("http://ext", decodeManifest(t, m), "apps", "https://media.example.org")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Rows[0].URL != "https://elsewhere.svc/x" {
-		t.Errorf("absolute URLs must pass through untouched, got %q", plan.Rows[0].URL)
+	if plan.Rows[0].URL != "https://media.example.org/portal/app/ext?q={q}" {
+		t.Errorf("an absolute URL on the origin must pass through untouched, got %q", plan.Rows[0].URL)
+	}
+	m = `{"service":"ext","ui":{"slots":[{"slot":"search.empty","label":"go","url":"https://elsewhere.svc/x"}]}}`
+	if _, err := planAddon("http://ext", decodeManifest(t, m), "apps", "https://media.example.org"); err == nil || !strings.Contains(err.Error(), "not to this instance") {
+		t.Errorf("an absolute URL on another host must refuse the manifest, got %v", err)
 	}
 }
 

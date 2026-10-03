@@ -460,14 +460,21 @@ func (a *API) deleteApp(w http.ResponseWriter, r *http.Request) {
 // ─── UI extensions ─────────────────────────────────────────────────────────
 
 // slotExtensions serves the enabled contributions for one slot (product-app
-// read path — any signed-in user).
+// read path — any signed-in user). A row written before the slot rules that
+// breaks them is not served (servable).
 func (a *API) slotExtensions(w http.ResponseWriter, r *http.Request) {
 	exts, err := a.reg.ListExtensionsForSlot(r.Context(), chi.URLParam(r, "slot"))
 	if err != nil {
 		serverError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nonNil(exts))
+	out := make([]model.Extension, 0, len(exts))
+	for _, e := range exts {
+		if e, ok := servable(e); ok {
+			out = append(out, e)
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (a *API) listExtensions(w http.ResponseWriter, r *http.Request) {
@@ -484,14 +491,7 @@ func (a *API) upsertExtension(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &e) {
 		return
 	}
-	if !validExtension(w, e, true) {
-		return
-	}
-	if err := a.reg.UpsertExtension(r.Context(), normExtension(e)); err != nil {
-		serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, normExtension(e))
+	a.writeExtension(w, r, e, true)
 }
 
 func (a *API) patchExtension(w http.ResponseWriter, r *http.Request) {
@@ -500,47 +500,34 @@ func (a *API) patchExtension(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e.Key = chi.URLParam(r, "key")
-	if !validExtension(w, e, false) {
+	a.writeExtension(w, r, e, false)
+}
+
+// writeExtension checks a row and stores it. requireKey is true on create
+// (POST) — PATCH takes the key from the path.
+func (a *API) writeExtension(w http.ResponseWriter, r *http.Request, e model.Extension, requireKey bool) {
+	if requireKey && strings.TrimSpace(e.Key) == "" {
+		badRequest(w, "extension requires key")
 		return
 	}
-	if err := a.reg.UpsertExtension(r.Context(), normExtension(e)); err != nil {
+	if strings.TrimSpace(e.Slot) == "" {
+		badRequest(w, "extension requires slot")
+		return
+	}
+	e, err := checkSlot(e, a.instanceOrigins(r), "")
+	if err != nil {
+		badRequest(w, "extension "+err.Error())
+		return
+	}
+	if err := a.reg.UpsertExtension(r.Context(), e); err != nil {
 		serverError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, normExtension(e))
+	writeJSON(w, http.StatusOK, e)
 }
 
 func (a *API) deleteExtension(w http.ResponseWriter, r *http.Request) {
 	a.handleDelete(w, a.reg.DeleteExtension(r.Context(), chi.URLParam(r, "key")))
-}
-
-// validExtension enforces the required fields and the kind enum. requireKey is
-// true on create (POST) — PATCH takes the key from the path.
-func validExtension(w http.ResponseWriter, e model.Extension, requireKey bool) bool {
-	if requireKey && strings.TrimSpace(e.Key) == "" {
-		badRequest(w, "extension requires key")
-		return false
-	}
-	if strings.TrimSpace(e.Slot) == "" {
-		badRequest(w, "extension requires slot")
-		return false
-	}
-	if e.Kind != "" && e.Kind != "link" && e.Kind != "action" {
-		badRequest(w, "extension kind must be 'link' or 'action'")
-		return false
-	}
-	return true
-}
-
-// normExtension fills defaults (kind=link, method=POST).
-func normExtension(e model.Extension) model.Extension {
-	if e.Kind == "" {
-		e.Kind = "link"
-	}
-	if e.Method == "" {
-		e.Method = "POST"
-	}
-	return e
 }
 
 // ─── spaces ──────────────────────────────────────────────────────────────────

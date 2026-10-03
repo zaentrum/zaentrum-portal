@@ -337,14 +337,25 @@ func (a *API) setListError(err error) {
 // the origin an admin last reached the chart endpoints on, else none — the
 // URLs then stay relative.
 func (a *API) publicOrigin(ctx context.Context) string {
-	if a.charts != nil {
-		if info, err := a.charts.OperatorInfo(ctx); err == nil && info.Present && info.Hostname != "" {
-			return "https://" + info.Hostname
-		}
+	if own := a.platformOrigin(ctx); own != "" {
+		return own
 	}
 	a.registration.stateMu.Lock()
 	defer a.registration.stateMu.Unlock()
 	return a.registration.origin
+}
+
+// platformOrigin is the origin the platform's Zaentrum resource names — its
+// hostname, served over https — or "" when there is no operator to say.
+func (a *API) platformOrigin(ctx context.Context) string {
+	if a.charts != nil && a.charts.Available() {
+		if info, err := a.charts.OperatorInfo(ctx); err == nil && info.Present && info.Hostname != "" {
+			if o, err := normaliseOrigin("https://" + info.Hostname); err == nil {
+				return o
+			}
+		}
+	}
+	return ""
 }
 
 // ─── the addons list ─────────────────────────────────────────────────────────
