@@ -206,6 +206,11 @@ type OperatorInfo struct {
 	// operator does not report it" — every operator older than the field —
 	// from "reported, and empty". The two need different words on screen.
 	Controller *Controller `json:"controller,omitempty"`
+	// Verification is the platform checking itself: the run the operator last
+	// recorded, whether it runs one at all, and a request still waiting. Set
+	// whenever the operator is present — a null result is how "never" is
+	// said — and omitted when there is no operator to ask.
+	Verification *Verification `json:"verification,omitempty"`
 	// Note surfaces a hint when the CR is absent or unreadable (e.g. demo mode).
 	Note string `json:"note,omitempty"`
 }
@@ -338,6 +343,10 @@ type zaentrumCR struct {
 	Metadata struct {
 		Name       string `json:"name"`
 		Generation int64  `json:"generation"`
+		// ResourceVersion is what a conditional write names; Annotations
+		// carry the verify request.
+		ResourceVersion string            `json:"resourceVersion"`
+		Annotations     map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Spec struct {
 		Channel  string `json:"channel"`
@@ -346,6 +355,11 @@ type zaentrumCR struct {
 		Update   struct {
 			Mode string `json:"mode"`
 		} `json:"update"`
+		// Verification.Enabled is nil when the spec says nothing — the
+		// operator's default, which is on.
+		Verification struct {
+			Enabled *bool `json:"enabled"`
+		} `json:"verification"`
 	} `json:"spec"`
 	Status struct {
 		Phase              string `json:"phase"`
@@ -367,7 +381,21 @@ type zaentrumCR struct {
 			AvailableUpdate string `json:"availableUpdate"`
 			ObservedAt      string `json:"observedAt"`
 		} `json:"controller"`
+		// Verification is kept raw here and read on its own (verificationOf),
+		// so that a record this portal cannot read costs the console that
+		// record and nothing else — not the scale, restart and update buttons
+		// beside it.
+		Verification json.RawMessage `json:"verification"`
+		Conditions   []condition     `json:"conditions"`
 	} `json:"status"`
+}
+
+// condition is a status condition, as much of one as the console reads.
+type condition struct {
+	Type               string `json:"type"`
+	Status             string `json:"status"`
+	Reason             string `json:"reason"`
+	LastTransitionTime string `json:"lastTransitionTime"`
 }
 
 // OperatorInfo returns the Zaentrum CR summary, or {Present:false} + a note when the
@@ -376,25 +404,36 @@ func (s *Service) OperatorInfo(ctx context.Context) (OperatorInfo, error) {
 	return s.operatorInfo(ctx)
 }
 
-func (s *Service) operatorInfo(ctx context.Context) (OperatorInfo, error) {
+// zaentrum reads the operator's resource — the first Zaentrum in the
+// namespace. When there is none to read it answers nil and a note saying why,
+// which is never an error: no operator is a way to run the platform.
+func (s *Service) zaentrum(ctx context.Context) (*zaentrumCR, string) {
 	if !s.k8s.InCluster() {
-		return OperatorInfo{Present: false, Note: "not running in a cluster"}, nil
+		return nil, "not running in a cluster"
 	}
 	raw, err := s.k8s.GetResourceList(ctx, s.cfg.OperatorGroup, s.cfg.OperatorVersion, s.cfg.OperatorPlural)
 	if err != nil {
 		if k8s.IsNotFound(err) {
-			return OperatorInfo{Present: false, Note: "no operator detected — managing deployments directly"}, nil
+			return nil, "no operator detected — managing deployments directly"
 		}
 		if k8s.IsForbidden(err) {
-			return OperatorInfo{Present: false, Note: "operator status not readable (insufficient permissions)"}, nil
+			return nil, "operator status not readable (insufficient permissions)"
 		}
-		return OperatorInfo{Present: false, Note: "operator status unavailable"}, nil
+		return nil, "operator status unavailable"
 	}
 	var list zaentrumList
 	if err := json.Unmarshal(raw, &list); err != nil || len(list.Items) == 0 {
-		return OperatorInfo{Present: false, Note: "no operator instance found"}, nil
+		return nil, "no operator instance found"
 	}
-	it := list.Items[0]
+	return &list.Items[0], ""
+}
+
+func (s *Service) operatorInfo(ctx context.Context) (OperatorInfo, error) {
+	cr, note := s.zaentrum(ctx)
+	if cr == nil {
+		return OperatorInfo{Present: false, Note: note}, nil
+	}
+	it := *cr
 	comps := make([]Component, 0, len(it.Status.Components))
 	for _, c := range it.Status.Components {
 		comps = append(comps, Component{Name: c.Name, Ready: c.Ready, Image: c.Image})
@@ -413,6 +452,7 @@ func (s *Service) operatorInfo(ctx context.Context) (OperatorInfo, error) {
 		Generation:         it.Metadata.Generation,
 		ObservedGeneration: it.Status.ObservedGeneration,
 		Controller:         controllerOf(it),
+		Verification:       verificationOf(it),
 	}, nil
 }
 
