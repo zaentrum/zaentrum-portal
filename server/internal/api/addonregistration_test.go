@@ -311,7 +311,7 @@ func TestRegistrationErrorsReachEveryReplica(t *testing.T) {
 	other := &API{addons: loop.store, cfg: loop.api.cfg, charts: operator.New(loop.kube.Client("zaentrum"), loop.api.cfg)}
 	jwt, _ := auth.NewJWTVerifier(context.Background(), "", "", "zaentrum-admin", false, true)
 	r := chi.NewRouter()
-	other.Register(r, auth.NewMiddleware(jwt, "zaentrum-admin", "zaentrum-addon"))
+	other.Register(r, auth.NewMiddleware(jwt, auth.Policy{AdminRole: "zaentrum-admin", AddonRole: "zaentrum-addon"}))
 	read := func(target string) string {
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))

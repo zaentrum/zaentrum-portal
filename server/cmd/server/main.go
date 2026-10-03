@@ -63,7 +63,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	authMW := auth.NewMiddleware(jwt, cfg.AdminRole, cfg.AddonRole)
+	authMW := auth.NewMiddleware(jwt, auth.Policy{AdminRole: cfg.AdminRole, AddonRole: cfg.AddonRole, AdminClients: cfg.AdminClients})
+	if !jwt.Disabled() {
+		if len(cfg.AdminClients) == 0 {
+			log.Printf("auth: PORTAL_ADMIN_CLIENTS names no client — no token is accepted for admin requests")
+		} else {
+			log.Printf("auth: admin requests take tokens issued to %v", cfg.AdminClients)
+		}
+	}
 
 	// Operator / instances console. The k8s client is in-cluster; when not
 	// running in a cluster it reports Available()==false and the operator API

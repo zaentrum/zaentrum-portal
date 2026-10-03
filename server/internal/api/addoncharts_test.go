@@ -50,7 +50,7 @@ func newChartEnv(t *testing.T) *chartEnv {
 		t.Fatal(err)
 	}
 	r := chi.NewRouter()
-	a.Register(r, auth.NewMiddleware(jwt, cfg.AdminRole, "zaentrum-addon"))
+	a.Register(r, auth.NewMiddleware(jwt, auth.Policy{AdminRole: cfg.AdminRole, AddonRole: "zaentrum-addon"}))
 	return &chartEnv{t: t, api: a, kube: kube, store: st, h: r}
 }
 
@@ -1187,7 +1187,7 @@ func TestChartRoutesAreAdminOnly(t *testing.T) {
 	jwt, _ := auth.NewJWTVerifier(context.Background(), "", "", "zaentrum-admin", false, true)
 	a := &API{addons: newFakeStore(), cfg: config.Config{AdminRole: "zaentrum-admin"}}
 	r := chi.NewRouter()
-	a.Register(r, auth.NewMiddleware(jwt, "zaentrum-admin", "zaentrum-addon"))
+	a.Register(r, auth.NewMiddleware(jwt, auth.Policy{AdminRole: "zaentrum-admin", AddonRole: "zaentrum-addon"}))
 	routes := 0
 	_ = chi.Walk(r, func(method, route string, _ http.Handler, mws ...func(http.Handler) http.Handler) error {
 		if !strings.Contains(route, "/addon") {
@@ -1210,7 +1210,7 @@ func TestChartRoutesAreAdminOnly(t *testing.T) {
 	}
 	closed, _ := auth.NewJWTVerifier(context.Background(), "http://127.0.0.1:1/realms/none", "", "zaentrum-admin", false, false)
 	r2 := chi.NewRouter()
-	a.Register(r2, auth.NewMiddleware(closed, "zaentrum-admin", "zaentrum-addon"))
+	a.Register(r2, auth.NewMiddleware(closed, auth.Policy{AdminRole: "zaentrum-admin", AddonRole: "zaentrum-addon"}))
 	for _, c := range []struct{ m, p string }{
 		{"GET", "/api/portal/addon-charts"}, {"POST", "/api/portal/addon-charts"}, {"GET", "/api/portal/addon-charts/example"},
 		{"PATCH", "/api/portal/addon-charts/example"}, {"DELETE", "/api/portal/addon-charts/example"}, {"POST", "/api/portal/addon-charts/example/install"},

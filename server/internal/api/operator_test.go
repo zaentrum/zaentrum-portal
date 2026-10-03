@@ -50,7 +50,7 @@ func newOpEnvAs(t *testing.T, role string, protected ...string) *opEnv {
 		t.Fatal(err)
 	}
 	r := chi.NewRouter()
-	a.Register(r, auth.NewMiddleware(jwt, cfg.AdminRole, "zaentrum-addon"))
+	a.Register(r, auth.NewMiddleware(jwt, auth.Policy{AdminRole: cfg.AdminRole, AddonRole: "zaentrum-addon"}))
 	return &opEnv{t: t, kube: kube, h: r}
 }
 

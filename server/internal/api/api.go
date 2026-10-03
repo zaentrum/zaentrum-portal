@@ -364,13 +364,18 @@ func (a *API) launchpad(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, lp)
 }
 
+// me says who the caller is and whether the console is theirs. isAdmin is the
+// gate the admin routes apply — the admin role on a token of one of the
+// portal's own clients — so a token that carries the role through another
+// client reads false, and client says which one it came through.
 func (a *API) me(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.PrincipalFrom(r.Context())
-	out := map[string]any{"username": "", "roles": []string{}, "isAdmin": false}
+	out := map[string]any{"username": "", "roles": []string{}, "isAdmin": false, "adminRole": a.cfg.AdminRole, "client": ""}
 	if p != nil {
 		out["username"] = p.Username
-		out["roles"] = p.Roles
-		out["isAdmin"] = p.HasRole(a.cfg.AdminRole)
+		out["roles"] = nonNil(p.Roles)
+		out["isAdmin"] = p.Admin
+		out["client"] = p.Client
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -877,6 +882,7 @@ func (a *API) configSummary() map[string]any {
 		"audience":         a.cfg.Audience,
 		"audienceRequired": a.cfg.AudienceRequired,
 		"adminRole":        a.cfg.AdminRole,
+		"adminClients":     a.cfg.AdminClients,
 		"instanceSelector": a.cfg.InstanceSelector,
 		"protectedNames":   a.cfg.ProtectedNames,
 		"operatorGroup":    a.cfg.OperatorGroup,

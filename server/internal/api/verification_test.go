@@ -254,7 +254,7 @@ func TestVerifyIsAdminOnly(t *testing.T) {
 	// No bearer at all is 401, before any of it.
 	closed, _ := auth.NewJWTVerifier(t.Context(), "http://127.0.0.1:1/realms/none", "", "zaentrum-admin", false, false)
 	r := chi.NewRouter()
-	(&API{addons: newFakeStore(), cfg: config.Config{AdminRole: "zaentrum-admin"}}).Register(r, auth.NewMiddleware(closed, "zaentrum-admin", "zaentrum-addon"))
+	(&API{addons: newFakeStore(), cfg: config.Config{AdminRole: "zaentrum-admin"}}).Register(r, auth.NewMiddleware(closed, auth.Policy{AdminRole: "zaentrum-admin", AddonRole: "zaentrum-addon"}))
 	rec = httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/portal/operator/verify", nil))
 	if rec.Code != http.StatusUnauthorized {
@@ -313,7 +313,7 @@ func TestVerifyRefusalsByKind(t *testing.T) {
 	a := &API{addons: newFakeStore(), cfg: config.Config{AdminRole: "zaentrum-admin"}, op: operator.New(client, config.Config{})}
 	jwt, _ := auth.NewJWTVerifier(t.Context(), "", "", "zaentrum-admin", false, true)
 	r := chi.NewRouter()
-	a.Register(r, auth.NewMiddleware(jwt, "zaentrum-admin", "zaentrum-addon"))
+	a.Register(r, auth.NewMiddleware(jwt, auth.Policy{AdminRole: "zaentrum-admin", AddonRole: "zaentrum-addon"}))
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/portal/operator/verify", nil))
 	if rec.Code != http.StatusServiceUnavailable {

@@ -1,10 +1,12 @@
 // Package auth provides bearer-JWT authentication for the portal-api: a lazy,
 // self-healing OIDC verifier (so the service boots even while the bundled
-// Keycloak is still starting) plus realm-role extraction for admin gating.
+// Keycloak is still starting), and the policy that decides what a verified
+// token may do — admin requests, an addon's own rows (policy.go).
 package auth
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -19,6 +21,28 @@ type Principal struct {
 	Subject  string
 	Username string
 	Roles    []string // realm_access.roles
+	// Client is the OIDC client the token was issued to: its authorized party
+	// (azp), else its client_id claim. A realm signs tokens for every client
+	// it serves, so who a person is says nothing about which application they
+	// are using. This does.
+	Client string
+
+	// Admin and Addon are decided by the middleware's Policy once the token is
+	// verified, never by a caller (see Policy.grant).
+	//
+	// Admin: the admin role, on a token issued to one of the portal's own
+	// clients.
+	Admin bool
+	// Addon is the key of the addon whose rows this caller may write — set
+	// for an addon's service account only, "" for everyone else.
+	Addon string
+
+	// addonClaim is the token's zaentrum_addon claim, which binds a service
+	// account to an addon whose key is not its client id.
+	addonClaim string
+	// anonymous: authentication is disabled and this is the synthetic dev
+	// principal, which no token stands behind.
+	anonymous bool
 }
 
 // HasRole reports whether the principal carries the named realm role.
@@ -52,9 +76,29 @@ func PrincipalFrom(ctx context.Context) (*Principal, bool) {
 // claims is the subset of the access-token payload we read.
 type claims struct {
 	PreferredUsername string `json:"preferred_username"`
-	RealmAccess       struct {
+	AuthorizedParty   string `json:"azp"`
+	ClientID          string `json:"client_id"`
+	// AddonKey is kept raw and read on its own: a realm admin who maps it
+	// with another type than string must cost the addon its binding, not
+	// every caller their roles.
+	AddonKey    json.RawMessage `json:"zaentrum_addon"`
+	RealmAccess struct {
 		Roles []string `json:"roles"`
 	} `json:"realm_access"`
+}
+
+// principalOf reads a verified token's claims.
+func principalOf(subject string, c claims) *Principal {
+	p := &Principal{Subject: subject, Username: c.PreferredUsername, Roles: c.RealmAccess.Roles}
+	p.Client = strings.TrimSpace(c.AuthorizedParty)
+	if p.Client == "" {
+		p.Client = strings.TrimSpace(c.ClientID)
+	}
+	var key string
+	if len(c.AddonKey) > 0 && json.Unmarshal(c.AddonKey, &key) == nil {
+		p.addonClaim = strings.TrimSpace(key)
+	}
+	return p
 }
 
 // JWTVerifier validates bearer access tokens against an OIDC issuer's JWKS.
@@ -158,7 +202,7 @@ func (j *JWTVerifier) Disabled() bool { return j.disabled }
 // the principal (with realm roles). Before discovery completes it fails closed.
 func (j *JWTVerifier) verifyBearer(ctx context.Context, r *http.Request) (*Principal, bool) {
 	if j.disabled {
-		return &Principal{Subject: "anonymous", Username: "anonymous", Roles: []string{j.adminRole}}, true
+		return &Principal{Subject: "anonymous", Username: "anonymous", Roles: []string{j.adminRole}, anonymous: true}, true
 	}
 	verifier := j.tokenVerifier()
 	if verifier == nil {
@@ -176,11 +220,9 @@ func (j *JWTVerifier) verifyBearer(ctx context.Context, r *http.Request) (*Princ
 	if err != nil {
 		return nil, false
 	}
-	p := &Principal{Subject: tok.Subject}
 	var c claims
-	if err := tok.Claims(&c); err == nil {
-		p.Username = c.PreferredUsername
-		p.Roles = c.RealmAccess.Roles
+	if err := tok.Claims(&c); err != nil {
+		return &Principal{Subject: tok.Subject}, true
 	}
-	return p, true
+	return principalOf(tok.Subject, c), true
 }

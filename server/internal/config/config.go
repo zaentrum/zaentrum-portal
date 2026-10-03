@@ -39,6 +39,16 @@ type Config struct {
 	// operator who registers it under another name points this at it.
 	CLIClientID string // PORTAL_CLI_CLIENT_ID (default "zae")
 
+	// AdminClients are the OIDC clients whose tokens may carry AdminRole into
+	// admin requests: the portal's own browser client and the CLI's. The
+	// issuer signs tokens for every client of its realm — the media apps, the
+	// TV and phone clients, service accounts — and an admin who signed in to
+	// any of them carries the role there too; only these count. Unset, it is
+	// zaentrum-web (the bundled realm's portal client) and CLIClientID. A
+	// deployment whose portal signs in as another client — a shared realm with
+	// per-instance clients — names it here.
+	AdminClients []string // PORTAL_ADMIN_CLIENTS (default "zaentrum-web,<CLIClientID>")
+
 	// Operator / instances console.
 	InstanceSelector string   // PORTAL_INSTANCE_SELECTOR — label filter for listed deployments (default "" = all in ns)
 	ProtectedNames   []string // PORTAL_PROTECT — deployments the UI must not scale/restart (default postgres,kafka,valkey,keycloak)
@@ -108,6 +118,7 @@ func normalizeDSN(s string) string {
 
 // Load reads configuration from the process environment.
 func Load() Config {
+	cliClient := envDefault("zae", "PORTAL_CLI_CLIENT_ID")
 	return Config{
 		Port:             envDefault("8080", "SERVER_PORT", "PORT"),
 		DatabaseURL:      normalizeDSN(env("PG_URL", "DATABASE_URL", "SPRING_DATASOURCE_URL")),
@@ -119,9 +130,10 @@ func Load() Config {
 		AudienceRequired: envBool(false, "OIDC_AUDIENCE_REQUIRED"),
 		AuthDisabled:     envBool(false, "AUTH_DISABLED"),
 
-		AdminRole:   envDefault("zaentrum-admin", "PORTAL_ADMIN_ROLE"),
-		AddonRole:   envDefault("zaentrum-addon", "PORTAL_ADDON_ROLE"),
-		CLIClientID: envDefault("zae", "PORTAL_CLI_CLIENT_ID"),
+		AdminRole:    envDefault("zaentrum-admin", "PORTAL_ADMIN_ROLE"),
+		AddonRole:    envDefault("zaentrum-addon", "PORTAL_ADDON_ROLE"),
+		CLIClientID:  cliClient,
+		AdminClients: adminClients(os.Getenv("PORTAL_ADMIN_CLIENTS"), cliClient),
 
 		InstanceSelector: env("PORTAL_INSTANCE_SELECTOR"),
 		ProtectedNames:   splitCSV(envDefault("postgres,kafka,valkey,keycloak", "PORTAL_PROTECT")),
@@ -136,6 +148,20 @@ func Load() Config {
 
 		ChinoPublicURL: env("CHINO_PUBLIC_URL"),
 	}
+}
+
+// adminClients is PORTAL_ADMIN_CLIENTS as given — set, even to nothing, it is
+// the whole list — or, unset, the portal's own client on the bundled realm and
+// the CLI's.
+func adminClients(raw, cliClient string) []string {
+	if raw != "" {
+		return splitCSV(raw)
+	}
+	out := []string{"zaentrum-web"}
+	if cliClient != "" && cliClient != "zaentrum-web" {
+		out = append(out, cliClient)
+	}
+	return out
 }
 
 // splitCSV parses a comma-separated list, trimming blanks.
