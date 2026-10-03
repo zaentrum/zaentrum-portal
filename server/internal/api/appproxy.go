@@ -6,10 +6,13 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/zaentrum/zaentrum-portal/server/internal/auth"
 )
 
 var (
@@ -34,16 +37,68 @@ func contextWithTimeout(r *http.Request, d time.Duration) (context.Context, cont
 // its API — is fetched through the portal, so the shell stays the single front
 // door: one origin, one session, one place where access is decided.
 //
+// Who may reach an app through here: anyone signed in — the portal verifies
+// the bearer before it forwards a byte — except for the app's public bundle,
+// which the browser loads with a plain import() and <link> that carry no
+// bearer: /embed/… (the hosted console's module, its chunks and its
+// stylesheet) and /.well-known/… (its capability manifest). Those two paths
+// are open, and reach the app without any Authorization header at all.
+//
 // Identity is passed through rather than swapped: the caller's bearer has
 // already been verified by the portal's middleware, and it is forwarded to the
 // app so the app can still apply its OWN authorisation (an addon may distinguish
 // admins from ordinary users). Minting a portal service token here would make
 // every embedded request look like the portal and quietly erase that
 // distinction.
+//
+// The token is forwarded whole. Narrowing it to what the app needs — a token
+// for that app alone, without the portal's admin power — would take a token
+// exchange at the identity provider (RFC 8693) and a client of portal-api's
+// own to make it with; until then an installed addon is trusted with the
+// bearers of the people who use it, as its console, which runs inside the
+// shell's page, already is.
 
 // proxyTimeout bounds an embedded app's response. Long-poll style endpoints
 // (SSE) are exempt — they are detected by the client's Accept header.
 const proxyTimeout = 60 * time.Second
+
+// proxyPrefix is where the proxy is mounted; an app's key follows.
+const proxyPrefix = "/api/portal/apps/"
+
+// proxyRest is the path an embedded-app request asks the app for: what follows
+// /api/portal/apps/<key>, its dot segments resolved. It is worked out once and
+// used twice — to decide whether the path is public and as the path the app
+// receives — so the path judged is the path sent: /embed/../api/x is /api/x,
+// and takes a signed-in user.
+func proxyRest(r *http.Request) string {
+	rest := strings.TrimPrefix(r.URL.Path, proxyPrefix+chi.URLParam(r, "key"))
+	if rest == "" {
+		return "/"
+	}
+	cleaned := path.Clean("/" + rest)
+	if strings.HasSuffix(rest, "/") && cleaned != "/" {
+		cleaned += "/"
+	}
+	return cleaned
+}
+
+// publicBundle reports whether an app path is part of its public bundle.
+func publicBundle(rest string) bool {
+	return rest == "/embed" || strings.HasPrefix(rest, "/embed/") || strings.HasPrefix(rest, "/.well-known/")
+}
+
+// proxyAuth lets an app's public bundle through as it is and requires a
+// signed-in user for everything else the proxy reaches.
+func (a *API) proxyAuth(mw *auth.Middleware, next http.Handler) http.Handler {
+	signedIn := mw.Authn(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if publicBundle(proxyRest(r)) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		signedIn.ServeHTTP(w, r)
+	})
+}
 
 // appProxy reverse-proxies /api/portal/apps/{key}/* to the app's in-cluster
 // address from the registry.
@@ -66,19 +121,22 @@ func (a *API) appProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prefix := "/api/portal/apps/" + key
+	prefix := proxyPrefix + key
+	// The mount prefix is stripped: the app is unaware it is embedded and
+	// serves from its own root.
+	rest := proxyRest(r)
+	public := publicBundle(rest)
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
-			// Strip the mount prefix: the app is unaware it is embedded and
-			// serves from its own root.
-			rest := strings.TrimPrefix(req.URL.Path, prefix)
-			if rest == "" {
-				rest = "/"
-			}
 			req.URL.Path = singleSlash(target.Path + rest)
+			req.URL.RawPath = ""
 			req.Host = target.Host
+			if public {
+				// The public bundle needs no identity, and gets none.
+				req.Header.Del("Authorization")
+			}
 			// The app decides what this user may do, so it needs the user's
 			// token — not the portal's identity.
 			req.Header.Set("X-Forwarded-Host", r.Host)

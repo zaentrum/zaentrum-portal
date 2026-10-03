@@ -92,22 +92,19 @@ func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap
 }
 
 // Register mounts the registry routes under /api/portal. Authn is applied here
-// per-route: the embedded-app proxy is deliberately open (a browser cannot
-// attach a bearer to a module import() or a stylesheet <link>), and everything
-// else requires a signed-in user. Admin writes are additionally gated via
-// mw.RequireAdmin.
+// per-route: an embedded app's public bundle and CLI discovery are open, and
+// everything else requires a signed-in user. Admin writes are additionally
+// gated via mw.RequireAdmin.
 func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 	r.Route("/api/portal", func(r chi.Router) {
 		// Embedded apps: the shell hosts an app in its own page and everything
 		// that app loads — its module bundle and its API — comes back through
-		// here, so the portal stays the single front door. This route is NOT
-		// behind Authn: the browser fetches the app's bundle with a plain
-		// import()/<link> that carries no bearer. It is still safe — the proxy
-		// forwards whatever Authorization header the request does carry, and the
-		// downstream app authenticates its own API, so the app's static bundle is
-		// public while its data stays protected. The SSRF guard already limits the
-		// destination to a registered in-cluster app.
-		r.Handle("/apps/{key}/*", http.HandlerFunc(a.appProxy))
+		// here, so the portal stays the single front door. Its public bundle
+		// is open — the browser fetches it with a plain import() and <link>,
+		// which carry no bearer — and everything else it serves takes a
+		// signed-in user (appproxy.go). The SSRF guard limits the destination
+		// to a registered in-cluster app.
+		r.Handle("/apps/{key}/*", a.proxyAuth(mw, http.HandlerFunc(a.appProxy)))
 
 		// CLI capability discovery — also deliberately unauthenticated: the
 		// zae CLI probes it before any login flow exists, and it aggregates
