@@ -12,7 +12,15 @@ import './app.css';
 // spaces → tiles → apps. Tiles launch products/apps (siblings on this origin via
 // SSO, a full-page nav) or open external tools in a new tab. Admins additionally
 // see a "settings" tile that opens the in-shell registry console.
-export function Launchpad({ isAdmin }: { isAdmin: boolean }) {
+export function Launchpad({
+  isAdmin,
+  adminElsewhere,
+}: {
+  isAdmin: boolean;
+  // adminElsewhere: the caller holds the admin role, in a token issued to a
+  // client the admin routes do not take — so no admin tile is offered.
+  adminElsewhere?: { role: string; client: string } | null;
+}) {
   const api = usePortalApi();
   const nav = useNavigate();
   const [lp, setLp] = useState<LaunchpadData | null>(null);
@@ -126,6 +134,14 @@ export function Launchpad({ isAdmin }: { isAdmin: boolean }) {
             onClick={() => nav('/export')}
           />
         </TileGroup>
+      )}
+
+      {adminElsewhere && (
+        <Text variant="dim" as="p">
+          you hold the {adminElsewhere.role} role, but signed in through {adminElsewhere.client ? `the client ${adminElsewhere.client}` : 'a client'}, which
+          the portal does not take for admin requests — so its consoles stay closed. An operator names the portal&apos;s own clients in
+          PORTAL_ADMIN_CLIENTS.
+        </Text>
       )}
 
       <footer className="lp__foot">

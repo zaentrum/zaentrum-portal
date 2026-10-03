@@ -13,6 +13,7 @@ import { KafkaConsole } from './debug/KafkaConsole';
 import { DbConsole } from './debug/DbConsole';
 import { ExportConsole } from './debug/ExportConsole';
 import { useMe } from './lib/api';
+import { adminElsewhere } from './lib/access';
 import { Splash } from './Splash';
 
 // You sign into zaentrum (the portal) once; products + apps ride the same SSO
@@ -41,11 +42,14 @@ export function App() {
 function AuthedApp() {
   const me = useMe();
   const isAdmin = !!me?.isAdmin;
+  // The admin role, through a client the admin routes do not take: the
+  // consoles stay closed, and the launchpad says why.
+  const elsewhere = adminElsewhere(me);
 
   return (
     <Routes>
       <Route element={<Shell />}>
-        <Route index element={<Launchpad isAdmin={isAdmin} />} />
+        <Route index element={<Launchpad isAdmin={isAdmin} adminElsewhere={elsewhere} />} />
         {/* A registered app, hosted inside this shell (see AppHost). */}
         <Route path="app/:key" element={<AppHost />} />
         <Route
