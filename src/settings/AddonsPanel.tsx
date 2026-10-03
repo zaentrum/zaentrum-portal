@@ -34,6 +34,7 @@ import {
 import {
   UNKNOWN_SETUP,
   appRoute,
+  changesPlanned,
   chartPhaseTone,
   componentPhase,
   containersSummary,
@@ -739,10 +740,16 @@ function ChartBadges({ addon }: { addon: InstalledAddon }) {
           </Badge>
         )
       )}
-      {upgradePlanned(addon) && (
+      {upgradePlanned(addon) ? (
         <Badge tone="blue" title="another chart version is planned and waits to be applied">
           upgrade planned
         </Badge>
+      ) : (
+        changesPlanned(addon) && (
+          <Badge tone="blue" title="new values are planned and wait to be applied — open values to review and apply them">
+            changes planned
+          </Badge>
+        )
       )}
     </>
   );

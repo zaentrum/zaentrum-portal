@@ -1,8 +1,17 @@
 import { useEffect, useState } from 'react';
 import { Button, Checkbox, Field, Input, Modal, Text } from '@nalet/design-system';
-import { CircleCheck, ListChecks, Rocket, Save, Trash2, Undo2 } from 'lucide-react';
+import { CircleCheck, ListChecks, Rocket, Trash2, Undo2 } from 'lucide-react';
 import { usePortalApi, type ChartSource, type InstalledAddon } from '../lib/api';
-import { installBlockers, planCurrent, upgradePlanned } from '../lib/addons';
+import {
+  changesPlanned,
+  installBlockers,
+  planCurrent,
+  restorePatch,
+  upgradePlanned,
+  valuesPatch,
+  writeState,
+  type ValuesBefore,
+} from '../lib/addons';
 import type { Values } from '../lib/valuesForm';
 import { ChartPlan, ChartProgress, ChartValues } from './ChartPlan';
 import { CHART_POLL_MS, errText, useAddonChart } from './useAddonChart';
@@ -160,17 +169,24 @@ export function UpgradeChartDialog({ addon, onClose, onChanged }: { addon: Insta
   );
 }
 
-// ChartValuesDialog edits a chart addon's values and secret inputs. Saving
-// replaces the values and applies them: an installed addon rolls out with the
-// new values once the operator has planned them.
+// ChartValuesDialog edits a chart addon's values and secret inputs, and plans
+// them before anything applies — as zae's upgrade does. Saving suspends the
+// addon: the operator plans the new values and applies nothing, the dialog
+// shows that plan and asks, and only "apply" installs it. Cancelling puts the
+// values and the suspension back as they were; secret inputs stay as
+// written, because the console never reads a secret value.
 export function ChartValuesDialog({ addon, onClose, onChanged }: { addon: InstalledAddon; onClose: () => void; onChanged: () => void }) {
   const api = usePortalApi();
-  const [saved, setSaved] = useState(false);
-  const { chart, error: loadErr, reload } = useAddonChart(addon.key, saved ? CHART_POLL_MS : 0);
+  const [stage, setStage] = useState<'edit' | 'plan' | 'apply'>('edit');
+  const { chart, error: loadErr, reload } = useAddonChart(addon.key, stage === 'edit' ? 0 : CHART_POLL_MS);
   const [values, setValues] = useState<Values | null>(null);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [clears, setClears] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
+  // wrote: the write this dialog made — the generation to plan, what to put
+  // back (null when it reviews a plan it did not make), the secret inputs
+  // that cannot be put back.
+  const [wrote, setWrote] = useState<{ generation: number; before: ValuesBefore | null; secrets: string[] } | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -181,95 +197,194 @@ export function ChartValuesDialog({ addon, onClose, onChanged }: { addon: Instal
     !!chart && values !== null &&
     (JSON.stringify(values) !== JSON.stringify(chart.values ?? {}) || Object.keys(secrets).length > 0 || clears.length > 0);
   const secretKeys = [...new Set([...(chart?.secretKeys ?? []), ...Object.keys(secrets)])].filter((k) => !clears.includes(k));
+  const state = wrote ? writeState(chart, wrote.generation) : 'planning';
+  const blockers = installBlockers(chart);
+  const upgrade = chart?.lastAppliedChart &&
+    (chart.lastAppliedChart.ref !== chart.chart.ref || (chart.lastAppliedChart.version ?? '') !== (chart.chart.version ?? ''));
+  const done = stage === 'apply' && !!chart && chart.phase === 'Ready' && !chart.suspended && chart.observedGeneration === chart.generation;
+  useEffect(() => {
+    if (done) onChanged();
+  }, [done, onChanged]);
 
-  async function save() {
-    if (!values) return;
-    setBusy(true);
+  async function run(label: string, fn: () => Promise<void>) {
+    setBusy(label);
     setErr(null);
     try {
-      const body: Record<string, unknown> = { values: Object.keys(values).length ? values : null };
-      if (Object.keys(secrets).length) body.secretValues = secrets;
-      const cleared = clears.filter((k) => chart?.secretKeys.includes(k));
-      if (cleared.length) body.clearSecrets = cleared;
-      await api(path(addon.key), { method: 'PATCH', body: JSON.stringify(body) });
-      setSecrets({});
-      setClears([]);
-      setSaved(true);
-      onChanged();
-      await reload();
+      await fn();
     } catch (e) {
       setErr(errText(e));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
-  const blockers = saved ? installBlockers(chart) : [];
-  const settled = saved && planCurrent(chart);
-  return (
-    <Modal
-      open
-      width={760}
-      onClose={onClose}
-      title={`values of ${addon.title || addon.key}`}
-      footer={
-        <>
-          <Button variant="ghost" size="sm" onClick={onClose}>
-            {saved && !dirty ? 'close' : 'cancel'}
-          </Button>
-          <Button size="sm" leading={<Save size={14} />} loading={busy} disabled={!dirty} onClick={save}>
-            save
-          </Button>
-        </>
+  const save = () =>
+    run('save', async () => {
+      if (!chart || !values) return;
+      const before: ValuesBefore = { values: chart.values ?? null, suspended: chart.suspended };
+      const acc = await api<{ generation: number }>(path(addon.key), {
+        method: 'PATCH',
+        body: JSON.stringify(valuesPatch(values, secrets, clears, chart.secretKeys)),
+      });
+      const changedSecrets = [...Object.keys(secrets), ...clears.filter((k) => chart.secretKeys.includes(k))].sort();
+      setWrote({ generation: acc?.generation ?? chart.generation + 1, before, secrets: changedSecrets });
+      setSecrets({});
+      setClears([]);
+      setStage('plan');
+      onChanged();
+      await reload();
+    });
+
+  // review opens a plan the dialog did not make — values saved earlier and
+  // not applied: it can be applied or left, not put back.
+  const review = () => {
+    if (!chart) return;
+    setWrote({ generation: chart.generation, before: null, secrets: [] });
+    setStage('plan');
+  };
+
+  const apply = () =>
+    run('apply', async () => {
+      await api(`${path(addon.key)}/install`, { method: 'POST' });
+      setStage('apply');
+      onChanged();
+      await reload();
+    });
+
+  // Back to the values and suspension it had — unless someone else has
+  // written since, whose change is not this dialog's to undo.
+  const putBack = () =>
+    run('back', async () => {
+      if (wrote?.before && state !== 'moved') {
+        await api(path(addon.key), { method: 'PATCH', body: JSON.stringify(restorePatch(wrote.before)) });
+        onChanged();
       }
-    >
+      onClose();
+    });
+
+  const canApply = stage === 'plan' && state === 'planned' && blockers.length === 0;
+  const footer =
+    stage === 'edit' ? (
+      <>
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          cancel
+        </Button>
+        <Button size="sm" leading={<ListChecks size={14} />} loading={busy === 'save'} disabled={!dirty} onClick={save}>
+          plan
+        </Button>
+      </>
+    ) : stage === 'plan' ? (
+      <>
+        {wrote?.before && state !== 'moved' ? (
+          <Button variant="ghost" size="sm" leading={<Undo2 size={13} />} loading={busy === 'back'} onClick={putBack}>
+            cancel — put the values back
+          </Button>
+        ) : (
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            close — it stays planned
+          </Button>
+        )}
+        <Button size="sm" leading={<Rocket size={14} />} loading={busy === 'apply'} disabled={!canApply} title={canApply ? undefined : blockers.join('; ')} onClick={apply}>
+          apply
+        </Button>
+      </>
+    ) : (
+      <Button size="sm" variant={done ? undefined : 'ghost'} onClick={onClose}>
+        {done ? 'done' : 'close — it keeps rolling out'}
+      </Button>
+    );
+
+  return (
+    <Modal open width={stage === 'edit' ? 760 : 880} closeOnBackdrop={false} onClose={onClose} title={`values of ${addon.title || addon.key}`} footer={footer}>
       <div className="set__form">
-        <Text variant="muted" as="p">
-          {addon.suspended
-            ? 'the addon is planned, not applied: saving plans it again.'
-            : 'saving applies the values: the operator plans them and rolls the addon out with them.'}{' '}
-          Secret inputs go to the addon’s values Secret and are never shown again.
-        </Text>
-        {!chart && !loadErr && <Text variant="dim">reading {addon.key}…</Text>}
-        {chart && values !== null && (
-          <ChartValues
-            chart={chart}
-            values={values}
-            secretKeys={secretKeys}
-            disabled={busy}
-            onValues={setValues}
-            onSecret={(p, v) => {
-              setSecrets((s) => ({ ...s, [p]: v }));
-              setClears((c) => c.filter((k) => k !== p));
-            }}
-            onClearSecret={(p) => {
-              setClears((c) => (c.includes(p) ? c : [...c, p]));
-              setSecrets((s) => {
-                const next = { ...s };
-                delete next[p];
-                return next;
-              });
-            }}
-            onMoveSecrets={(moved, next) => {
-              setValues(next);
-              setSecrets((s) => ({ ...s, ...moved }));
-              setClears((c) => c.filter((k) => !(k in moved)));
-            }}
-          />
+        {stage === 'edit' && (
+          <>
+            <Text variant="muted" as="p">
+              saving plans the values: the operator plans the addon with them and applies nothing until you have seen the plan
+              and apply it. Secret inputs go to the addon’s values Secret and are never shown again.
+            </Text>
+            {changesPlanned(addon) && chart && (
+              <div className="set__notice set__notice--warning">
+                <b>changes are planned and not applied</b>
+                <Text variant="dim">
+                  until they are applied or put back, the operator does not reconcile {addon.key}.
+                </Text>
+                <span>
+                  <Button size="sm" variant="default" leading={<ListChecks size={13} />} onClick={review}>
+                    review the plan
+                  </Button>
+                </span>
+              </div>
+            )}
+            {!chart && !loadErr && <Text variant="dim">reading {addon.key}…</Text>}
+            {chart && values !== null && (
+              <ChartValues
+                chart={chart}
+                values={values}
+                secretKeys={secretKeys}
+                disabled={!!busy}
+                onValues={setValues}
+                onSecret={(p, v) => {
+                  setSecrets((s) => ({ ...s, [p]: v }));
+                  setClears((c) => c.filter((k) => k !== p));
+                }}
+                onClearSecret={(p) => {
+                  setClears((c) => (c.includes(p) ? c : [...c, p]));
+                  setSecrets((s) => {
+                    const next = { ...s };
+                    delete next[p];
+                    return next;
+                  });
+                }}
+                onMoveSecrets={(moved, next) => {
+                  setValues(next);
+                  setSecrets((s) => ({ ...s, ...moved }));
+                  setClears((c) => c.filter((k) => !(k in moved)));
+                }}
+              />
+            )}
+            {Object.keys(secrets).length + clears.length > 0 && (
+              <Text variant="dim">
+                unsaved: {[...Object.keys(secrets).map((k) => `set ${k}`), ...clears.map((k) => `clear ${k}`)].join(', ')}
+              </Text>
+            )}
+          </>
         )}
-        {Object.keys(secrets).length + clears.length > 0 && (
-          <Text variant="dim">
-            unsaved: {[...Object.keys(secrets).map((k) => `set ${k}`), ...clears.map((k) => `clear ${k}`)].join(', ')}
-          </Text>
+        {stage === 'plan' && chart && (
+          <>
+            <Text variant="dim" as="p">
+              planned with the new values — nothing changes until you apply it. Closing keeps the plan; until you apply or
+              cancel it, the operator does not reconcile the addon.
+            </Text>
+            {upgrade && (
+              <Text variant="dim" as="p">
+                an upgrade to <span className="set__mono">{`${chart.chart.ref} ${chart.chart.version ?? ''}`}</span> is planned too:
+                applying installs both.
+              </Text>
+            )}
+            {state === 'moved' && (
+              <span className="set__err">
+                {addon.key} changed after these values were saved — someone else is changing it, so this dialog neither applies
+                nor puts back their change. Look at it again.
+              </span>
+            )}
+            {state !== 'moved' && <ChartPlan chart={chart} />}
+            {wrote && wrote.secrets.length > 0 && (
+              <Text variant="dim" as="p">
+                secret inputs set or cleared here stay as written even if you cancel ({wrote.secrets.join(', ')}): the console
+                never reads a secret value, so it cannot put one back.
+              </Text>
+            )}
+          </>
         )}
-        {saved && !settled && <Text variant="dim">saved — the operator is planning the new values…</Text>}
-        {settled && blockers.length === 0 && (
-          <span className="set__ok set__done">
-            <CircleCheck size={14} /> saved and planned{addon.suspended ? '' : ' — the addon rolls out with them'}.
-          </span>
-        )}
-        {settled && blockers.length > 0 && (
-          <span className="set__err">the new values do not plan cleanly, and are not applied: {blockers.join('; ')}</span>
+        {stage === 'apply' && chart && (
+          <ChartProgress chart={chart}>
+            {done && (
+              <span className="set__ok set__done">
+                <CircleCheck size={14} /> {addon.key} runs with the new values.
+              </span>
+            )}
+          </ChartProgress>
         )}
         {loadErr && <span className="set__err">{loadErr}</span>}
         {err && <span className="set__err">{err}</span>}

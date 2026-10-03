@@ -89,6 +89,57 @@ export function installBlockers(c: AddonChart | null): string[] {
   return [...(c.plan?.violations ?? []), ...(c.plan?.valuesErrors ?? [])];
 }
 
+// changesPlanned: an installed chart addon whose spec waits to be applied —
+// new values, secret inputs or a chart, planned and not installed. Until it
+// is applied or put back, the operator does not reconcile the addon.
+export function changesPlanned(a: InstalledAddon): boolean {
+  return !!a.chart?.lastApplied && a.suspended && a.registered !== false;
+}
+
+// ─── values: planned first, applied on confirmation ─────────────────────────
+
+// The values an addon had before a write, which putting it back restores.
+export interface ValuesBefore {
+  values: Record<string, unknown> | null;
+  suspended: boolean;
+}
+
+// valuesPatch is the PATCH that saves values and secret inputs. It suspends
+// the addon, as zae's upgrade does: the operator plans the new spec and
+// applies nothing until it is installed. setKeys are the inputs the addon
+// has, the only ones a clear can name.
+export function valuesPatch(
+  values: Record<string, unknown>,
+  secrets: Record<string, string>,
+  clears: string[],
+  setKeys: string[],
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { values: Object.keys(values).length ? values : null, suspend: true };
+  if (Object.keys(secrets).length) body.secretValues = secrets;
+  const cleared = clears.filter((k) => setKeys.includes(k));
+  if (cleared.length) body.clearSecrets = cleared;
+  return body;
+}
+
+// restorePatch puts an addon back to the values and suspension it had.
+// Secret inputs cannot be put back: the console never reads a secret value.
+export function restorePatch(before: ValuesBefore): Record<string, unknown> {
+  return {
+    values: before.values && Object.keys(before.values).length ? before.values : null,
+    suspend: before.suspended,
+  };
+}
+
+// writeState says where a write stands: the operator is planning it, has
+// planned it — the plan shown is the one installing applies — or the addon
+// has moved on since: someone else changed it, and this dialog's plan is not
+// the one on it any more.
+export function writeState(c: AddonChart | null, generation: number): 'planning' | 'planned' | 'moved' {
+  if (!c) return 'planning';
+  if (c.generation !== generation) return 'moved';
+  return planCurrent(c) ? 'planned' : 'planning';
+}
+
 // chartReady: installed and registered — what the wizard waits for.
 export function chartReady(c: AddonChart | null): boolean {
   return !!c && !c.suspended && c.phase === 'Ready' && c.registered;

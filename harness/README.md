@@ -90,6 +90,17 @@ server does:
     http://localhost:8792/?verification=unreadable  # a record portal-api could not read
     http://localhost:8792/?verification=old         # a portal-api older than the field: no card
 
+Every change the operator console makes asks first, and the mock answers it
+the way portal-api does: **update to** sends the version shown (one the
+operator replaced is refused 409), the admin stack — portal-api, the portal,
+the catalog manager — keeps one replica (its step to 0 is disabled), and a
+restart of a workload that recreates its pods (analyzer, katalog-ingest,
+transcoder) says it goes down until the new pod is ready. In settings, a core
+entry (chino, the apps and manage spaces) has no delete, every other delete
+says what goes with it, tiles and spaces carry who sees them (the ops space is
+for the ops role only), and a chart addon's **values** are planned first: the
+dialog shows the plan and asks, and cancelling puts the values back.
+
 The mock keeps its state in memory; restart it for the seeded state.
 
 The registry fixture mirrors what migrations 002/003/004 actually seed — every

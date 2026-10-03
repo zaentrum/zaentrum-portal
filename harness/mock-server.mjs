@@ -669,8 +669,13 @@ async function serveCharts(req, res, pathname, query) {
       changed = !runs || chart.ref !== a.chart.ref || (chart.version ?? '') !== (a.chart.version ?? '') || (chart.digest ?? '') !== (a.chart.digest ?? '');
       a.chart = chart;
     }
-    if ('values' in body) a.values = body.values;
-    writeInputs(a, body);
+    // Whatever the request changes is planned first, as the server does:
+    // values, secret inputs, a chart. A request that sends suspend wins.
+    if ('values' in body) {
+      if (JSON.stringify(body.values ?? {}) !== JSON.stringify(a.values ?? {})) changed = true;
+      a.values = body.values;
+    }
+    if (writeInputs(a, body)) changed = true;
     if (body.suspend !== undefined) a.suspend = body.suspend;
     else if (changed) a.suspend = true;
     a.generation++;
