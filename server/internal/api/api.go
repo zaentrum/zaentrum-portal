@@ -460,8 +460,20 @@ func (a *API) patchApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, app)
 }
 
+// deleteApp deletes an app and its tiles — never a core app, which the
+// platform stands on: it can be disabled instead.
 func (a *API) deleteApp(w http.ResponseWriter, r *http.Request) {
-	a.handleDelete(w, a.reg.DeleteApp(r.Context(), chi.URLParam(r, "key")))
+	key := chi.URLParam(r, "key")
+	if app, err := a.reg.GetApp(r.Context(), key); err == nil && app.Core {
+		http.Error(w, coreRefusal("app", key, "disable it instead"), http.StatusConflict)
+		return
+	}
+	a.handleDelete(w, a.reg.DeleteApp(r.Context(), key), "app", key)
+}
+
+// coreRefusal says why a core entry stays.
+func coreRefusal(kind, key, instead string) string {
+	return fmt.Sprintf("%s %q is a core entry of the platform and cannot be deleted — %s", kind, key, instead)
 }
 
 // ─── UI extensions ─────────────────────────────────────────────────────────
@@ -652,7 +664,7 @@ func (a *API) deleteExtension(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a.handleDelete(w, a.reg.DeleteExtension(r.Context(), key))
+	a.handleDelete(w, a.reg.DeleteExtension(r.Context(), key), "extension", key)
 }
 
 // ─── spaces ──────────────────────────────────────────────────────────────────
@@ -711,8 +723,14 @@ func (a *API) writeSpace(w http.ResponseWriter, r *http.Request, sp model.Space)
 	writeJSON(w, http.StatusOK, stored)
 }
 
+// deleteSpace deletes a space and every tile in it — never a core space.
 func (a *API) deleteSpace(w http.ResponseWriter, r *http.Request) {
-	a.handleDelete(w, a.reg.DeleteSpace(r.Context(), chi.URLParam(r, "key")))
+	key := chi.URLParam(r, "key")
+	if sp, err := a.reg.GetSpace(r.Context(), key); err == nil && sp.Core {
+		http.Error(w, coreRefusal("space", key, "the seed and every addon place their tiles there; rename or reorder it instead"), http.StatusConflict)
+		return
+	}
+	a.handleDelete(w, a.reg.DeleteSpace(r.Context(), key), "space", key)
 }
 
 // ─── tiles ───────────────────────────────────────────────────────────────────
@@ -801,7 +819,8 @@ func cleanAudience(in []string) ([]string, error) {
 }
 
 func (a *API) deleteTile(w http.ResponseWriter, r *http.Request) {
-	a.handleDelete(w, a.reg.DeleteTile(r.Context(), chi.URLParam(r, "key")))
+	key := chi.URLParam(r, "key")
+	a.handleDelete(w, a.reg.DeleteTile(r.Context(), key), "tile", key)
 }
 
 func (a *API) validTile(w http.ResponseWriter, t model.Tile, patch bool) bool {
@@ -830,16 +849,17 @@ func (a *API) tileWriteError(w http.ResponseWriter, err error) {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-func (a *API) handleDelete(w http.ResponseWriter, err error) {
-	if errors.Is(err, store.ErrNotFound) {
+func (a *API) handleDelete(w http.ResponseWriter, err error, kind, key string) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
 		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	if err != nil {
+	case errors.Is(err, store.ErrCore):
+		http.Error(w, coreRefusal(kind, key, "the platform stands on it"), http.StatusConflict)
+	case err != nil:
 		serverError(w, err)
-		return
+	default:
+		w.WriteHeader(http.StatusNoContent)
 	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func decode(w http.ResponseWriter, r *http.Request, dst any) bool {

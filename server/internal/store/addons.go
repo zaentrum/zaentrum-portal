@@ -48,7 +48,12 @@ func (s *Store) InstallAddon(ctx context.Context, in AddonInstall) error {
 			return fmt.Errorf("app: %w", err)
 		}
 		if in.Space != nil {
-			if err := upsertSpace(ctx, tx, *in.Space); err != nil {
+			// An addon's space: created, or retitled — never a core space,
+			// which no manifest renames.
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO spaces (key, title, ord) VALUES ($1,$2,$3)
+				ON CONFLICT (key) DO UPDATE SET title=EXCLUDED.title, ord=EXCLUDED.ord
+				WHERE NOT spaces.core`, in.Space.Key, in.Space.Title, in.Space.Order); err != nil {
 				return fmt.Errorf("space: %w", err)
 			}
 		}
@@ -161,9 +166,10 @@ func (s *Store) RemoveAddon(ctx context.Context, key, declaredSpace string) (Add
 				continue
 			}
 			seen[sp] = true
-			// An admin may have moved their own tiles in; then it stays.
+			// An admin may have moved their own tiles in; then it stays. A
+			// core space stays whatever it holds.
 			tag, err := tx.Exec(ctx, `
-				DELETE FROM spaces WHERE key = $1
+				DELETE FROM spaces WHERE key = $1 AND NOT core
 				AND NOT EXISTS (SELECT 1 FROM tiles WHERE space_key = $1)`, sp)
 			if err != nil {
 				return fmt.Errorf("space %s: %w", sp, err)
@@ -172,7 +178,7 @@ func (s *Store) RemoveAddon(ctx context.Context, key, declaredSpace string) (Add
 				out.Spaces = append(out.Spaces, sp)
 			}
 		}
-		tag, err = tx.Exec(ctx, `DELETE FROM apps WHERE key = $1`, key)
+		tag, err = tx.Exec(ctx, `DELETE FROM apps WHERE key = $1 AND NOT core`, key)
 		if err != nil {
 			return fmt.Errorf("app: %w", err)
 		}

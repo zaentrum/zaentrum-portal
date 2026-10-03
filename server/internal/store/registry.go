@@ -15,6 +15,10 @@ import (
 // ErrNotFound is returned when a keyed row does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrCore refuses to delete a core entry: an app or space the platform stands
+// on (migration 011).
+var ErrCore = errors.New("a core entry of the platform")
+
 // execer is what both the pool and a transaction offer, so an upsert is the
 // same statement whether it runs alone or inside an addon install.
 type execer interface {
@@ -23,11 +27,11 @@ type execer interface {
 
 // ─── Spaces ──────────────────────────────────────────────────────────────────
 
-const spaceCols = `key, title, ord, audience`
+const spaceCols = `key, title, ord, audience, core`
 
 func scanSpace(r rowScanner) (model.Space, error) {
 	var sp model.Space
-	err := r.Scan(&sp.Key, &sp.Title, &sp.Order, &sp.Audience)
+	err := r.Scan(&sp.Key, &sp.Title, &sp.Order, &sp.Audience, &sp.Core)
 	sp.Audience = nonNilRoles(sp.Audience)
 	return sp, err
 }
@@ -75,16 +79,16 @@ func upsertSpace(ctx context.Context, ex execer, sp model.Space) error {
 	return err
 }
 
+// DeleteSpace deletes a space and, by the foreign key, its tiles — never a
+// core space (ErrCore).
 func (s *Store) DeleteSpace(ctx context.Context, key string) error {
-	return s.execDelete(ctx, `DELETE FROM spaces WHERE key=$1`, key)
+	return s.deleteUnlessCore(ctx, "spaces", key)
 }
 
 // ─── Apps ────────────────────────────────────────────────────────────────────
 
 func (s *Store) ListApps(ctx context.Context) ([]model.App, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT key, title, description, base_url, kind, health_url, icon, enabled, proxy_url
-		FROM apps ORDER BY key`)
+	rows, err := s.pool.Query(ctx, `SELECT `+appCols+` FROM apps ORDER BY key`)
 	if err != nil {
 		return nil, err
 	}
@@ -101,9 +105,7 @@ func (s *Store) ListApps(ctx context.Context) ([]model.App, error) {
 }
 
 func (s *Store) GetApp(ctx context.Context, key string) (*model.App, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT key, title, description, base_url, kind, health_url, icon, enabled, proxy_url
-		FROM apps WHERE key=$1`, key)
+	row := s.pool.QueryRow(ctx, `SELECT `+appCols+` FROM apps WHERE key=$1`, key)
 	a, err := scanApp(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -114,6 +116,9 @@ func (s *Store) GetApp(ctx context.Context, key string) (*model.App, error) {
 	return &a, nil
 }
 
+const appCols = `key, title, description, base_url, kind, health_url, icon, enabled, proxy_url, core`
+
+// UpsertApp writes an app. Core is the platform's: it is never written here.
 func (s *Store) UpsertApp(ctx context.Context, a model.App) error {
 	return upsertApp(ctx, s.pool, a)
 }
@@ -130,9 +135,35 @@ func upsertApp(ctx context.Context, ex execer, a model.App) error {
 	return err
 }
 
+// DeleteApp deletes an app and, by the foreign key, its tiles — never a core
+// app (ErrCore).
 func (s *Store) DeleteApp(ctx context.Context, key string) error {
-	// tiles cascade via the FK.
-	return s.execDelete(ctx, `DELETE FROM apps WHERE key=$1`, key)
+	return s.deleteUnlessCore(ctx, "apps", key)
+}
+
+// deleteUnlessCore deletes a keyed row of apps or spaces unless it is core:
+// ErrCore when it is, ErrNotFound when there is none.
+func (s *Store) deleteUnlessCore(ctx context.Context, table, key string) error {
+	if table != "apps" && table != "spaces" {
+		return fmt.Errorf("no core rows in %s", table)
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM `+table+` WHERE key=$1 AND NOT core`, key)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+	var core bool
+	switch err := s.pool.QueryRow(ctx, `SELECT core FROM `+table+` WHERE key=$1`, key).Scan(&core); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ErrNotFound
+	case err != nil:
+		return err
+	case core:
+		return ErrCore
+	}
+	return ErrNotFound // deleted meanwhile
 }
 
 // ─── Tiles ───────────────────────────────────────────────────────────────────
@@ -313,7 +344,7 @@ type rowScanner interface{ Scan(dest ...any) error }
 func scanApp(r rowScanner) (model.App, error) {
 	var a model.App
 	err := r.Scan(&a.Key, &a.Title, &a.Description, &a.BaseURL, &a.Kind, &a.HealthURL,
-		&a.Icon, &a.Enabled, &a.ProxyURL)
+		&a.Icon, &a.Enabled, &a.ProxyURL, &a.Core)
 	return a, err
 }
 

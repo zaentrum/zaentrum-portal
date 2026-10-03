@@ -47,14 +47,20 @@ func keepAudience(next, stored []string, exists bool) []string {
 	return []string{}
 }
 
+// UpsertApp keeps core as the store does: no write names it.
 func (f *fakeAddonStore) UpsertApp(_ context.Context, app model.App) error {
+	app.Core = f.apps[app.Key].Core
 	f.apps[app.Key] = app
 	return nil
 }
 
 func (f *fakeAddonStore) DeleteApp(_ context.Context, key string) error {
-	if _, ok := f.apps[key]; !ok {
+	app, ok := f.apps[key]
+	switch {
+	case !ok:
 		return store.ErrNotFound
+	case app.Core:
+		return store.ErrCore
 	}
 	delete(f.apps, key)
 	delete(f.addons, key)
@@ -69,13 +75,18 @@ func (f *fakeAddonStore) DeleteApp(_ context.Context, key string) error {
 func (f *fakeAddonStore) UpsertSpace(_ context.Context, sp model.Space) error {
 	old, exists := f.spaces[sp.Key]
 	sp.Audience = keepAudience(sp.Audience, old.Audience, exists)
+	sp.Core = old.Core
 	f.spaces[sp.Key] = sp
 	return nil
 }
 
 func (f *fakeAddonStore) DeleteSpace(_ context.Context, key string) error {
-	if _, ok := f.spaces[key]; !ok {
+	sp, ok := f.spaces[key]
+	switch {
+	case !ok:
 		return store.ErrNotFound
+	case sp.Core:
+		return store.ErrCore
 	}
 	delete(f.spaces, key)
 	for k, t := range f.tiles {

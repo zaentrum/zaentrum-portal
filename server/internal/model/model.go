@@ -25,6 +25,9 @@ type App struct {
 	// embedded (e.g. "http://example"). Empty means the app is link-out only —
 	// the portal will not proxy to it.
 	ProxyURL string `json:"proxyUrl"`
+	// Core: the platform stands on this app, and it cannot be deleted. Set by
+	// the platform (migration 011); a write that names it changes nothing.
+	Core bool `json:"core"`
 }
 
 // Space is a launchpad section.
@@ -36,6 +39,9 @@ type Space struct {
 	// empty is everyone signed in. On a write, absent (nil) keeps what is
 	// stored.
 	Audience []string `json:"audience"`
+	// Core: one of the platform's own spaces, which cannot be deleted. Set by
+	// the platform (migration 011); a write that names it changes nothing.
+	Core bool `json:"core"`
 }
 
 // Visible reports whether a caller holding roles may see something meant for
