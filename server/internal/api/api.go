@@ -258,16 +258,23 @@ func (a *API) operatorApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	if !a.operatorReady(w) {
 		return
 	}
-	// The body is optional: version names the update the caller decided on, so
-	// that applying one the operator has since replaced is refused instead of
-	// rolling the platform to a version nobody chose.
+	// version names the update the caller decided on — the one it was shown —
+	// so that applying one the operator has since replaced is refused (409)
+	// instead of rolling the platform to a version nobody chose. Without it
+	// there is nothing to hold the operator's answer against, so it is
+	// required.
 	var body struct {
 		Version string `json:"version"`
 	}
 	if !decodeOptional(w, r, &body) {
 		return
 	}
-	out, err := a.op.ApplyUpdate(r.Context(), strings.TrimSpace(body.Version))
+	version := strings.TrimSpace(body.Version)
+	if version == "" {
+		badRequest(w, `apply-update names the update it applies: {"version": "<operator.availableUpdate>"}, as GET /api/portal/operator shows it — so that one the operator has replaced since is refused, not applied`)
+		return
+	}
+	out, err := a.op.ApplyUpdate(r.Context(), version)
 	switch {
 	case errors.Is(err, operator.ErrUpdateChanged):
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -1095,6 +1102,7 @@ func (a *API) configSummary() map[string]any {
 		"adminClients":     a.cfg.AdminClients,
 		"instanceSelector": a.cfg.InstanceSelector,
 		"protectedNames":   a.cfg.ProtectedNames,
+		"adminStack":       a.cfg.AdminStack,
 		"operatorGroup":    a.cfg.OperatorGroup,
 		"operatorVersion":  a.cfg.OperatorVersion,
 		"operatorPlural":   a.cfg.OperatorPlural,

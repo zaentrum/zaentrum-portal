@@ -36,19 +36,23 @@ func validName(name string) error {
 
 // Service is the operator/instances service.
 type Service struct {
-	k8s       *k8s.Client
-	cfg       config.Config
-	protected map[string]bool
-	now       func() time.Time // injectable for tests
-	token     func() string    // a fresh verify-request token; injectable for tests
+	k8s        *k8s.Client
+	cfg        config.Config
+	protected  map[string]bool
+	adminStack map[string]bool
+	now        func() time.Time // injectable for tests
+	token      func() string    // a fresh verify-request token; injectable for tests
 }
 
 func New(client *k8s.Client, cfg config.Config) *Service {
-	prot := make(map[string]bool, len(cfg.ProtectedNames))
-	for _, n := range cfg.ProtectedNames {
-		prot[n] = true
+	set := func(names []string) map[string]bool {
+		out := make(map[string]bool, len(names))
+		for _, n := range names {
+			out[n] = true
+		}
+		return out
 	}
-	return &Service{k8s: client, cfg: cfg, protected: prot, now: time.Now, token: rand.Text}
+	return &Service{k8s: client, cfg: cfg, protected: set(cfg.ProtectedNames), adminStack: set(cfg.AdminStack), now: time.Now, token: rand.Text}
 }
 
 // Available reports whether instance management is possible (in-cluster).
@@ -77,7 +81,13 @@ type Instance struct {
 	Restarts          int    `json:"restarts"`
 	Phase             string `json:"phase"` // ready|progressing|degraded|stopped
 	Protected         bool   `json:"protected"`
-	OperatorManaged   bool   `json:"operatorManaged"`
+	// AdminStack: the admin console runs on this workload, so the console
+	// keeps at least one replica of it (PORTAL_ADMIN_STACK).
+	AdminStack      bool `json:"adminStack"`
+	OperatorManaged bool `json:"operatorManaged"`
+	// Strategy is how the Deployment replaces its pods: RollingUpdate brings
+	// the new pod up before the old one goes, Recreate stops the old first.
+	Strategy string `json:"strategy,omitempty"`
 	// Group is how an operator has to reason about this workload:
 	//   platform — the operator renders it from the chart; it upgrades with it
 	//   addon    — deployed alongside, with its own repo, lifecycle and version
@@ -131,6 +141,10 @@ type Update struct {
 // and different in kind from a refusal — the API answers it 404 so a client
 // can branch on it instead of parsing a message.
 var ErrNoWorkload = errors.New("no such workload")
+
+// ErrAdminStack: the admin console runs on the workload, and the write would
+// leave nothing to undo it from — the console refuses it.
+var ErrAdminStack = errors.New("the admin console runs on it")
 
 // ErrUpdateChanged: the update on the shelf is no longer the one the caller
 // named. The channel moved, or the operator discovered another one since the
@@ -250,7 +264,9 @@ func (s *Service) Instances(ctx context.Context) ([]Instance, error) {
 				phaseOf(desired, int(d.Status.ReadyReplicas), int(d.Status.UpdatedReplicas)),
 				unhealthyReason(pods, d)),
 			Protected:          s.protected[d.Metadata.Name],
+			AdminStack:         s.adminStack[d.Metadata.Name],
 			OperatorManaged:    ownedByZaentrum(d),
+			Strategy:           d.Spec.Strategy.Type,
 			Group:              groupOf(d),
 			Reason:             unhealthyReason(pods, d),
 			AlwaysPull:         strings.EqualFold(pull, "Always") || strings.HasSuffix(img, ":latest"),
@@ -279,6 +295,9 @@ func (s *Service) Scale(ctx context.Context, name string, replicas int) (Write, 
 	}
 	if replicas < 0 || replicas > 20 {
 		return Write{}, fmt.Errorf("replicas must be between 0 and 20")
+	}
+	if replicas == 0 && s.adminStack[name] {
+		return Write{}, fmt.Errorf("%q keeps at least one replica here — %w, and scaling it to 0 would leave nothing to scale it back up from; stop it through its deployment channel if it must stop", name, ErrAdminStack)
 	}
 	// One read answers two questions: does this workload exist at all — a
 	// caller that names one we do not run gets 404, not a refusal — and who
@@ -321,6 +340,20 @@ func (s *Service) Restart(ctx context.Context, name string) (Write, error) {
 	}
 	if s.protected[name] {
 		return Write{}, fmt.Errorf("%q is a protected (stateful) service and cannot be restarted from here", name)
+	}
+	// A rolling restart of the admin stack is safe from here: the console
+	// answers from the old pod until the new one is ready, and keeps doing so
+	// if it never is. One that recreates its pods stops the old one first.
+	if s.adminStack[name] {
+		d, err := s.k8s.GetDeployment(ctx, name)
+		switch {
+		case k8s.IsNotFound(err):
+			return Write{}, fmt.Errorf("%w: %s", ErrNoWorkload, name)
+		case err != nil:
+			return Write{}, err
+		case d.Spec.Strategy.Type == "Recreate":
+			return Write{}, fmt.Errorf("%q is not restarted from here — %w, and its Deployment recreates its pods: the old one stops before the new one is ready, and a new one that does not come up leaves nothing to answer; restart it through its deployment channel", name, ErrAdminStack)
+		}
 	}
 	d, err := s.k8s.RestartDeployment(ctx, name, s.now().UTC().Format(time.RFC3339))
 	if err != nil {

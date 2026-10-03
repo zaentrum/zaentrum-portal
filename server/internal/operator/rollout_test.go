@@ -278,3 +278,32 @@ func TestApplyUpdateRefusesAnUpdateThatMoved(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// The admin stack keeps a replica on either path a scale takes: the
+// operator's resource when it owns the workload, the Deployment otherwise.
+// The refusal comes before either is written.
+func TestScaleKeepsTheAdminStackRunning(t *testing.T) {
+	fake := k8sfake.New(t)
+	cfg := config.Config{
+		OperatorGroup: "zaentrum.io", OperatorVersion: "v1alpha1", OperatorPlural: zaentrums,
+		AdminStack: []string{"portal-api", "zaentrum-portal"},
+	}
+	s := New(fake.Client("zaentrum"), cfg)
+	putDeployment(fake, "portal-api", 1, true, "")
+	putDeployment(fake, "zaentrum-portal", 1, false, "")
+	putCR(fake, "1.4.0", "stable", "")
+	for _, name := range []string{"portal-api", "zaentrum-portal"} {
+		if _, err := s.Scale(context.Background(), name, 0); !errors.Is(err, ErrAdminStack) {
+			t.Errorf("Scale(%s, 0) = %v, want ErrAdminStack", name, err)
+		}
+	}
+	if _, ok := fake.Object(zaentrums, "zaentrum")["spec"].(map[string]any)["replicas"]; ok {
+		t.Error("a refused scale patched the operator's resource")
+	}
+	if got := fmt.Sprint(fake.Object(deployments, "zaentrum-portal")["spec"].(map[string]any)["replicas"]); got != "1" {
+		t.Errorf("a refused scale wrote replicas = %s", got)
+	}
+	if _, err := s.Scale(context.Background(), "portal-api", 2); err != nil {
+		t.Errorf("Scale(portal-api, 2) = %v", err)
+	}
+}

@@ -52,9 +52,14 @@ type Config struct {
 	// Operator / instances console.
 	InstanceSelector string   // PORTAL_INSTANCE_SELECTOR — label filter for listed deployments (default "" = all in ns)
 	ProtectedNames   []string // PORTAL_PROTECT — deployments the UI must not scale/restart (default postgres,kafka,valkey,keycloak)
-	OperatorGroup    string   // PORTAL_OPERATOR_GROUP (default zaentrum.io)
-	OperatorVersion  string   // PORTAL_OPERATOR_VERSION (default v1alpha1)
-	OperatorPlural   string   // PORTAL_OPERATOR_PLURAL (default zaentrums)
+	// AdminStack are the workloads the admin console itself runs on: the
+	// console never scales one to zero — nothing would be left to scale it
+	// back up from — nor restarts one whose old pod stops before the new one
+	// is ready.
+	AdminStack      []string // PORTAL_ADMIN_STACK (default portal-api,zaentrum-portal,keycloak,postgres,katalog-manager-api)
+	OperatorGroup   string   // PORTAL_OPERATOR_GROUP (default zaentrum.io)
+	OperatorVersion string   // PORTAL_OPERATOR_VERSION (default v1alpha1)
+	OperatorPlural  string   // PORTAL_OPERATOR_PLURAL (default zaentrums)
 	// Chart addons: one ZaentrumAddon per addon, in the same group/version.
 	AddonPlural string // PORTAL_ADDON_PLURAL (default zaentrumaddons)
 
@@ -137,6 +142,7 @@ func Load() Config {
 
 		InstanceSelector: env("PORTAL_INSTANCE_SELECTOR"),
 		ProtectedNames:   splitCSV(envDefault("postgres,kafka,valkey,keycloak", "PORTAL_PROTECT")),
+		AdminStack:       splitCSV(envDefault("portal-api,zaentrum-portal,keycloak,postgres,katalog-manager-api", "PORTAL_ADMIN_STACK")),
 		OperatorGroup:    envDefault("zaentrum.io", "PORTAL_OPERATOR_GROUP"),
 		OperatorVersion:  envDefault("v1alpha1", "PORTAL_OPERATOR_VERSION"),
 		OperatorPlural:   envDefault("zaentrums", "PORTAL_OPERATOR_PLURAL"),

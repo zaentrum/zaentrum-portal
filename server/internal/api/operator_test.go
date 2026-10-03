@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,6 +42,7 @@ func newOpEnvAs(t *testing.T, role string, protected ...string) *opEnv {
 	cfg := config.Config{
 		OperatorGroup: "zaentrum.io", OperatorVersion: "v1alpha1", OperatorPlural: "zaentrums",
 		AdminRole: "zaentrum-admin", ProtectedNames: protected,
+		AdminStack: []string{"portal-api", "zaentrum-portal", "keycloak", "postgres", "katalog-manager-api"},
 	}
 	a := &API{addons: newFakeStore(), cfg: cfg, op: operator.New(kube.Client("zaentrum"), cfg)}
 	a.registration.kick = make(chan struct{}, 1)
@@ -82,6 +84,12 @@ func (e *opEnv) decodeBody(rec *httptest.ResponseRecorder) map[string]any {
 }
 
 func (e *opEnv) putDeployment(name string, replicas int, owned bool) {
+	e.putDeploymentWith(name, replicas, owned, "")
+}
+
+// putDeploymentWith seeds a Deployment with an update strategy ("" for none
+// named, which is RollingUpdate).
+func (e *opEnv) putDeploymentWith(name string, replicas int, owned bool, strategy string) {
 	md := map[string]any{"name": name}
 	if owned {
 		md["ownerReferences"] = []any{map[string]any{"kind": "Zaentrum", "name": "zaentrum"}}
@@ -90,6 +98,7 @@ func (e *opEnv) putDeployment(name string, replicas int, owned bool) {
 		"apiVersion": "apps/v1", "kind": "Deployment", "metadata": md,
 		"spec": map[string]any{
 			"replicas": replicas,
+			"strategy": map[string]any{"type": strategy},
 			"selector": map[string]any{"matchLabels": map[string]any{"app": name}},
 			"template": map[string]any{
 				"metadata": map[string]any{"annotations": map[string]any{k8s.RestartedAtAnnotation: "2026-09-21T08:00:00Z"}},
@@ -313,24 +322,33 @@ func TestPatchOperatorAnswersWithVersionAndGeneration(t *testing.T) {
 	}
 }
 
-func TestApplyUpdateTakesAnOptionalExpectedVersion(t *testing.T) {
-	// No body at all: apply whatever is on the shelf.
+// apply-update names the update it applies — the one the caller was shown —
+// so that a channel that moved, or a release that landed, while the caller
+// decided is refused instead of rolled out. Without the name there is nothing
+// to hold the operator's answer against, so it is refused too.
+func TestApplyUpdateNamesTheVersionItApplies(t *testing.T) {
+	// No body at all: refused, and nothing is written.
 	e := newOpEnv(t)
 	e.putCR("1.5.0")
-	rec := e.do(http.MethodPost, "/api/portal/operator/apply-update", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("apply-update with no body = %d %s", rec.Code, rec.Body)
+	for _, body := range []any{nil, map[string]any{}, map[string]any{"version": "  "}} {
+		rec := e.do(http.MethodPost, "/api/portal/operator/apply-update", body)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"version"`) {
+			t.Errorf("apply-update with %v = %d %s, want 400 naming version", body, rec.Code, rec.Body)
+		}
 	}
-	if body := e.decodeBody(rec); body["version"] != "1.5.0" || body["generation"] != float64(2) {
-		t.Fatalf("apply-update answered %v", body)
+	if v, _ := e.kube.Object("zaentrums", "zaentrum")["spec"].(map[string]any)["version"].(string); v != "1.4.0" {
+		t.Errorf("a refused apply must write nothing: spec.version = %q", v)
 	}
 
 	// The version the caller decided on, and it still matches.
 	e2 := newOpEnv(t)
 	e2.putCR("1.5.0")
-	rec = e2.do(http.MethodPost, "/api/portal/operator/apply-update", map[string]any{"version": "1.5.0"})
+	rec := e2.do(http.MethodPost, "/api/portal/operator/apply-update", map[string]any{"version": "1.5.0"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("apply-update with the matching version = %d %s", rec.Code, rec.Body)
+	}
+	if body := e2.decodeBody(rec); body["version"] != "1.5.0" || body["generation"] != float64(2) {
+		t.Fatalf("apply-update answered %v", body)
 	}
 
 	// It moved while the caller was deciding: 409, and the answer says what is
@@ -351,14 +369,85 @@ func TestApplyUpdateTakesAnOptionalExpectedVersion(t *testing.T) {
 	// Nothing discovered is a refusal, not a conflict.
 	e4 := newOpEnv(t)
 	e4.putCR("")
-	if rec = e4.do(http.MethodPost, "/api/portal/operator/apply-update", nil); rec.Code != http.StatusBadRequest {
+	if rec = e4.do(http.MethodPost, "/api/portal/operator/apply-update", map[string]any{"version": "1.5.0"}); rec.Code != http.StatusBadRequest {
 		t.Errorf("no update available = %d %s, want 400", rec.Code, rec.Body)
 	}
 
 	// A body that is sent must still be a well-formed one.
 	e5 := newOpEnv(t)
 	e5.putCR("1.5.0")
-	if rec = e5.do(http.MethodPost, "/api/portal/operator/apply-update", `{"channel":"edge"}`); rec.Code != http.StatusBadRequest {
+	if rec = e5.do(http.MethodPost, "/api/portal/operator/apply-update", `{"version":"1.5.0","channel":"edge"}`); rec.Code != http.StatusBadRequest {
 		t.Errorf("an unknown field = %d, want 400", rec.Code)
+	}
+}
+
+// The admin console runs on its own stack — portal-api, the portal, sign-in,
+// the registry database, the catalog manager. Scaling one of them to zero
+// from the console would leave nothing to scale it back up from, so the
+// platform keeps one replica; the console reads which they are.
+func TestTheAdminStackKeepsAReplica(t *testing.T) {
+	e := newOpEnv(t, "postgres", "keycloak")
+	for _, name := range []string{"portal-api", "zaentrum-portal", "katalog-manager-api", "chino-api"} {
+		e.putDeployment(name, 2, false)
+	}
+	e.putDeployment("operator-owned", 1, true)
+	for _, name := range []string{"portal-api", "zaentrum-portal", "katalog-manager-api"} {
+		rec := e.do(http.MethodPost, "/api/portal/operator/instances/"+name+"/scale", map[string]any{"replicas": 0})
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "keeps at least one replica") {
+			t.Errorf("scale %s to 0 = %d %s, want 400 saying why", name, rec.Code, rec.Body)
+		}
+		if got := e.kube.Object("deployments", name)["spec"].(map[string]any)["replicas"]; fmt.Sprint(got) != "2" {
+			t.Errorf("a refused scale of %s wrote replicas = %v", name, got)
+		}
+		// Down to one, and up, as before.
+		if rec := e.do(http.MethodPost, "/api/portal/operator/instances/"+name+"/scale", map[string]any{"replicas": 1}); rec.Code != http.StatusOK {
+			t.Errorf("scale %s to 1 = %d %s", name, rec.Code, rec.Body)
+		}
+	}
+	// Everything else still scales to zero.
+	if rec := e.do(http.MethodPost, "/api/portal/operator/instances/chino-api/scale", map[string]any{"replicas": 0}); rec.Code != http.StatusOK {
+		t.Errorf("scale chino-api to 0 = %d %s", rec.Code, rec.Body)
+	}
+	// The console reads which workloads are the admin stack, and how each
+	// replaces its pods.
+	rec := e.do(http.MethodGet, "/api/portal/operator", nil)
+	var state struct {
+		Instances []operator.Instance `json:"instances"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &state)
+	for _, in := range state.Instances {
+		want := in.Name == "portal-api" || in.Name == "zaentrum-portal" || in.Name == "katalog-manager-api"
+		if in.AdminStack != want {
+			t.Errorf("%s adminStack = %v", in.Name, in.AdminStack)
+		}
+	}
+}
+
+// A restart of the admin stack is safe when the Deployment rolls — the
+// console answers from the old pod until the new one is ready — and refused
+// when it recreates: the old pod would stop first, and a new one that never
+// comes up would leave nothing to answer.
+func TestTheAdminStackRestartsOnlyWhenItRolls(t *testing.T) {
+	e := newOpEnv(t)
+	e.putDeploymentWith("portal-api", 1, false, "RollingUpdate")
+	e.putDeploymentWith("zaentrum-portal", 1, false, "")
+	e.putDeploymentWith("katalog-manager-api", 1, false, "Recreate")
+	e.putDeploymentWith("transcoder", 1, false, "Recreate")
+	for name, want := range map[string]int{
+		"portal-api": http.StatusOK, "zaentrum-portal": http.StatusOK,
+		"katalog-manager-api": http.StatusBadRequest,
+		"transcoder":          http.StatusOK, // not the admin stack: its own downtime is its own
+		"nosuch-api":          http.StatusNotFound,
+	} {
+		rec := e.do(http.MethodPost, "/api/portal/operator/instances/"+name+"/restart", nil)
+		if rec.Code != want {
+			t.Errorf("restart %s = %d %s, want %d", name, rec.Code, rec.Body, want)
+		}
+	}
+	if rec := e.do(http.MethodPost, "/api/portal/operator/instances/katalog-manager-api/restart", nil); !strings.Contains(rec.Body.String(), "recreates its pods") {
+		t.Errorf("the refusal says why: %s", rec.Body)
+	}
+	if got := e.kube.Object("deployments", "katalog-manager-api")["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)[k8s.RestartedAtAnnotation]; got != "2026-09-21T08:00:00Z" {
+		t.Errorf("a refused restart wrote a stamp: %v", got)
 	}
 }

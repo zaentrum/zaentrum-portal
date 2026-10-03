@@ -231,6 +231,11 @@ type Deployment struct {
 		Selector struct {
 			MatchLabels map[string]string `json:"matchLabels"`
 		} `json:"selector"`
+		// Strategy.Type is RollingUpdate (the default: new pods come up
+		// before old ones go) or Recreate (the old pods stop first).
+		Strategy struct {
+			Type string `json:"type"`
+		} `json:"strategy"`
 		Template struct {
 			Metadata struct {
 				Annotations map[string]string `json:"annotations"`
