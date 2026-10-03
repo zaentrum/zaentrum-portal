@@ -32,6 +32,27 @@ type Space struct {
 	Key   string `json:"key"`
 	Title string `json:"title"`
 	Order int    `json:"order"`
+	// Audience is the realm roles that may see the space on the launchpad;
+	// empty is everyone signed in. On a write, absent (nil) keeps what is
+	// stored.
+	Audience []string `json:"audience"`
+}
+
+// Visible reports whether a caller holding roles may see something meant for
+// audience: everyone signed in, when it names no role; else anyone holding
+// one of the roles it names.
+func Visible(audience, roles []string) bool {
+	if len(audience) == 0 {
+		return true
+	}
+	for _, want := range audience {
+		for _, have := range roles {
+			if want == have {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Tile is a launchpad card that opens one action of an App within a Space.
@@ -50,6 +71,10 @@ type Tile struct {
 	External    bool   `json:"external"`
 	Open        string `json:"open"` // inline|newtab|"" (unset -> external decides, else inline)
 	Enabled     bool   `json:"enabled"`
+	// Audience is the realm roles that may see the tile on the launchpad;
+	// empty is everyone signed in. On a write, absent (nil) keeps what is
+	// stored.
+	Audience []string `json:"audience"`
 }
 
 // LaunchTile is a tile resolved for rendering: its href is computed from the

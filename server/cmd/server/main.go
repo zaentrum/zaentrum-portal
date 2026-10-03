@@ -50,7 +50,7 @@ func run() error {
 	defer st.Close()
 
 	// Apply the embedded, idempotent schema + seed on boot (no init job).
-	if err := st.Migrate(bgCtx, db.Migrations); err != nil {
+	if err := st.Migrate(bgCtx, db.Migrations, cfg.AdminRole); err != nil {
 		return err
 	}
 	// Subdomain-routed deployments: point the chino tile at its real origin

@@ -70,7 +70,7 @@ func exec(t *testing.T, st *Store, sql string, args ...any) {
 func TestAddonsBackfill(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
-	if err := st.Migrate(ctx, migrationsBefore(t, "008")); err != nil {
+	if err := st.Migrate(ctx, migrationsBefore(t, "008"), "zaentrum-admin"); err != nil {
 		t.Fatalf("pre-008 migrations: %v", err)
 	}
 	exec(t, st, `INSERT INTO apps (key, title, proxy_url) VALUES
@@ -89,7 +89,7 @@ func TestAddonsBackfill(t *testing.T) {
 	exec(t, st, `INSERT INTO ui_extensions (key, addon, slot, label) VALUES ('rowsonly.hint', 'rowsonly', 'search.empty', 'hint')`)
 
 	for i := 0; i < 2; i++ { // every boot re-applies every migration
-		if err := st.Migrate(ctx, db.Migrations); err != nil {
+		if err := st.Migrate(ctx, db.Migrations, "zaentrum-admin"); err != nil {
 			t.Fatalf("migrate (boot %d): %v", i+1, err)
 		}
 	}
@@ -138,7 +138,7 @@ func TestAddonsBackfill(t *testing.T) {
 func TestInstallRefreshAndRemoveAddon(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
-	if err := st.Migrate(ctx, db.Migrations); err != nil {
+	if err := st.Migrate(ctx, db.Migrations, "zaentrum-admin"); err != nil {
 		t.Fatal(err)
 	}
 	app := model.App{Key: "example", Title: "Example", Kind: "tool", Enabled: true, BaseURL: "/portal/app/example", ProxyURL: "http://example"}
@@ -260,14 +260,14 @@ func TestInstallRefreshAndRemoveAddon(t *testing.T) {
 func TestChartMigrationsUpgradeFrom008(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
-	if err := st.Migrate(ctx, migrationsBefore(t, "009")); err != nil {
+	if err := st.Migrate(ctx, migrationsBefore(t, "009"), "zaentrum-admin"); err != nil {
 		t.Fatalf("pre-009: %v", err)
 	}
 	exec(t, st, `INSERT INTO apps (key, title, proxy_url, base_url) VALUES ('example', 'Example', 'http://example', '/portal/app/example'), ('legacy', 'legacy', 'http://legacy', '')`)
 	exec(t, st, `INSERT INTO addons (key, address, version, manifest, manifest_sha256) VALUES ('example', 'http://example', '1.0.0', '{"service":"example"}', 'aa'), ('legacy', 'http://legacy', '', NULL, '')`)
 	exec(t, st, `INSERT INTO addon_components (addon_key, name, workload, role) VALUES ('example', 'example', 'example', 'primary')`)
 	for boot := 1; boot <= 3; boot++ {
-		if err := st.Migrate(ctx, db.Migrations); err != nil {
+		if err := st.Migrate(ctx, db.Migrations, "zaentrum-admin"); err != nil {
 			t.Fatalf("boot %d: %v", boot, err)
 		}
 	}
@@ -295,7 +295,7 @@ func TestChartMigrationsUpgradeFrom008(t *testing.T) {
 func TestConcurrentInstallOfTheSameAddon(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
-	if err := st.Migrate(ctx, db.Migrations); err != nil {
+	if err := st.Migrate(ctx, db.Migrations, "zaentrum-admin"); err != nil {
 		t.Fatal(err)
 	}
 	in := AddonInstall{
@@ -326,7 +326,7 @@ func TestConcurrentInstallOfTheSameAddon(t *testing.T) {
 func TestRegistrationErrors(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
-	if err := st.Migrate(ctx, db.Migrations); err != nil {
+	if err := st.Migrate(ctx, db.Migrations, "zaentrum-admin"); err != nil {
 		t.Fatal(err)
 	}
 	for _, step := range []struct{ name, msg string }{
@@ -344,7 +344,7 @@ func TestRegistrationErrors(t *testing.T) {
 	if err != nil || len(got) != 1 || got["example"] != "the platform cannot list its workloads right now" {
 		t.Errorf("errors = %v, %v", got, err)
 	}
-	if err := st.Migrate(ctx, db.Migrations); err != nil {
+	if err := st.Migrate(ctx, db.Migrations, "zaentrum-admin"); err != nil {
 		t.Fatal(err)
 	}
 	if again, _ := st.RegistrationErrors(ctx); len(again) != 1 {

@@ -24,10 +24,17 @@ ON CONFLICT (key) DO NOTHING;
 -- (catalog / scan / settings) as tabs — they are NOT launchpad tiles (that just
 -- mirrors the app's nav and fragments it). See 003 for the removal of the old
 -- scan/downloads sub-tiles from live registries.
-INSERT INTO tiles (key, app_key, space_key, title, description, icon, target, ord, badge, badge_tone, status, external, enabled) VALUES
-  ('chino.open',        'chino',   'apps',   'chino',     'movies & shows',     'glyph:c',  '',          10, 'ready', 'success', 'online',  false, true),
-  ('tv.open',           'tv',      'apps',   'tv',        'live channels',      'glyph:t',  '',          20, 'soon',  '',        'offline', false, false),
-  ('musig.open',           'musig',          'apps',   'musig',              'music',              'glyph:m', '', 30, 'soon',  '',     'offline', false, false),
-  ('katalog.catalog',      'katalog',        'manage', 'Catalog',            'browse the catalog', 'library', '', 10, 'admin', 'info', 'online',  false, true),
-  ('katalog-manage.open',  'katalog-manage', 'manage', 'Catalog Management', 'scan & settings',    'wrench',  '', 20, 'admin', 'info', 'online',  false, true)
+--
+-- The catalog tiles are for admins (audience: the admin role portal-api runs
+-- with, see 001); the products are for everyone signed in. A seed tile an
+-- admin deleted comes back on the next boot with that audience, not with
+-- everyone's.
+INSERT INTO tiles (key, app_key, space_key, title, description, icon, target, ord, badge, badge_tone, status, external, enabled, audience) VALUES
+  ('chino.open',        'chino',   'apps',   'chino',     'movies & shows',     'glyph:c',  '',          10, 'ready', 'success', 'online',  false, true, '{}'::text[]),
+  ('tv.open',           'tv',      'apps',   'tv',        'live channels',      'glyph:t',  '',          20, 'soon',  '',        'offline', false, false, '{}'::text[]),
+  ('musig.open',           'musig',          'apps',   'musig',              'music',              'glyph:m', '', 30, 'soon',  '',     'offline', false, false, '{}'::text[]),
+  ('katalog.catalog',      'katalog',        'manage', 'Catalog',            'browse the catalog', 'library', '', 10, 'admin', 'info', 'online',  false, true,
+     ARRAY[coalesce(nullif(current_setting('zaentrum.admin_role', true), ''), 'zaentrum-admin')]),
+  ('katalog-manage.open',  'katalog-manage', 'manage', 'Catalog Management', 'scan & settings',    'wrench',  '', 20, 'admin', 'info', 'online',  false, true,
+     ARRAY[coalesce(nullif(current_setting('zaentrum.admin_role', true), ''), 'zaentrum-admin')])
 ON CONFLICT (key) DO NOTHING;

@@ -14,11 +14,37 @@ import (
 // the rules the database keeps — tiles go with their app or space, a tile
 // needs both.
 
-func (f *fakeAddonStore) Launchpad(ctx context.Context) (model.Launchpad, error) {
+func (f *fakeAddonStore) Launchpad(ctx context.Context, roles []string) (model.Launchpad, error) {
 	spaces, _ := f.ListSpaces(ctx)
 	apps, _ := f.ListApps(ctx)
 	tiles, _ := f.ListTiles(ctx)
-	return store.AssembleLaunchpad(spaces, apps, tiles), nil
+	return store.AssembleLaunchpad(spaces, apps, tiles, roles), nil
+}
+
+func (f *fakeAddonStore) GetSpace(_ context.Context, key string) (*model.Space, error) {
+	if sp, ok := f.spaces[key]; ok {
+		return &sp, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeAddonStore) GetTile(_ context.Context, key string) (*model.Tile, error) {
+	if t, ok := f.tiles[key]; ok {
+		return &t, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+// keepAudience is the store's rule: a write without an audience keeps the
+// stored one, and a new row without one is everyone's.
+func keepAudience(next, stored []string, exists bool) []string {
+	switch {
+	case next != nil:
+		return next
+	case exists:
+		return stored
+	}
+	return []string{}
 }
 
 func (f *fakeAddonStore) UpsertApp(_ context.Context, app model.App) error {
@@ -41,6 +67,8 @@ func (f *fakeAddonStore) DeleteApp(_ context.Context, key string) error {
 }
 
 func (f *fakeAddonStore) UpsertSpace(_ context.Context, sp model.Space) error {
+	old, exists := f.spaces[sp.Key]
+	sp.Audience = keepAudience(sp.Audience, old.Audience, exists)
 	f.spaces[sp.Key] = sp
 	return nil
 }
@@ -78,6 +106,8 @@ func (f *fakeAddonStore) UpsertTile(_ context.Context, t model.Tile) error {
 	if !app || !space {
 		return errors.New("violates foreign key: app_key or space_key does not exist")
 	}
+	old, exists := f.tiles[t.Key]
+	t.Audience = keepAudience(t.Audience, old.Audience, exists)
 	f.tiles[t.Key] = t
 	return nil
 }

@@ -10,8 +10,9 @@ INSERT INTO apps (key, title, description, base_url, kind, icon, enabled) VALUES
   ('katalog-manage', 'Catalog Management', 'scan & settings', '/katalog-manage/', 'manage', 'wrench', true)
 ON CONFLICT (key) DO NOTHING;
 
-INSERT INTO tiles (key, app_key, space_key, title, description, icon, target, ord, badge, badge_tone, status, external, enabled) VALUES
-  ('katalog-manage.open', 'katalog-manage', 'manage', 'Catalog Management', 'scan & settings', 'wrench', '', 20, 'admin', 'info', 'online', false, true)
+INSERT INTO tiles (key, app_key, space_key, title, description, icon, target, ord, badge, badge_tone, status, external, enabled, audience) VALUES
+  ('katalog-manage.open', 'katalog-manage', 'manage', 'Catalog Management', 'scan & settings', 'wrench', '', 20, 'admin', 'info', 'online', false, true,
+   ARRAY[coalesce(nullif(current_setting('zaentrum.admin_role', true), ''), 'zaentrum-admin')])
 ON CONFLICT (key) DO NOTHING;
 
 -- Relabel the existing catalog app/tile to 'Catalog' (browse only now). Guarded on

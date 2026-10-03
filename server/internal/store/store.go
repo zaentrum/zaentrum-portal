@@ -53,9 +53,18 @@ func (s *Store) Close() {
 // Ping verifies connectivity (used by the readiness probe).
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
+// migrationLock is the session advisory lock the migrations run under.
+const migrationLock int64 = 0x7a61656e7472756d // "zaentrum"
+
 // Migrate applies every migrations/*.sql from fsys in lexical order. All
 // statements are idempotent, so this is safe to run on every boot.
-func (s *Store) Migrate(ctx context.Context, fsys fs.FS) error {
+//
+// They run on one connection that holds an advisory lock — replicas booting
+// together take turns, so a step that checks before it changes, like the
+// audience backfill in 001, runs once — and that carries the realm's admin
+// role as zaentrum.admin_role, the role the seed makes its admin tiles
+// visible to.
+func (s *Store) Migrate(ctx context.Context, fsys fs.FS, adminRole string) error {
 	entries, err := fs.ReadDir(fsys, "migrations")
 	if err != nil {
 		return fmt.Errorf("read migrations dir: %w", err)
@@ -67,12 +76,29 @@ func (s *Store) Migrate(ctx context.Context, fsys fs.FS) error {
 		}
 	}
 	sort.Strings(names)
+
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("migrations: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLock); err != nil {
+		return fmt.Errorf("migrations: lock: %w", err)
+	}
+	defer func() {
+		// Background: the lock goes with the session if this fails, but a
+		// cancelled boot must not leave it held on a pooled connection.
+		_, _ = conn.Exec(context.Background(), `SELECT set_config('zaentrum.admin_role', '', false), pg_advisory_unlock($1)`, migrationLock)
+	}()
+	if _, err := conn.Exec(ctx, `SELECT set_config('zaentrum.admin_role', $1, false)`, adminRole); err != nil {
+		return fmt.Errorf("migrations: %w", err)
+	}
 	for _, name := range names {
 		body, err := fs.ReadFile(fsys, "migrations/"+name)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", name, err)
 		}
-		if _, err := s.pool.Exec(ctx, string(body)); err != nil {
+		if _, err := conn.Exec(ctx, string(body)); err != nil {
 			return fmt.Errorf("apply %s: %w", name, err)
 		}
 		log.Printf("migrations: applied %s", name)

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -63,15 +64,17 @@ type addonStore interface {
 // substitute an in-memory one, so the rules those handlers keep are tested
 // without a database.
 type registryStore interface {
-	Launchpad(ctx context.Context) (model.Launchpad, error)
+	Launchpad(ctx context.Context, roles []string) (model.Launchpad, error)
 	ListApps(ctx context.Context) ([]model.App, error)
 	GetApp(ctx context.Context, key string) (*model.App, error)
 	UpsertApp(ctx context.Context, app model.App) error
 	DeleteApp(ctx context.Context, key string) error
 	ListSpaces(ctx context.Context) ([]model.Space, error)
+	GetSpace(ctx context.Context, key string) (*model.Space, error)
 	UpsertSpace(ctx context.Context, sp model.Space) error
 	DeleteSpace(ctx context.Context, key string) error
 	ListTiles(ctx context.Context) ([]model.Tile, error)
+	GetTile(ctx context.Context, key string) (*model.Tile, error)
 	UpsertTile(ctx context.Context, t model.Tile) error
 	DeleteTile(ctx context.Context, key string) error
 	ListExtensions(ctx context.Context) ([]model.Extension, error)
@@ -376,8 +379,14 @@ func (a *API) operatorReady(w http.ResponseWriter) bool {
 
 // ─── reads ───────────────────────────────────────────────────────────────────
 
+// launchpad is the launchpad as the caller may see it: spaces and tiles whose
+// audience names none of the caller's roles are left out, server-side.
 func (a *API) launchpad(w http.ResponseWriter, r *http.Request) {
-	lp, err := a.reg.Launchpad(r.Context())
+	var roles []string
+	if p, _ := auth.PrincipalFrom(r.Context()); p != nil {
+		roles = p.Roles
+	}
+	lp, err := a.reg.Launchpad(r.Context(), roles)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -666,11 +675,7 @@ func (a *API) upsertSpace(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "space requires key and title")
 		return
 	}
-	if err := a.reg.UpsertSpace(r.Context(), sp); err != nil {
-		serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, sp)
+	a.writeSpace(w, r, sp)
 }
 
 func (a *API) patchSpace(w http.ResponseWriter, r *http.Request) {
@@ -683,11 +688,27 @@ func (a *API) patchSpace(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "space requires title")
 		return
 	}
+	a.writeSpace(w, r, sp)
+}
+
+// writeSpace stores a space and answers with it as stored — an audience the
+// request left out is the one kept.
+func (a *API) writeSpace(w http.ResponseWriter, r *http.Request, sp model.Space) {
+	var err error
+	if sp.Audience, err = cleanAudience(sp.Audience); err != nil {
+		badRequest(w, "space "+err.Error())
+		return
+	}
 	if err := a.reg.UpsertSpace(r.Context(), sp); err != nil {
 		serverError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, sp)
+	stored, err := a.reg.GetSpace(r.Context(), sp.Key)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stored)
 }
 
 func (a *API) deleteSpace(w http.ResponseWriter, r *http.Request) {
@@ -713,11 +734,7 @@ func (a *API) upsertTile(w http.ResponseWriter, r *http.Request) {
 	if !a.validTile(w, t, false) {
 		return
 	}
-	if err := a.reg.UpsertTile(r.Context(), t); err != nil {
-		a.tileWriteError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, t)
+	a.writeTile(w, r, t)
 }
 
 func (a *API) patchTile(w http.ResponseWriter, r *http.Request) {
@@ -729,11 +746,58 @@ func (a *API) patchTile(w http.ResponseWriter, r *http.Request) {
 	if !a.validTile(w, t, true) {
 		return
 	}
+	a.writeTile(w, r, t)
+}
+
+// writeTile stores a tile and answers with it as stored — an audience the
+// request left out is the one kept.
+func (a *API) writeTile(w http.ResponseWriter, r *http.Request, t model.Tile) {
+	var err error
+	if t.Audience, err = cleanAudience(t.Audience); err != nil {
+		badRequest(w, "tile "+err.Error())
+		return
+	}
 	if err := a.reg.UpsertTile(r.Context(), t); err != nil {
 		a.tileWriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, t)
+	stored, err := a.reg.GetTile(r.Context(), t.Key)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stored)
+}
+
+// Audience limits: generous for a realm's roles, small enough to render.
+const (
+	maxAudience     = 32
+	maxAudienceRole = 255
+)
+
+// cleanAudience reads an audience as an admin wrote it: realm role names,
+// trimmed, each once. nil — the request left it out — stays nil, and the
+// store keeps what it has; an empty list is everyone signed in.
+func cleanAudience(in []string) ([]string, error) {
+	if in == nil {
+		return nil, nil
+	}
+	out := []string{}
+	for _, role := range in {
+		role = strings.TrimSpace(role)
+		switch {
+		case role == "":
+			continue
+		case len(role) > maxAudienceRole || hasControl(role) || strings.ContainsAny(role, " ,"):
+			return nil, fmt.Errorf("audience: %q is no realm role name", role)
+		case !slices.Contains(out, role):
+			out = append(out, role)
+		}
+	}
+	if len(out) > maxAudience {
+		return nil, fmt.Errorf("audience: at most %d roles", maxAudience)
+	}
+	return out, nil
 }
 
 func (a *API) deleteTile(w http.ResponseWriter, r *http.Request) {
