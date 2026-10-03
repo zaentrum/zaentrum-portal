@@ -11,8 +11,16 @@ import {
   Heading,
 } from '@nalet/design-system';
 import type { TableColumn } from '@nalet/design-system';
-import { Minus, Plus, RotateCw, RefreshCw, Lock, ArrowUpCircle } from 'lucide-react';
-import { usePortalApi, type OperatorState, type Instance, type InstalledAddon, type OperatorController } from '../lib/api';
+import { Minus, Plus, RotateCw, RefreshCw, Lock, ArrowUpCircle, ShieldCheck } from 'lucide-react';
+import {
+  usePortalApi,
+  type OperatorState,
+  type Instance,
+  type InstalledAddon,
+  type OperatorController,
+  type OperatorVerification,
+  type VerifyRequest,
+} from '../lib/api';
 import { containersSummary, hasComponentGroups, phaseTone } from '../lib/addons';
 import {
   controllerNote,
@@ -24,6 +32,21 @@ import {
   isVersionLike,
   notReportedNote,
 } from '../lib/controller';
+import {
+  RESULT_RUNNING,
+  isAnswered,
+  since,
+  verificationAttention,
+  verificationBusy,
+  verificationCondition,
+  verificationCounts,
+  verificationFinished,
+  verificationLabel,
+  verificationNote,
+  verificationOtherCounts,
+  verificationTone,
+  verificationTrigger,
+} from '../lib/verification';
 import './operator.css';
 
 const REFRESH_MS = 5000;
@@ -112,6 +135,9 @@ export function OperatorConsole() {
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [addons, setAddons] = useState<InstalledAddon[] | null>(null);
+  // following: the request token of a verification this console asked for,
+  // until the run that answers it has ended.
+  const [following, setFollowing] = useState<string | null>(null);
   const inflight = useRef(false);
   const seq = useRef(0);
 
@@ -192,8 +218,29 @@ export function OperatorConsole() {
   const patchOperator = (patch: Record<string, string>) =>
     act('operator', () => api('/operator', { method: 'PATCH', body: JSON.stringify(patch) }), 'updated');
   const applyUpdate = () => act('operator', () => api('/operator/apply-update', { method: 'POST' }), 'update triggered');
+  // The operator runs the checks; the answer is the token its run will carry.
+  const verifyNow = () =>
+    act(
+      'verification',
+      async () => {
+        const out = await api<VerifyRequest>('/operator/verify', { method: 'POST' });
+        if (out?.request) setFollowing(out.request);
+      },
+      'requested',
+    );
 
   const op = state?.operator;
+  const verification = op?.verification;
+
+  // A run this console asked for is followed through the page's own polling:
+  // once the document carries its token with a result that is no longer
+  // Running, the toolbar says how it went.
+  useEffect(() => {
+    if (following && verification && isAnswered(verification, following)) {
+      setMsg(verificationFinished(verification));
+      setFollowing(null);
+    }
+  }, [verification, following]);
 
   // The server classifies each workload (owner refs for platform, the addon
   // labels for addons); installed addons claim the workloads they declare.
@@ -380,6 +427,15 @@ export function OperatorConsole() {
         </Card>
       )}
 
+      {/* the platform checking itself — absent against an older portal-api */}
+      {op?.present && state?.available && verification && (
+        <VerificationCard
+          v={verification}
+          requesting={busy === 'verification' || !!following}
+          onVerify={verifyNow}
+        />
+      )}
+
       {/* the operator's own controller — read-only on purpose */}
       {op?.present && state?.available && <ControllerCard controller={op.controller} />}
 
@@ -438,6 +494,104 @@ export function OperatorConsole() {
         )
       )}
     </div>
+  );
+}
+
+// VerificationCard is the platform checking itself: how the last run went,
+// after which update, and what failed — and "verify now" to ask for another.
+//
+// The operator runs the checks, after every update and on request; the card
+// shows its record and asks, and decides nothing itself. The button waits
+// while a run is in progress or a request waits for one, because asking again
+// then changes nothing; a platform with verification switched off gets no
+// button at all, since the run it would ask for never comes.
+function VerificationCard({
+  v,
+  requesting,
+  onVerify,
+}: {
+  v: OperatorVerification;
+  requesting: boolean;
+  onVerify: () => void;
+}) {
+  const now = Date.now();
+  const running = v.result === RESULT_RUNNING;
+  const busy = requesting || verificationBusy(v);
+  const when = running || !v.finishedAt ? v.startedAt : v.finishedAt;
+  const otherCounts = verificationOtherCounts(v);
+  const attention = verificationAttention(v);
+  const note = verificationNote(v);
+  return (
+    <Card
+      header={<span className="op__card-title">verification</span>}
+      headerAside={
+        v.enabled ? (
+          <Button
+            size="sm"
+            leading={<ShieldCheck size={14} />}
+            loading={busy}
+            onClick={onVerify}
+            title={busy ? (running ? 'a run is in progress' : 'a run is requested') : 'run the platform checks now'}
+          >
+            verify now
+          </Button>
+        ) : (
+          <Badge tone="neutral" title="spec.verification.enabled is false">
+            off
+          </Badge>
+        )
+      }
+    >
+      <div className="op__grid">
+        <Field label="result">
+          <span className="op__status">
+            <Badge tone={verificationTone(v.result)} dot title={verificationCondition(v) || undefined}>
+              {verificationLabel(v)}
+            </Badge>
+            {v.pendingRequest && <Text variant="dim">requested</Text>}
+          </span>
+        </Field>
+        {v.result && (
+          <>
+            <Field label="checks">
+              <span className="op__mono">{verificationCounts(v) || '—'}</span>
+              {otherCounts && <span className="op__counts-more">{otherCounts}</span>}
+            </Field>
+            <Field label={running || !v.finishedAt ? 'started' : 'finished'}>
+              <Text variant="dim" title={when}>
+                {since(when, now) || '—'}
+              </Text>
+            </Field>
+            <Field label="after">
+              <span className="op__mono">{verificationTrigger(v) || '—'}</span>
+            </Field>
+            {v.job && (
+              <Field label="job">
+                <span className="op__mono op__wrap">{v.job}</span>
+              </Field>
+            )}
+          </>
+        )}
+      </div>
+      {attention.length > 0 && (
+        <ul className="op__checks">
+          {attention.map((c, i) => (
+            <li key={`${i}-${c.name}`} className="op__check">
+              <Badge tone="amber" dot={c.status === 'fail'}>
+                {c.status}
+              </Badge>
+              <span className="op__mono">{c.name}</span>
+              {c.detail && <Text variant="dim">{c.detail}</Text>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {note && (
+        <Text variant="muted" className="op__card-note">
+          {note}
+        </Text>
+      )}
+    </Card>
   );
 }
 

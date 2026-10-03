@@ -145,6 +145,46 @@ export interface OperatorController {
   availableUpdate?: string;
   observedAt?: string;
 }
+// VerificationCheck is one check of a verification run.
+export interface VerificationCheck {
+  name: string;
+  status: string; // ok | warn | fail | skip
+  detail: string;
+}
+// OperatorVerification is the platform checking itself: the run the operator
+// last recorded (status.verification of its resource), whether it runs one at
+// all, its Verified condition, and a request still waiting. result is null
+// when no run was ever reported — which is also what every operator older
+// than verification reports — and the run's fields are then absent, not zero.
+export interface OperatorVerification {
+  enabled: boolean; // spec.verification.enabled; on unless switched off
+  result: string | null; // Passed | Failed | Running | Skipped | Error
+  trigger?: string; // update | request
+  // The token of the request the run answers. A console that asked follows
+  // the document until this is its token and result is no longer Running.
+  request?: string;
+  fingerprint?: string;
+  version?: string; // the platform version the run checked
+  startedAt?: string;
+  finishedAt?: string; // '' while the run is in progress
+  job?: string;
+  passed?: number;
+  failed?: number;
+  warned?: number;
+  skipped?: number;
+  checks?: VerificationCheck[];
+  message?: string;
+  condition?: { status: string; reason: string; lastTransitionTime: string };
+  // A request no run has answered yet; absent when none is waiting.
+  pendingRequest?: string;
+  // Why the record could not be read, when it could not.
+  note?: string;
+}
+// VerifyRequest answers POST /operator/verify: the token the run that answers
+// the request will carry as verification.request.
+export interface VerifyRequest {
+  request: string;
+}
 // When present is false (the demo / no operator) the backend omits the rest and
 // may include a note, so the detail fields are optional.
 export interface OperatorInfo {
@@ -166,6 +206,9 @@ export interface OperatorInfo {
   // The controller in charge of all of the above, when the operator reports
   // it. Absent against every operator older than the field.
   controller?: OperatorController;
+  // How the platform last verified itself. Absent against a portal-api older
+  // than the field; present otherwise whenever the operator is.
+  verification?: OperatorVerification;
 }
 export interface OperatorState {
   available: boolean;

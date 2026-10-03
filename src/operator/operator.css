@@ -60,12 +60,41 @@
 
 /* The controller card's one sentence: what updates it, and that the platform
    does not. It sits under the grid, not beside a control, because there is no
-   control — reading it is the whole interaction. */
-.op__ctl-note {
+   control — reading it is the whole interaction. The verification card's note
+   is the same kind of sentence and reads the same way. */
+.op__ctl-note,
+.op__card-note {
   display: block;
   margin-top: 16px;
   font-size: 13px;
   line-height: 1.5;
+}
+
+/* What else a run counted — warned, skipped — under the passed/failed pair,
+   so that the pair every run has stays on one line. */
+.op__counts-more {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--fg-dim, #6E7787);
+}
+
+/* The checks of the last run that need a reader: failures first, then
+   warnings, each in the check's own words. ok and skip are counted in the
+   grid, not listed — fourteen rows that passed would hide the one that failed. */
+.op__checks {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.op__check {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 13px;
 }
 /* A digest-pinned controller image is 71 characters; it wraps rather than
    stretching the card. */
