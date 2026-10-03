@@ -1,8 +1,8 @@
 // Package k8sfake is an in-memory apiserver for tests. It serves namespaced
 // custom resources and Secrets with the semantics portal-api relies on:
-// resourceVersion conflicts on update, generation bumps on spec changes, JSON
-// merge patch, server-side dry runs, generateName, and owner-reference garbage
-// collection on delete.
+// resourceVersion conflicts on update and on a patch that carries one,
+// generation bumps on spec changes, JSON merge patch, server-side dry runs,
+// generateName, and owner-reference garbage collection on delete.
 //
 // Secrets are create-only for portal-api: reading, changing or deleting one —
 // get, list, watch, update, patch or delete — fails the test.
@@ -352,6 +352,13 @@ func (s *Server) serveResource(w http.ResponseWriter, r *http.Request, plural, n
 			status(w, http.StatusBadRequest, "BadRequest", err.Error())
 			return
 		}
+		// A resourceVersion in the patch is a precondition, as the apiserver
+		// treats it: the patch applies to that version of the object or not
+		// at all.
+		if rv := patchResourceVersion(patch); rv != "" && rv != str(meta(cur)["resourceVersion"]) {
+			status(w, http.StatusConflict, "Conflict", "the object has been modified; please apply your changes to the latest version and try again")
+			return
+		}
 		next, _ := MergePatch(cur, patch).(map[string]any)
 		s.store(key, cur, next)
 		writeJSON(w, http.StatusOK, s.objects[key])
@@ -413,6 +420,14 @@ func (s *Server) collect(kind, name string) {
 			}
 		}
 	}
+}
+
+// patchResourceVersion is the metadata.resourceVersion a patch carries, ""
+// when it carries none.
+func patchResourceVersion(patch any) string {
+	p, _ := patch.(map[string]any)
+	md, _ := p["metadata"].(map[string]any)
+	return str(md["resourceVersion"])
 }
 
 // MergePatch applies an RFC 7386 JSON merge patch.

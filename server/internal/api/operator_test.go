@@ -30,6 +30,13 @@ type opEnv struct {
 
 func newOpEnv(t *testing.T, protected ...string) *opEnv {
 	t.Helper()
+	return newOpEnvAs(t, "zaentrum-admin", protected...)
+}
+
+// newOpEnvAs serves the console to a caller who holds role and nothing else;
+// the console's own admin role stays zaentrum-admin.
+func newOpEnvAs(t *testing.T, role string, protected ...string) *opEnv {
+	t.Helper()
 	kube := k8sfake.New(t)
 	cfg := config.Config{
 		OperatorGroup: "zaentrum.io", OperatorVersion: "v1alpha1", OperatorPlural: "zaentrums",
@@ -37,7 +44,8 @@ func newOpEnv(t *testing.T, protected ...string) *opEnv {
 	}
 	a := &API{addons: newFakeStore(), cfg: cfg, op: operator.New(kube.Client("zaentrum"), cfg)}
 	a.registration.kick = make(chan struct{}, 1)
-	jwt, err := auth.NewJWTVerifier(context.Background(), "", "", cfg.AdminRole, false, true)
+	// A verifier without an issuer signs every caller in with this one role.
+	jwt, err := auth.NewJWTVerifier(context.Background(), "", "", role, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

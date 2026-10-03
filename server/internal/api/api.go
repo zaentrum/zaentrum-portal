@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/zaentrum/zaentrum-portal/server/internal/config"
 	"github.com/zaentrum/zaentrum-portal/server/internal/dbbrowse"
 	"github.com/zaentrum/zaentrum-portal/server/internal/eventtap"
+	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
 	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
 	"github.com/zaentrum/zaentrum-portal/server/internal/redact"
@@ -141,6 +143,9 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 				ar.Get("/operator", a.operatorGet)
 				ar.Patch("/operator", a.operatorPatch)
 				ar.Post("/operator/apply-update", a.operatorApplyUpdate)
+				// Ask the operator to verify the platform now (verification.go
+				// in the operator package): one annotation, the operator runs it.
+				ar.Post("/operator/verify", a.operatorVerify)
 				ar.Post("/operator/instances/{name}/scale", a.instanceScale)
 				ar.Post("/operator/instances/{name}/restart", a.instanceRestart)
 
@@ -247,6 +252,60 @@ func (a *API) operatorApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusOK, out)
 	}
+}
+
+// operatorVerify asks the operator to verify the platform now, and answers 202
+// with the request's token: the run is the operator's to start, and a client
+// follows the document until operator.verification.request is that token and
+// its result is no longer Running.
+//
+// A request while a run is in progress is accepted and waits for that run to
+// end; a request while another one waits joins it, and answers with its token.
+// Only a platform whose verification is switched off refuses one — 409,
+// because the run it asks for would never come.
+func (a *API) operatorVerify(w http.ResponseWriter, r *http.Request) {
+	if !a.operatorReady(w) {
+		return
+	}
+	// A request says nothing beyond itself; a body that is sent must be empty.
+	var body struct{}
+	if !decodeOptional(w, r, &body) {
+		return
+	}
+	out, err := a.op.RequestVerification(r.Context())
+	switch {
+	case errors.Is(err, operator.ErrVerificationDisabled), k8s.IsConflict(err):
+		http.Error(w, err.Error(), http.StatusConflict)
+	case k8s.IsForbidden(err):
+		http.Error(w, "portal-api may not write the operator's resource — update the zaentrum-operator, whose portal-api Role grants it: "+err.Error(),
+			http.StatusServiceUnavailable)
+	case err != nil:
+		badRequest(w, err.Error())
+	default:
+		// Who asked, in the log: the request reaches the cluster as
+		// portal-api's own service account, so this line is the only record
+		// of the person behind it.
+		if out.Joined {
+			log.Printf("operator: %s asked for a verification; request %s was already waiting and answers it", requester(r), out.Request)
+		} else {
+			log.Printf("operator: %s asked for a verification: request %s", requester(r), out.Request)
+		}
+		writeJSON(w, http.StatusAccepted, out)
+	}
+}
+
+// requester names the caller for the log: the username, else the subject.
+func requester(r *http.Request) string {
+	p, _ := auth.PrincipalFrom(r.Context())
+	switch {
+	case p == nil:
+		return "an unknown caller"
+	case p.Username != "":
+		return p.Username
+	case p.Subject != "":
+		return p.Subject
+	}
+	return "an unknown caller"
 }
 
 func (a *API) instanceScale(w http.ResponseWriter, r *http.Request) {

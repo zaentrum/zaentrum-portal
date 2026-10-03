@@ -9,6 +9,7 @@ package operator
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,7 @@ type Service struct {
 	cfg       config.Config
 	protected map[string]bool
 	now       func() time.Time // injectable for tests
+	token     func() string    // a fresh verify-request token; injectable for tests
 }
 
 func New(client *k8s.Client, cfg config.Config) *Service {
@@ -46,7 +48,7 @@ func New(client *k8s.Client, cfg config.Config) *Service {
 	for _, n := range cfg.ProtectedNames {
 		prot[n] = true
 	}
-	return &Service{k8s: client, cfg: cfg, protected: prot, now: time.Now}
+	return &Service{k8s: client, cfg: cfg, protected: prot, now: time.Now, token: rand.Text}
 }
 
 // Available reports whether instance management is possible (in-cluster).

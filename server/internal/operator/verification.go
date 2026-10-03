@@ -1,8 +1,13 @@
 package operator
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
+
+	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
 )
 
 // The platform verifies itself. After every rollout the operator runs the
@@ -35,6 +40,16 @@ const (
 	ResultSkipped = "Skipped"
 	ResultError   = "Error"
 )
+
+// verifyAttempts bounds the read-decide-write loop of a request. Each lost
+// race with another write to the resource — usually the operator's own status
+// — is decided again from a fresh read.
+const verifyAttempts = 4
+
+// ErrVerificationDisabled: spec.verification.enabled is false. The operator
+// runs no checks, so a request would wait for a run that never comes; the API
+// answers it 409 instead of accepting it.
+var ErrVerificationDisabled = errors.New("verification is disabled")
 
 // Verification is the record as the console and the CLI read it.
 //
@@ -108,6 +123,16 @@ type VerifiedCondition struct {
 	LastTransitionTime string `json:"lastTransitionTime"`
 }
 
+// VerifyRequest is what asking for a run produced: the token the run that
+// answers it will carry in status.verification.request.
+type VerifyRequest struct {
+	Request string `json:"request"`
+	// Joined: a request was already waiting and this one joined it instead of
+	// writing another, so one run answers both. Said in the log, not on the
+	// wire — the caller follows the token either way.
+	Joined bool `json:"-"`
+}
+
 // verificationRecord is status.verification as the operator writes it.
 type verificationRecord struct {
 	Result string `json:"result"`
@@ -173,4 +198,51 @@ func pendingRequest(annotations map[string]string, answered string) string {
 		return ""
 	}
 	return asked
+}
+
+// RequestVerification asks the operator to verify the platform now, and
+// answers with the token the run that answers will carry.
+//
+// It writes one annotation, with a merge patch on metadata: no spec change, so
+// no new generation and no rollout. The patch names the resourceVersion the
+// decision was made on, which makes it conditional — when anything wrote the
+// resource in between, the operator's status included, the apiserver refuses
+// it 409 and the decision is made again from a fresh read instead of over a
+// change it did not see.
+//
+// One request waits at a time, and a second one joins it. The annotation
+// holds one value, so a new token written over a waiting one would leave
+// whoever asked first following a run that never comes. A request made while
+// a run is in progress is not refused: it waits, and the operator starts its
+// run when the current one ends — so the run that answers a request always
+// began after it was made.
+func (s *Service) RequestVerification(ctx context.Context) (VerifyRequest, error) {
+	var err error
+	for attempt := 1; attempt <= verifyAttempts; attempt++ {
+		cr, note := s.zaentrum(ctx)
+		if cr == nil {
+			return VerifyRequest{}, fmt.Errorf("no operator instance to verify: %s", note)
+		}
+		v := verificationOf(*cr)
+		if !v.Enabled {
+			return VerifyRequest{}, fmt.Errorf("%w: spec.verification.enabled is false on %s, so the operator runs no checks — enable it to verify the platform",
+				ErrVerificationDisabled, cr.Metadata.Name)
+		}
+		if v.PendingRequest != "" {
+			return VerifyRequest{Request: v.PendingRequest, Joined: true}, nil
+		}
+		token := s.token()
+		md := map[string]any{"annotations": map[string]string{AnnotationVerifyRequest: token}}
+		if cr.Metadata.ResourceVersion != "" {
+			md["resourceVersion"] = cr.Metadata.ResourceVersion
+		}
+		patch, _ := json.Marshal(map[string]any{"metadata": md})
+		if _, err = s.k8s.PatchResource(ctx, s.cfg.OperatorGroup, s.cfg.OperatorVersion, s.cfg.OperatorPlural, cr.Metadata.Name, patch); err == nil {
+			return VerifyRequest{Request: token}, nil
+		}
+		if !k8s.IsConflict(err) {
+			return VerifyRequest{}, err
+		}
+	}
+	return VerifyRequest{}, fmt.Errorf("the operator's resource changed on every attempt to ask for a run — try again: %w", err)
 }
