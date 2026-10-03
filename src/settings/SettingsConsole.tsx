@@ -16,8 +16,11 @@ import {
 } from '@nalet/design-system';
 import type { TableColumn } from '@nalet/design-system';
 import { Plus, Pencil, Trash2 } from 'lucide-react';
-import { usePortalApi, type App, type Space, type Tile, type Extension } from '../lib/api';
+import { useMe, usePortalApi, type App, type Space, type Tile, type Extension } from '../lib/api';
 import { ICON_CHOICES } from '../lib/icons';
+import { DEFAULT_ADMIN_ROLE, audienceChoice, audienceFor, audienceLabel, type AudienceChoice } from '../lib/audience';
+import { deletable, deleteConfirmation, type RegistryKind } from '../lib/confirm';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { useResource } from './useResource';
 import { AddonsPanel } from './AddonsPanel';
 import './settings.css';
@@ -26,6 +29,28 @@ const KINDS = ['product', 'manage', 'tool', 'external'];
 const BADGE_TONES = ['', 'info', 'success', 'warning', 'danger', 'neutral'];
 const STATUSES = ['', 'online', 'offline', 'degraded', 'unknown'];
 const EXT_KINDS = ['link', 'action'];
+
+// The tiles of the registry, for what a delete of an app or a space takes
+// with it.
+function useTiles(): Tile[] {
+  const api = usePortalApi();
+  const [tiles, setTiles] = useState<Tile[]>([]);
+  useEffect(() => {
+    let live = true;
+    api<Tile[]>('/tiles')
+      .then((t) => live && setTiles(t))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [api]);
+  return tiles;
+}
+
+// The admin role portal-api runs with, which "admins" stands for.
+function useAdminRole(): string {
+  return useMe()?.adminRole || DEFAULT_ADMIN_ROLE;
+}
 
 function opts(values: string[], noneLabel?: string) {
   return values.map((v) => ({ label: v === '' ? (noneLabel ?? '(none)') : v, value: v }));
@@ -68,20 +93,28 @@ export function SettingsConsole() {
 
 // ─── generic CRUD panel ──────────────────────────────────────────────────────
 
-function CrudPanel<T extends { key: string }>({
+// A row the registry may mark core: the platform stands on it, and it is
+// never deleted.
+type Row = { key: string; core?: boolean };
+
+function CrudPanel<T extends Row>({
   singular,
   path,
   columns,
   empty,
   keyHint,
   renderForm,
+  deleteContext,
 }: {
-  singular: string;
+  singular: RegistryKind;
   path: string;
   columns: TableColumn<T>[];
   empty: () => T;
   keyHint?: string;
-  renderForm: (draft: T, patch: (p: Partial<T>) => void) => ReactNode;
+  renderForm: (draft: T, patch: (p: Partial<T>) => void, isNew: boolean) => ReactNode;
+  // deleteContext: what a delete would take with it (the tiles of an app
+  // or a space).
+  deleteContext?: () => { tiles?: { appKey: string; spaceKey: string }[] };
 }) {
   const { items, loading, error, save, remove } = useResource<T>(path);
   const [draft, setDraft] = useState<T | null>(null);
@@ -89,6 +122,7 @@ function CrudPanel<T extends { key: string }>({
   const [busy, setBusy] = useState(false);
   const [formErr, setFormErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<T | null>(null);
 
   const patch = (p: Partial<T>) => setDraft((d) => (d ? { ...d, ...p } : d));
 
@@ -122,15 +156,12 @@ function CrudPanel<T extends { key: string }>({
     }
   }
 
+  // The dialog says what goes with the row, and shows a refusal in the
+  // server's words.
   async function del(row: T) {
-    if (!confirm(`delete ${singular} "${row.key}"?`)) return;
     setMsg(null);
-    try {
-      await remove(row.key);
-      setMsg(`deleted ${row.key}`);
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : String(e));
-    }
+    await remove(row.key);
+    setMsg(`deleted ${row.key}`);
   }
 
   // The actions column has no backing field; `key` is only used as a React key
@@ -140,13 +171,19 @@ function CrudPanel<T extends { key: string }>({
     header: '',
     align: 'right',
     render: (r: T) => (
-      <span style={{ display: 'inline-flex', gap: 4 }}>
+      <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <Button variant="ghost" size="sm" leading={<Pencil size={13} />} onClick={() => openEdit(r)}>
           edit
         </Button>
-        <Button variant="ghost" size="sm" leading={<Trash2 size={13} />} onClick={() => del(r)}>
-          del
-        </Button>
+        {deletable(r) ? (
+          <Button variant="ghost" size="sm" leading={<Trash2 size={13} />} onClick={() => setDeleting(r)}>
+            del
+          </Button>
+        ) : (
+          <Badge tone="neutral" title="a core entry of the platform: it can be edited, never deleted">
+            core
+          </Badge>
+        )}
       </span>
     ),
   } as unknown as TableColumn<T>;
@@ -199,22 +236,80 @@ function CrudPanel<T extends { key: string }>({
                 onChange={(e) => patch({ key: e.target.value } as Partial<T>)}
               />
             </Field>
-            {renderForm(draft, patch)}
+            {renderForm(draft, patch, isNew)}
             {formErr && <span className="set__err">{formErr}</span>}
           </div>
         </Modal>
       )}
+
+      {deleting && (
+        <ConfirmDialog
+          confirmation={deleteConfirmation(singular, deleting, deleteContext?.())}
+          onConfirm={() => del(deleting)}
+          onClose={() => setDeleting(null)}
+        />
+      )}
     </div>
+  );
+}
+
+// AudienceField sets who sees a tile or a space on the launchpad: everyone
+// signed in, admins, or the roles named. The server filters the launchpad by
+// it, so whoever it leaves out is never sent the row. Left untouched, an
+// edit sends no audience and the stored one stays.
+function AudienceField({
+  audience,
+  adminRole,
+  onChange,
+}: {
+  audience: string[] | undefined;
+  adminRole: string;
+  onChange: (audience: string[]) => void;
+}) {
+  const [choice, setChoice] = useState<AudienceChoice>(audienceChoice(audience, adminRole));
+  const [roles, setRoles] = useState((audience ?? []).join(', '));
+  return (
+    <>
+      <Field label="visible to" hint="who sees it on the launchpad — it is not sent to anyone else">
+        <Select
+          value={choice}
+          onChange={(e) => {
+            const next = e.target.value as AudienceChoice;
+            setChoice(next);
+            onChange(audienceFor(next, roles, adminRole));
+          }}
+          options={[
+            { label: 'everyone signed in', value: 'everyone' },
+            { label: `admins (${adminRole})`, value: 'admins' },
+            { label: 'roles…', value: 'roles' },
+          ]}
+        />
+      </Field>
+      {choice === 'roles' && (
+        <Field label="roles" hint="realm roles, separated by commas: anyone holding one of them sees it; none named is everyone">
+          <Input
+            value={roles}
+            placeholder="ops, beta"
+            onChange={(e) => {
+              setRoles(e.target.value);
+              onChange(audienceFor('roles', e.target.value, adminRole));
+            }}
+          />
+        </Field>
+      )}
+    </>
   );
 }
 
 // ─── apps ────────────────────────────────────────────────────────────────────
 
 function AppsPanel() {
+  const tiles = useTiles();
   return (
     <CrudPanel<App>
       singular="app"
       path="/apps"
+      deleteContext={() => ({ tiles })}
       keyHint="e.g. katalog, chino, my-tool"
       empty={() => ({ key: '', title: '', description: '', baseUrl: '', kind: 'tool', healthUrl: '', icon: '', enabled: true, proxyUrl: '' })}
       columns={[
@@ -310,13 +405,17 @@ function ExtensionsPanel() {
           <Field label="kind">
             <Select value={d.kind} onChange={(e) => patch({ kind: e.target.value })} options={opts(EXT_KINDS)} />
           </Field>
-          <Field label="url" hint="{q} is replaced with the current query">
+          <Field
+            label="url"
+            hint={
+              d.kind === 'action'
+                ? "a path on this instance — an addon's API, e.g. /api/portal/apps/<addon>/…; sent as a POST with the user's token. {q} is replaced with the current query"
+                : 'a path on this instance, e.g. /portal/app/<addon>?q={q}, or a URL on its own origin. {q} is replaced with the current query'
+            }
+          >
             <Input value={d.url} onChange={(e) => patch({ url: e.target.value })} />
           </Field>
-          <Field label="method" hint="for kind=action">
-            <Input value={d.method} onChange={(e) => patch({ method: e.target.value })} />
-          </Field>
-          <Field label="status url" hint="optional live-status feed">
+          <Field label="status url" hint="optional live-status feed — a path on this instance">
             <Input value={d.statusUrl} onChange={(e) => patch({ statusUrl: e.target.value })} />
           </Field>
           <Field label="icon">
@@ -344,16 +443,24 @@ function ExtensionsPanel() {
 // ─── spaces ──────────────────────────────────────────────────────────────────
 
 function SpacesPanel() {
+  const tiles = useTiles();
+  const adminRole = useAdminRole();
   return (
     <CrudPanel<Space>
       singular="space"
       path="/spaces"
       keyHint="e.g. apps, manage, ops"
-      empty={() => ({ key: '', title: '', order: 0 })}
+      deleteContext={() => ({ tiles })}
+      empty={() => ({ key: '', title: '', order: 0, audience: [] })}
       columns={[
         { key: 'title', header: 'title', render: (r) => <b>{r.title}</b> },
         { key: 'key', header: 'key', render: (r) => <span className="set__mono">{r.key}</span> },
         { key: 'order', header: 'order', align: 'right', render: (r) => r.order },
+        {
+          key: 'audience',
+          header: 'visible to',
+          render: (r) => (r.audience ? <Badge tone="neutral">{audienceLabel(r.audience, adminRole)}</Badge> : <Text variant="dim">—</Text>),
+        },
       ]}
       renderForm={(d, patch) => (
         <>
@@ -367,6 +474,7 @@ function SpacesPanel() {
               onChange={(e) => patch({ order: parseInt(e.target.value, 10) || 0 })}
             />
           </Field>
+          <AudienceField audience={d.audience} adminRole={adminRole} onChange={(audience) => patch({ audience })} />
         </>
       )}
     />
@@ -377,6 +485,7 @@ function SpacesPanel() {
 
 function TilesPanel() {
   const api = usePortalApi();
+  const adminRole = useAdminRole();
   const [apps, setApps] = useState<App[]>([]);
   const [spaces, setSpaces] = useState<Space[]>([]);
   useEffect(() => {
@@ -408,6 +517,7 @@ function TilesPanel() {
         external: false,
         open: 'inline',
         enabled: true,
+        audience: [],
       })}
       columns={[
         { key: 'title', header: 'title', render: (r) => <b>{r.title}</b> },
@@ -426,6 +536,11 @@ function TilesPanel() {
             ),
         },
         {
+          key: 'audience',
+          header: 'visible to',
+          render: (r) => (r.audience ? <Badge tone="neutral">{audienceLabel(r.audience, adminRole)}</Badge> : <Text variant="dim">—</Text>),
+        },
+        {
           key: 'enabled',
           header: 'enabled',
           render: (r) => (r.enabled ? <Badge tone="green" dot>on</Badge> : <Badge tone="neutral">off</Badge>),
@@ -436,6 +551,7 @@ function TilesPanel() {
           <Field label="title">
             <Input value={d.title} onChange={(e) => patch({ title: e.target.value })} />
           </Field>
+          <AudienceField audience={d.audience} adminRole={adminRole} onChange={(audience) => patch({ audience })} />
           <Field label="app">
             <Select value={d.appKey} onChange={(e) => patch({ appKey: e.target.value })} options={opts(apps.map((a) => a.key))} />
           </Field>

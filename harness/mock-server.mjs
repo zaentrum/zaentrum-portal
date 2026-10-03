@@ -227,8 +227,9 @@ const operatorState = (req) => {
 // an EMPTY proxyUrl, which is the state that made the "embeddable" column worth
 // adding: nothing in a fresh install can be hosted inside the portal shell.
 const apps = [
+  // core: the platform stands on it — edited and disabled, never deleted.
   { key: 'chino', title: 'chino', description: 'films & series', baseUrl: 'https://chino.example.com',
-    kind: 'product', healthUrl: '', icon: 'film', enabled: true, proxyUrl: '' },
+    kind: 'product', healthUrl: '', icon: 'film', enabled: true, proxyUrl: '', core: true },
   { key: 'katalog', title: 'katalog', description: 'browse the catalog', baseUrl: '/katalog',
     kind: 'admin', healthUrl: '', icon: 'library', enabled: true, proxyUrl: '' },
   { key: 'katalog-manage', title: 'katalog-manage', description: 'manage the catalog', baseUrl: '/katalog-manage',
@@ -237,7 +238,64 @@ const apps = [
   { key: 'example', title: 'Example', description: 'the example addon', baseUrl: '/portal/app/example',
     kind: 'tool', healthUrl: '', icon: 'puzzle', enabled: true, proxyUrl: 'http://example' },
 ];
-const spaces = [{ key: 'apps', title: 'apps', order: 10 }, { key: 'manage', title: 'manage', order: 20 }];
+const spaces = [
+  { key: 'apps', title: 'apps', order: 10, audience: [], core: true },
+  { key: 'manage', title: 'manage', order: 20, audience: [], core: true },
+  { key: 'ops', title: 'ops', order: 30, audience: ['ops'], core: false },
+];
+// The tiles as the seed leaves them: the catalog for admins, the products for
+// everyone signed in; plus one only operations see.
+const tile = (key, appKey, spaceKey, title, order, audience, extra = {}) => ({
+  key, appKey, spaceKey, title, description: '', icon: '', target: '', order, badge: '', badgeTone: '',
+  status: 'online', external: false, open: 'inline', enabled: true, audience, ...extra,
+});
+const tiles = [
+  tile('chino.open', 'chino', 'apps', 'chino', 10, [], { open: 'newtab' }),
+  tile('katalog.catalog', 'katalog', 'manage', 'Catalog', 10, ['zaentrum-admin'], { badge: 'admin', badgeTone: 'info' }),
+  tile('katalog-manage.open', 'katalog-manage', 'manage', 'Catalog Management', 20, ['zaentrum-admin'], { badge: 'admin', badgeTone: 'info' }),
+  tile('example.ops', 'example', 'ops', 'example queue', 10, []),
+];
+const registry = { apps, spaces, tiles };
+
+// serveRegistry answers the registry console's CRUD the way portal-api does:
+// a core entry is refused 409, a write that names no audience keeps the
+// stored one, and core is never written.
+async function serveRegistry(req, res, pathname) {
+  const m = pathname.match(/^\/api\/portal\/(apps|spaces|tiles)(?:\/([^/]+))?$/);
+  if (!m) return false;
+  const [, kind, key] = m;
+  const rows = registry[kind];
+  const one = kind.slice(0, -1);
+  if (req.method === 'GET' && !key) return json(res, 200, rows), true;
+  if (req.method === 'DELETE' && key) {
+    const i = rows.findIndex((r) => r.key === key);
+    if (i < 0) return text(res, 404, 'not found'), true;
+    if (rows[i].core) return text(res, 409, `${one} "${key}" is a core entry of the platform and cannot be deleted`), true;
+    rows.splice(i, 1);
+    if (kind !== 'tiles') {
+      const field = kind === 'apps' ? 'appKey' : 'spaceKey';
+      for (let t = tiles.length - 1; t >= 0; t--) if (tiles[t][field] === key) tiles.splice(t, 1);
+    }
+    console.log(`mock: deleted ${one} ${key}`);
+    res.writeHead(204);
+    res.end();
+    return true;
+  }
+  if ((req.method === 'POST' && !key) || (req.method === 'PATCH' && key)) {
+    const body = await readBody(req);
+    if (!body) return text(res, 400, 'invalid json'), true;
+    const k = key ?? body.key;
+    const i = rows.findIndex((r) => r.key === k);
+    const old = i >= 0 ? rows[i] : undefined;
+    const row = { ...body, key: k, core: old?.core ?? false };
+    if (kind !== 'apps' && row.audience == null) row.audience = old?.audience ?? [];
+    if (i >= 0) rows[i] = row;
+    else rows.push(row);
+    console.log(`mock: wrote ${one} ${k}${row.audience ? ` visible to [${row.audience}]` : ''}`);
+    return json(res, 200, row), true;
+  }
+  return false;
+}
 
 // What GET /api/portal/addons answers: component state is null when a
 // workload is not deployed.
@@ -635,6 +693,10 @@ createServer(async (req, res) => {
   const url = req.url;
   const { pathname, searchParams } = new URL(url, 'http://mock');
   if (await serveCharts(req, res, pathname, searchParams)) return;
+  if (await serveRegistry(req, res, pathname)) return;
+  if (pathname === '/api/portal/me') {
+    return json(res, 200, { username: 'harness', roles: ['zaentrum-admin', 'zaentrum-user'], isAdmin: true, adminRole: 'zaentrum-admin', client: 'zaentrum-web' });
+  }
   // Through the app proxy: the example addon's setup endpoint.
   if (url.startsWith('/api/portal/apps/example/api/setup')) return json(res, 200, setupStatus);
   if (url.startsWith('/api/portal/apps/')) return json(res, 502, { error: 'app unreachable' });
