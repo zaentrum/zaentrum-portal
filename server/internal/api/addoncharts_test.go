@@ -709,7 +709,7 @@ func TestPatchAddonChart(t *testing.T) {
 		}
 	})
 
-	t.Run("reconfigure applies in place", func(t *testing.T) {
+	t.Run("reconfigure is planned first", func(t *testing.T) {
 		e := newChartEnv(t)
 		installedExample(e, "")
 		gen := e.kube.Generation(addonPlural, "example")
@@ -719,8 +719,8 @@ func TestPatchAddonChart(t *testing.T) {
 			"clearSecrets": []string{"config.password"},
 		})
 		spec := e.spec("example")
-		if spec["suspend"] != false || e.kube.Generation(addonPlural, "example") != gen+1 {
-			t.Errorf("values alone must not suspend an installed addon, and must move the generation: %v", spec)
+		if spec["suspend"] != true || e.kube.Generation(addonPlural, "example") != gen+1 {
+			t.Errorf("new values suspend an installed addon — planned, applied once installed — and move the generation: %v", spec)
 		}
 		if b, _ := json.Marshal(spec["values"]); string(b) != `{"logLevel":"debug"}` {
 			t.Errorf("values = %s", b)
@@ -748,6 +748,48 @@ func TestPatchAddonChart(t *testing.T) {
 		patch(t, e, map[string]any{"values": nil})
 		if _, ok := e.spec("example")["values"]; ok {
 			t.Error("values: null removes them")
+		}
+	})
+
+	// Values and secret inputs plan first, like a chart: the operator plans
+	// the generation the write made and applies nothing until it is
+	// installed. A request that says suspend wins — putting an addon back
+	// sends the suspension it found — and one that changes nothing suspends
+	// nothing.
+	t.Run("what plans first", func(t *testing.T) {
+		for _, c := range []struct {
+			name    string
+			body    map[string]any
+			suspend bool
+		}{
+			{"new values", map[string]any{"values": map[string]any{"worker": map[string]any{"replicas": 3}}}, true},
+			{"values removed", map[string]any{"values": nil}, true},
+			{"a secret input set", map[string]any{"secretValues": map[string]string{"config.password": "new"}}, true},
+			{"a secret input cleared", map[string]any{"clearSecrets": []string{"config.password"}}, true},
+			{"a secret input read from a kept Secret", map[string]any{"secretRefs": map[string]any{"config.password": map[string]string{"name": "zaentrum-addon-example-values-kept"}}}, true},
+			{"the same values, spaced otherwise", map[string]any{"values": json.RawMessage(`{ "worker" : { "replicas" : 2 } }`)}, false},
+			{"a number spelled otherwise is planned: a chart may render it otherwise", map[string]any{"values": json.RawMessage(`{"worker":{"replicas":2.0}}`)}, true},
+			{"the same values", map[string]any{"values": map[string]any{"worker": map[string]any{"replicas": 2}}}, false},
+			{"clearing an input that is not set", map[string]any{"clearSecrets": []string{"not.set"}}, false},
+			{"new values, applied in place on request", map[string]any{"values": map[string]any{"x": 1}, "suspend": false}, false},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				e := newChartEnv(t)
+				installedExample(e, "")
+				patch(t, e, c.body)
+				if got := e.spec("example")["suspend"] == true; got != c.suspend {
+					t.Errorf("suspended = %v, want %v: %v", got, c.suspend, e.spec("example"))
+				}
+			})
+		}
+		// Planned, then installed: the plan the operator made for the write's
+		// generation is what install applies.
+		e := newChartEnv(t)
+		installedExample(e, "")
+		acc := patch(t, e, map[string]any{"values": map[string]any{"logLevel": "debug"}})
+		e.plans("example", "Planned", examplePlan("1.2.0"), nil)
+		if rec := e.do(http.MethodPost, "/api/portal/addon-charts/example/install", nil); rec.Code != http.StatusAccepted || e.spec("example")["suspend"] != false {
+			t.Errorf("install of the planned values = %d %s (wrote generation %d)", rec.Code, rec.Body, acc.Generation)
 		}
 	})
 

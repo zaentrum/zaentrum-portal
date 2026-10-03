@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"path"
@@ -403,6 +404,26 @@ func installable(ca *operator.ChartAddon) error {
 	return nil
 }
 
+// sameValues reports whether two values documents say the same: key order and
+// spacing aside, absent, null and {} alike. A number spelled otherwise (2,
+// 2.0) is a change: a chart may render it otherwise.
+func sameValues(a, b json.RawMessage) bool {
+	canon := func(raw json.RawMessage) string {
+		if isNullJSON(raw) {
+			return "{}"
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var v any
+		if dec.Decode(&v) != nil {
+			return string(raw)
+		}
+		out, _ := json.Marshal(v)
+		return string(out)
+	}
+	return canon(a) == canon(b)
+}
+
 // ─── cluster answers ─────────────────────────────────────────────────────────
 
 const noClusterNote = "installing addons from charts needs portal-api to run in a cluster"
@@ -757,10 +778,14 @@ func (a *API) installAddonChart(w http.ResponseWriter, r *http.Request) {
 // {chart?, version?, digest?, values?, secretValues?, secretRefs?,
 // clearSecrets?, suspend?}: upgrade or reconfigure.
 //
-// A chart, version or digest other than the addon's spec — or other than the
-// chart the addon runs, so a failed upgrade is retried by planning it again —
-// suspends the addon: the operator plans it and the admin installs the plan,
-// unless suspend: false is sent. Values are replaced when present (null
+// Whatever the request changes is planned before it applies: a chart, version
+// or digest other than the addon's spec — or other than the chart the addon
+// runs, so a failed upgrade is retried by planning it again — values other
+// than the addon's, a secret input set, pointed elsewhere or cleared. Any of
+// them suspends the addon: the operator plans the new spec, applies nothing,
+// and the admin installs the plan (POST …/install) once they have seen it —
+// unless suspend is sent, which wins either way (a client putting an addon
+// back sends the suspension it found). Values are replaced when present (null
 // removes them). Only the secret inputs the request names are touched: every
 // other valuesFrom entry keeps its place and fields.
 func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
@@ -842,11 +867,14 @@ func (a *API) patchAddonChart(w http.ResponseWriter, r *http.Request) {
 			ca.Chart = chart
 		}
 		if body.Values != nil {
+			changed = changed || !sameValues(values, ca.Values)
 			ca.Values = values
 		}
+		before := ca.SecretInputs()
 		if err := inputs.apply(ca, secret); err != nil {
 			return err
 		}
+		changed = changed || !maps.Equal(before, ca.SecretInputs())
 		switch {
 		case body.Suspend != nil:
 			ca.Suspend = *body.Suspend
