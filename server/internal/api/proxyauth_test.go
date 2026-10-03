@@ -103,3 +103,33 @@ func TestProxyTakesASignedInUserForTheRest(t *testing.T) {
 		t.Errorf("the app received %+v", got)
 	}
 }
+
+// A CORS preflight carries no credentials by definition; it reaches the app
+// without one, for the app's own CORS policy to answer. Any other OPTIONS is
+// an ordinary request, and takes a signed-in user.
+func TestProxyPassesCORSPreflights(t *testing.T) {
+	e, received := proxyEnv(t)
+	preflight := func(acrm string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodOptions, "/api/portal/apps/sample/api/request", nil)
+		req.Header.Set("Origin", "https://chino.example.org")
+		if acrm != "" {
+			req.Header.Set("Access-Control-Request-Method", acrm)
+		}
+		req.Header.Set("Authorization", "Bearer not-even-checked")
+		rec := httptest.NewRecorder()
+		e.h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := preflight("POST"); rec.Code != http.StatusOK {
+		t.Errorf("a preflight = %d %s", rec.Code, rec.Body)
+	}
+	if got := received(); len(got) != 1 || got[0].path != "/api/request" || got[0].auth != "" {
+		t.Errorf("the app received %+v — the preflight, with no Authorization", got)
+	}
+	if rec := preflight(""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("an OPTIONS that is no preflight = %d, want 401", rec.Code)
+	}
+	if got := received(); len(got) != 0 {
+		t.Errorf("the app was reached: %+v", got)
+	}
+}

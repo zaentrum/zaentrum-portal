@@ -87,12 +87,26 @@ func publicBundle(rest string) bool {
 	return rest == "/embed" || strings.HasPrefix(rest, "/embed/") || strings.HasPrefix(rest, "/.well-known/")
 }
 
-// proxyAuth lets an app's public bundle through as it is and requires a
-// signed-in user for everything else the proxy reaches.
+// preflight reports whether a request is a browser's CORS preflight. A
+// preflight never carries credentials — that is how CORS is defined — so it
+// cannot be signed in; requiring a bearer of one would break every
+// cross-origin request a product app makes to an addon (chino on its own
+// host, posting an action). It reaches the app like the public bundle: with
+// no Authorization header, for the app's own CORS policy to answer. The
+// request it precedes takes a signed-in user as ever.
+func preflight(r *http.Request) bool {
+	return r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != ""
+}
+
+// open reports whether a proxied request needs no signed-in user.
+func open(r *http.Request) bool { return publicBundle(proxyRest(r)) || preflight(r) }
+
+// proxyAuth lets an app's public bundle and CORS preflights through as they
+// are and requires a signed-in user for everything else the proxy reaches.
 func (a *API) proxyAuth(mw *auth.Middleware, next http.Handler) http.Handler {
 	signedIn := mw.Authn(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if publicBundle(proxyRest(r)) {
+		if open(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -125,7 +139,7 @@ func (a *API) appProxy(w http.ResponseWriter, r *http.Request) {
 	// The mount prefix is stripped: the app is unaware it is embedded and
 	// serves from its own root.
 	rest := proxyRest(r)
-	public := publicBundle(rest)
+	public := open(r)
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
@@ -134,7 +148,8 @@ func (a *API) appProxy(w http.ResponseWriter, r *http.Request) {
 			req.URL.RawPath = ""
 			req.Host = target.Host
 			if public {
-				// The public bundle needs no identity, and gets none.
+				// The public bundle and a preflight need no identity, and
+				// get none.
 				req.Header.Del("Authorization")
 			}
 			// The app decides what this user may do, so it needs the user's
