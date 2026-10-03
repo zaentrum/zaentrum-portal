@@ -47,11 +47,19 @@ export interface App {
   // created was permanently non-embeddable — while the error told them to set a
   // field the form did not have.
   proxyUrl: string;
+  // core: the platform stands on it — it can be edited and disabled, never
+  // deleted. Set by the platform; absent from an older portal-api.
+  core?: boolean;
 }
 export interface Space {
   key: string;
   title: string;
   order: number;
+  // audience: the realm roles that may see it on the launchpad; [] is
+  // everyone signed in. Left out of a write, the stored one is kept.
+  audience?: string[];
+  // core: one of the platform's own spaces, never deleted.
+  core?: boolean;
 }
 export interface Tile {
   key: string;
@@ -68,6 +76,9 @@ export interface Tile {
   external: boolean;
   open: string; // inline|newtab|'' (unset -> external decides)
   enabled: boolean;
+  // audience: the realm roles that may see it on the launchpad; [] is
+  // everyone signed in. Left out of a write, the stored one is kept.
+  audience?: string[];
 }
 // Extension: an addon-contributed UI element for a named slot in a product app.
 export interface Extension {
@@ -86,7 +97,13 @@ export interface Extension {
 export interface Me {
   username: string;
   roles: string[];
+  // isAdmin: the admin role, on a token of one of the portal's own clients —
+  // the gate the admin routes apply.
   isAdmin: boolean;
+  // adminRole: the role portal-api runs with; client: the client this token
+  // was issued to. Absent from an older portal-api.
+  adminRole?: string;
+  client?: string;
 }
 
 // ─── operator / instances ────────────────────────────────────────────────────
@@ -106,6 +123,11 @@ export interface Instance {
   restarts: number;
   phase: string; // ready|progressing|degraded|stopped
   protected: boolean;
+  // adminStack: the console runs on it, so the platform keeps at least one
+  // replica of it. strategy: RollingUpdate replaces pods one at a time,
+  // Recreate stops the old pod first. Both absent from an older portal-api.
+  adminStack?: boolean;
+  strategy?: string;
   operatorManaged: boolean;
   // platform | addon | other — see groupOf() in server/internal/operator.
   group: string;

@@ -1,0 +1,18 @@
+/* confirmation dialog — what a change will do, before it does it. */
+.confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.confirm__lines {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+}
+.confirm__err {
+  color: var(--signal-red, #F85149);
+  font-size: 13px;
+}

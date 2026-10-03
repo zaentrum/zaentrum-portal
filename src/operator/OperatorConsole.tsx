@@ -14,6 +14,7 @@ import type { TableColumn } from '@nalet/design-system';
 import { Minus, Plus, RotateCw, RefreshCw, Lock, ArrowUpCircle, ShieldCheck } from 'lucide-react';
 import {
   usePortalApi,
+  type OperatorInfo,
   type OperatorState,
   type Instance,
   type InstalledAddon,
@@ -22,6 +23,17 @@ import {
   type VerifyRequest,
 } from '../lib/api';
 import { containersSummary, hasComponentGroups, phaseTone } from '../lib/addons';
+import {
+  applyUpdateBody,
+  canScaleTo,
+  channelConfirmation,
+  restartConfirmation,
+  scaleConfirmation,
+  updateConfirmation,
+  updateModeConfirmation,
+  type Confirmation,
+} from '../lib/confirm';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import {
   controllerNote,
   controllerPath,
@@ -138,6 +150,9 @@ export function OperatorConsole() {
   // following: the request token of a verification this console asked for,
   // until the run that answers it has ended.
   const [following, setFollowing] = useState<string | null>(null);
+  // pending: a change waiting for the admin to confirm it — every write that
+  // changes what runs asks first, and says what it will do.
+  const [pending, setPending] = useState<{ confirmation: Confirmation; run: () => Promise<unknown> } | null>(null);
   const inflight = useRef(false);
   const seq = useRef(0);
 
@@ -186,38 +201,52 @@ export function OperatorConsole() {
   }, [loadAddons]);
 
   async function act(key: string, fn: () => Promise<unknown>, label: string) {
+    try {
+      await run(key, fn, label);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+  }
+  // run makes a write: busy while it runs, the toolbar says what it did, and
+  // a refusal is thrown back — to the dialog that asked, which shows it.
+  async function run(key: string, fn: () => Promise<unknown>, label: string) {
     setBusy(key);
     setMsg(null);
     try {
       await fn();
       setMsg(`${label} ${key}`);
       load(true);
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
   }
+  const ask = (confirmation: Confirmation, key: string, fn: () => Promise<unknown>, label: string) =>
+    setPending({ confirmation, run: () => run(key, fn, label) });
+
   const scale = (i: Instance, n: number) =>
-    act(
-      i.name,
-      async () => {
-        await api(`/operator/instances/${i.name}/scale`, { method: 'POST', body: JSON.stringify({ replicas: n }) });
-        // Optimistically reflect the new desired count so a fast follow-up click
-        // computes from the intended value (the poll then confirms).
-        setState((prev) =>
-          prev
-            ? { ...prev, instances: prev.instances.map((x) => (x.name === i.name ? { ...x, desiredReplicas: n } : x)) }
-            : prev,
-        );
-      },
-      'scaled',
-    );
+    ask(scaleConfirmation(i, n), i.name, async () => {
+      await api(`/operator/instances/${i.name}/scale`, { method: 'POST', body: JSON.stringify({ replicas: n }) });
+      // Reflect the new desired count at once (the poll then confirms), so the
+      // next step is computed from the intended value.
+      setState((prev) =>
+        prev ? { ...prev, instances: prev.instances.map((x) => (x.name === i.name ? { ...x, desiredReplicas: n } : x)) } : prev,
+      );
+    }, 'scaled');
   const restart = (i: Instance) =>
-    act(i.name, () => api(`/operator/instances/${i.name}/restart`, { method: 'POST' }), 'restarted');
-  const patchOperator = (patch: Record<string, string>) =>
-    act('operator', () => api('/operator', { method: 'PATCH', body: JSON.stringify(patch) }), 'updated');
-  const applyUpdate = () => act('operator', () => api('/operator/apply-update', { method: 'POST' }), 'update triggered');
+    ask(restartConfirmation(i), i.name, () => api(`/operator/instances/${i.name}/restart`, { method: 'POST' }), 'restarted');
+  const patchOperator = (confirmation: Confirmation, patch: Record<string, string>) =>
+    ask(confirmation, 'operator', () => api('/operator', { method: 'PATCH', body: JSON.stringify(patch) }), 'updated');
+  // The update applied is the one shown when the dialog opened: the server
+  // refuses it (409) if the operator has found another since.
+  const applyUpdate = (info: OperatorInfo, managed: number) => {
+    const shown = info.availableUpdate ?? '';
+    ask(
+      updateConfirmation(info, managed),
+      'operator',
+      () => api('/operator/apply-update', { method: 'POST', body: JSON.stringify(applyUpdateBody(shown)) }),
+      'update triggered',
+    );
+  };
   // The operator runs the checks; the answer is the token its run will carry.
   const verifyNow = () =>
     act(
@@ -231,6 +260,7 @@ export function OperatorConsole() {
 
   const op = state?.operator;
   const verification = op?.verification;
+  const managed = (state?.instances ?? []).filter((i) => i.operatorManaged).length;
 
   // A run this console asked for is followed through the page's own polling:
   // once the document carries its token with a result that is no longer
@@ -288,7 +318,12 @@ export function OperatorConsole() {
                 label={`scale ${i.name} down`}
                 size="sm"
                 variant="ghost"
-                disabled={busy === i.name || i.desiredReplicas <= 0}
+                disabled={busy === i.name || !canScaleTo(i, i.desiredReplicas - 1)}
+                title={
+                  i.adminStack && i.desiredReplicas <= 1
+                    ? `the console runs on ${i.name}: it keeps one replica`
+                    : undefined
+                }
                 onClick={() => scale(i, i.desiredReplicas - 1)}
               >
                 <Minus size={13} />
@@ -302,7 +337,7 @@ export function OperatorConsole() {
                 label={`scale ${i.name} up`}
                 size="sm"
                 variant="ghost"
-                disabled={busy === i.name || i.desiredReplicas >= 20}
+                disabled={busy === i.name || !canScaleTo(i, i.desiredReplicas + 1)}
                 onClick={() => scale(i, i.desiredReplicas + 1)}
               >
                 <Plus size={13} />
@@ -385,6 +420,10 @@ export function OperatorConsole() {
 
       {err && <div className="op__err">error: {err}</div>}
 
+      {pending && (
+        <ConfirmDialog confirmation={pending.confirmation} onConfirm={pending.run} onClose={() => setPending(null)} />
+      )}
+
       {/* operator (desired state) panel — only when in-cluster (else the
           instances section below shows the single "unavailable" note) */}
       {op && state?.available && (
@@ -392,7 +431,7 @@ export function OperatorConsole() {
           header={<span className="op__card-title">platform{op.present ? '' : ' · direct mode'}</span>}
           headerAside={
             op.present && op.availableUpdate ? (
-              <Button size="sm" leading={<ArrowUpCircle size={14} />} loading={busy === 'operator'} onClick={applyUpdate}>
+              <Button size="sm" leading={<ArrowUpCircle size={14} />} loading={busy === 'operator'} onClick={() => applyUpdate(op, managed)}>
                 update to {op.availableUpdate}
               </Button>
             ) : undefined
@@ -407,16 +446,26 @@ export function OperatorConsole() {
                 <Badge tone={phaseTone((op.phase || '').toLowerCase())} dot>{op.phase || '—'}</Badge>
               </Field>
               <Field label="channel">
+                {/* Controlled by what the operator reports: it changes only
+                    once the dialog is confirmed and the next read says so. */}
                 <Select
                   value={op.channel || 'stable'}
-                  onChange={(e) => patchOperator({ channel: e.target.value })}
+                  disabled={busy === 'operator'}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    if (next !== (op.channel || 'stable')) patchOperator(channelConfirmation(op, next), { channel: next });
+                  }}
                   options={[{ label: 'stable', value: 'stable' }, { label: 'edge', value: 'edge' }]}
                 />
               </Field>
               <Field label="updates">
                 <Select
                   value={op.updateMode || 'manual'}
-                  onChange={(e) => patchOperator({ updateMode: e.target.value })}
+                  disabled={busy === 'operator'}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    if (next !== (op.updateMode || 'manual')) patchOperator(updateModeConfirmation(op, next), { updateMode: next });
+                  }}
                   options={[{ label: 'manual', value: 'manual' }, { label: 'auto', value: 'auto' }]}
                 />
               </Field>

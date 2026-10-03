@@ -35,6 +35,11 @@ const inst = (name, group, broken, labels = {}) => ({
   restarts: broken ? 3 : 0,
   phase: broken ? 'degraded' : 'ready',
   protected: name === 'valkey',
+  // The console runs on these: the platform keeps one replica of each.
+  adminStack: ['portal-api', 'zaentrum-portal', 'katalog-manager-api'].includes(name),
+  // As the demo runs them: the stateful and single-writer workloads recreate
+  // their pods, everything else rolls.
+  strategy: ['analyzer', 'katalog-ingest', 'transcoder'].includes(name) ? 'Recreate' : 'RollingUpdate',
   operatorManaged: group === 'platform',
   alwaysPull: true,
   group,
@@ -195,6 +200,10 @@ const requestVerification = (req, res) => {
   return json(res, 202, { request: v.annotation });
 };
 
+// The platform's spec as the console changes it: channel and update mode are
+// written by PATCH, and "update to" pins the version on offer.
+const spec = { channel: 'stable', updateMode: 'manual', version: 'v0.3.0', availableUpdate: 'v0.4.0', generation: 7 };
+
 const operatorState = (req) => {
   const mode = controllerMode(req);
   const controller = mode === 'none' ? null : (controllers[mode] ?? controllers.olm);
@@ -202,8 +211,9 @@ const operatorState = (req) => {
   return {
     available: true,
     operator: {
-      present: true, name: 'zaentrum', channel: 'stable', version: 'v0.3.0', phase: 'Degraded',
-      components: [], generation: 7, observedGeneration: 7,
+      present: true, name: 'zaentrum', channel: spec.channel, updateMode: spec.updateMode,
+      version: spec.version, currentVersion: 'v0.3.0', availableUpdate: spec.availableUpdate, phase: 'Degraded',
+      components: [], generation: spec.generation, observedGeneration: spec.generation,
       // Absent, not empty: an operator that predates the field sends no key.
       ...(controller ? { controller } : {}),
       // `old` is a portal-api older than verification, which sends no key.
@@ -631,6 +641,46 @@ createServer(async (req, res) => {
   if (url.startsWith('/api/portal/apps')) return json(res, 200, apps);
   if (url.startsWith('/api/portal/spaces')) return json(res, 200, spaces);
   if (pathname === '/api/portal/operator/verify' && req.method === 'POST') return requestVerification(req, res);
+  if (pathname === '/api/portal/operator' && req.method === 'PATCH') {
+    const body = await readBody(req);
+    if (!body) return text(res, 400, 'invalid json');
+    if (body.channel) spec.channel = body.channel;
+    if (body.updateMode) spec.updateMode = body.updateMode;
+    spec.generation++;
+    console.log(`mock: platform now follows ${spec.channel}, updates ${spec.updateMode}`);
+    return json(res, 200, { version: spec.version, generation: spec.generation });
+  }
+  // apply-update names the update it applies, as the server requires; one the
+  // operator replaced meanwhile is refused 409. ?update= is not needed: send a
+  // stale version by hand to see the refusal.
+  if (pathname === '/api/portal/operator/apply-update' && req.method === 'POST') {
+    const body = await readBody(req);
+    if (!body?.version) return text(res, 400, 'apply-update names the update it applies: {"version": "<operator.availableUpdate>"}');
+    if (body.version !== spec.availableUpdate) {
+      return text(res, 409, `the available update changed: ${spec.availableUpdate} is on the ${spec.channel} channel now, not ${body.version}`);
+    }
+    spec.version = body.version;
+    spec.generation++;
+    console.log(`mock: platform pinned to ${body.version}`);
+    return json(res, 200, { version: body.version, generation: spec.generation });
+  }
+  const write = pathname.match(/^\/api\/portal\/operator\/instances\/([^/]+)\/(scale|restart)$/);
+  if (write && req.method === 'POST') {
+    const i = instances.find((x) => x.name === write[1]);
+    if (!i) return text(res, 404, `no such workload: ${write[1]}`);
+    if (i.protected) return text(res, 400, `"${i.name}" is a protected (stateful) service and cannot be ${write[2] === 'scale' ? 'scaled' : 'restarted'} from here`);
+    if (write[2] === 'scale') {
+      const body = await readBody(req);
+      if (i.adminStack && body?.replicas === 0) {
+        return text(res, 400, `"${i.name}" keeps at least one replica here — the admin console runs on it, and scaling it to 0 would leave nothing to scale it back up from`);
+      }
+      i.desiredReplicas = body?.replicas ?? i.desiredReplicas;
+      return json(res, 200, { name: i.name, generation: ++i.generation });
+    }
+    if (i.adminStack && i.strategy === 'Recreate') return text(res, 400, `"${i.name}" is not restarted from here — its Deployment recreates its pods`);
+    i.restartedAt = new Date().toISOString();
+    return json(res, 200, { name: i.name, generation: ++i.generation, restartedAt: i.restartedAt });
+  }
   if (url.startsWith('/api/portal/operator')) return json(res, 200, operatorState(req));
   if (url.startsWith('/api/portal/addons') && req.method === 'GET') {
     // An older portal-api lists what the registry holds; this one merges the
