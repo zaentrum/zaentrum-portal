@@ -693,14 +693,173 @@ async function serveCharts(req, res, pathname, query) {
   return text(res, 405, 'method not allowed'), true;
 }
 
+// ─── first-run setup ─────────────────────────────────────────────────────────
+//
+// A stand-in for portal-api's setup checklist and the backends it reads: the
+// catalog manager (the TMDB key, the titles, the scans) and the operator (the
+// media pipeline, its workers). ?setup= picks where the instance starts —
+// fresh by default, the appliance as it boots — and every action plays out:
+// a key saved is set, a scan runs SCAN_MS and finds files, the pipeline
+// switched on brings its workers up within PIPELINE_MS — the transcoder stays
+// Unschedulable, as on a box with no GPU node, unless ?gpu=1.
+const SCAN_MS = 4000;
+const PIPELINE_MS = 3000;
+const setupMode = (req) => (req.headers.cookie ?? '').match(/(?:^|;\s*)mock-setup=([a-z]*)/)?.[1] ?? '';
+const gpuMode = (req) => (req.headers.cookie ?? '').match(/(?:^|;\s*)mock-gpu=([0-9]*)/)?.[1] === '1';
+
+let setupState = null;
+// Modes: '' a fresh appliance; filled a key and a library; scanning a scan
+// under way; https a public host served over https; ready all of it, the
+// pipeline on (done with ?gpu=1); done setup marked done; unknown a catalog
+// manager that does not answer; old a portal-api without setup.
+const seedSetup = (mode) => {
+  const filled = ['filled', 'done', 'ready'].includes(mode);
+  return {
+    mode,
+    completed: mode === 'done' ? { at: minutesAgo(90), by: 'admin' } : null,
+    key: filled ? 'setting' : 'none',
+    keyAt: minutesAgo(40),
+    titles: filled ? 214 : 0,
+    scan: mode === 'scanning'
+      ? { id: 'scan-1', status: 'running', startedAt: new Date().toISOString(), finishedAt: null, filesSeen: 0, itemsInserted: 0, itemsUpdated: 0 }
+      : filled
+        ? { id: 'scan-1', status: 'done', startedAt: minutesAgo(31), finishedAt: minutesAgo(30), filesSeen: 230, itemsInserted: 214, itemsUpdated: 0 }
+        : null,
+    pipeline: mode === 'ready',
+    pipelineAt: mode === 'ready' ? Date.now() - 10 * PIPELINE_MS : 0,
+    https: mode === 'https' || mode === 'ready',
+    unreachable: mode === 'unknown',
+  };
+};
+const setupFor = (req) => {
+  const mode = setupMode(req);
+  if (!setupState || setupState.mode !== mode) setupState = seedSetup(mode);
+  return setupState;
+};
+
+// setupDoc is GET /api/portal/setup as portal-api reads it — the same rules.
+const setupDoc = (req) => {
+  const s = setupFor(req);
+  const now = Date.now();
+  if (s.scan?.status === 'running' && now - Date.parse(s.scan.startedAt) >= SCAN_MS) {
+    s.scan = { ...s.scan, status: 'done', finishedAt: new Date().toISOString(), filesSeen: 14, itemsInserted: 12, itemsUpdated: 0 };
+    s.titles += 12;
+  }
+  const unknown = { state: 'unknown', note: 'the catalog manager did not answer: dial tcp: lookup katalog-manager-api: no such host' };
+  const metadata = s.unreachable ? { ...unknown, key: 'none' }
+    : s.key === 'none' ? { state: 'todo', key: 'none' }
+      : { state: 'done', key: s.key, updatedAt: s.keyAt };
+  const place = { path: '/var/lib/katalog/media', volume: 'media', folder: 'media', appliance: !s.https };
+  const library = s.unreachable
+    ? { ...unknown, titles: 0, titlesMore: false, ...place, scan: null }
+    : { state: s.scan?.status === 'running' ? 'working' : s.titles > 0 ? 'done' : 'todo', titles: s.titles, titlesMore: false, ...place, scan: s.scan };
+  const workers = [];
+  if (s.pipeline) {
+    const up = now - s.pipelineAt >= PIPELINE_MS;
+    for (const name of ['analyzer', 'katalog-ingest', 'packager', 'transcoder']) {
+      if (!up) workers.push({ name, phase: now - s.pipelineAt < PIPELINE_MS / 2 ? 'absent' : 'degraded', reason: '', ready: 0, desired: 1 });
+      else if (name === 'transcoder' && !gpuMode(req)) workers.push({ name, phase: 'degraded', reason: 'Unschedulable', ready: 0, desired: 1 });
+      else workers.push({ name, phase: 'ready', reason: '', ready: 1, desired: 1 });
+    }
+  }
+  const processingState = !s.pipeline ? 'optional'
+    : workers.some((w) => w.reason) ? 'todo'
+      : workers.some((w) => w.phase !== 'ready') ? 'working' : 'done';
+  const gpu = gpuMode(req);
+  return {
+    completed: s.completed,
+    metadata,
+    library,
+    processing: {
+      state: processingState, pipeline: s.pipeline, gpu: false,
+      gpuNodes: gpu ? 1 : null,
+      ...(gpu ? {} : { gpuNote: "portal-api's Role grants no reads of the cluster's nodes, so whether one offers a GPU cannot be told from here" }),
+      workers, switchable: true,
+    },
+    devices: s.https
+      ? { state: 'done', origin: 'https://media.example.com', https: true, issuer: 'https://media.example.com/auth/realms/zaentrum', issuerHttps: true, localOnly: false, source: 'operator' }
+      : { state: 'todo', origin: 'http://zaentrum.localhost', https: false, issuer: 'http://zaentrum.localhost/auth/realms/zaentrum', issuerHttps: false, localOnly: true, source: 'operator' },
+    people: { state: 'info' },
+  };
+};
+
+// serveSetup answers /api/portal/setup…; false when the request is not one.
+async function serveSetup(req, res, pathname) {
+  if (pathname !== '/api/portal/setup' && !pathname.startsWith('/api/portal/setup/')) return false;
+  // ?setup=old: a portal-api older than setup, which serves none of it.
+  if (setupMode(req) === 'old') return text(res, 404, '404 page not found'), true;
+  const s = setupFor(req);
+  const route = `${req.method} ${pathname}`;
+  switch (route) {
+    case 'GET /api/portal/setup':
+      return json(res, 200, setupDoc(req)), true;
+    case 'GET /api/portal/setup/complete':
+      return json(res, 200, { completed: s.completed }), true;
+    case 'POST /api/portal/setup/complete':
+      s.completed ??= { at: new Date().toISOString(), by: 'harness' };
+      console.log('mock: setup marked done');
+      return json(res, 200, { completed: s.completed }), true;
+    case 'DELETE /api/portal/setup/complete':
+      s.completed = null;
+      console.log('mock: setup reopened');
+      res.writeHead(204);
+      res.end();
+      return true;
+    case 'POST /api/portal/setup/metadata': {
+      const body = await readBody(req);
+      const key = typeof body?.tmdbKey === 'string' ? body.tmdbKey.trim() : '';
+      if (!key) return text(res, 400, "tmdbKey is empty — paste the API read access token from your TMDB account's API settings"), true;
+      if (/\s/.test(key)) return text(res, 400, 'tmdbKey holds spaces or line breaks, which no TMDB token does — paste it again'), true;
+      if (s.unreachable) return text(res, 502, 'the catalog manager did not answer: dial tcp: lookup katalog-manager-api: no such host'), true;
+      // Like portal-api: the key goes on, and is never logged or answered.
+      s.key = 'setting';
+      s.keyAt = new Date().toISOString();
+      console.log('mock: TMDB key set');
+      return json(res, 200, setupDoc(req)), true;
+    }
+    case 'POST /api/portal/setup/library/scan':
+      if (s.unreachable) return text(res, 502, 'the catalog manager did not answer: dial tcp: lookup katalog-manager-api: no such host'), true;
+      s.scan = { id: `scan-${Date.now()}`, status: 'running', startedAt: new Date().toISOString(), finishedAt: null, filesSeen: 0, itemsInserted: 0, itemsUpdated: 0 };
+      console.log('mock: scan started');
+      return json(res, 202, setupDoc(req)), true;
+  }
+  return text(res, 405, 'method not allowed'), true;
+}
+
+// The launchpad as portal-api assembles it from the registry: spaces in
+// order, each with the tiles the caller's roles see.
+const roles = ['zaentrum-admin', 'zaentrum-user'];
+const visible = (audience) => !audience?.length || audience.some((r) => roles.includes(r));
+const launchpad = () => ({
+  spaces: [...spaces].sort((a, b) => a.order - b.order).filter((sp) => visible(sp.audience)).map((sp) => ({
+    key: sp.key, title: sp.title, order: sp.order,
+    tiles: tiles.filter((t) => t.spaceKey === sp.key && visible(t.audience)).sort((a, b) => a.order - b.order).map((t) => {
+      const app = apps.find((a) => a.key === t.appKey);
+      return {
+        key: t.key, title: t.title, description: t.description || app?.description || '', icon: t.icon || app?.icon || '',
+        href: t.target && /^https?:/.test(t.target) ? t.target : `${app?.baseUrl ?? ''}${t.target}`,
+        order: t.order, badge: t.badge, badgeTone: t.badgeTone, status: t.status, external: t.external,
+        open: t.open || 'inline', disabled: !t.enabled || !app?.enabled,
+      };
+    }),
+  })).filter((sp) => sp.tiles.length > 0),
+});
+
+const MOCK_PORT = Number(process.env.MOCK_PORT) || 8791;
+
 createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   const url = req.url;
   const { pathname, searchParams } = new URL(url, 'http://mock');
   if (await serveCharts(req, res, pathname, searchParams)) return;
   if (await serveRegistry(req, res, pathname)) return;
+  if (await serveSetup(req, res, pathname)) return;
+  if (pathname === '/api/portal/launchpad') return json(res, 200, launchpad());
   if (pathname === '/api/portal/me') {
-    return json(res, 200, { username: 'harness', roles: ['zaentrum-admin', 'zaentrum-user'], isAdmin: true, adminRole: 'zaentrum-admin', client: 'zaentrum-web' });
+    return json(res, 200, {
+      username: 'harness', subject: 'user-harness', roles, isAdmin: true, adminRole: 'zaentrum-admin', client: 'zaentrum-web',
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    });
   }
   // Through the app proxy: the example addon's setup endpoint.
   if (url.startsWith('/api/portal/apps/example/api/setup')) return json(res, 200, setupStatus);
@@ -713,6 +872,14 @@ createServer(async (req, res) => {
     if (!body) return text(res, 400, 'invalid json');
     if (body.channel) spec.channel = body.channel;
     if (body.updateMode) spec.updateMode = body.updateMode;
+    if (typeof body.pipeline === 'boolean') {
+      // The media pipeline, switched on the operator's resource: its
+      // workers come up after a while (setupDoc plays them).
+      const s = setupFor(req);
+      s.pipeline = body.pipeline;
+      s.pipelineAt = Date.now();
+      console.log(`mock: media pipeline ${body.pipeline ? 'on' : 'off'}`);
+    }
     spec.generation++;
     console.log(`mock: platform now follows ${spec.channel}, updates ${spec.updateMode}`);
     return json(res, 200, { version: spec.version, generation: spec.generation });
@@ -779,4 +946,4 @@ createServer(async (req, res) => {
     return json(res, 200, { removed: { tiles: 3, rows: 1, space: '' }, remainingWorkloads: ['example', 'example-worker'] });
   }
   json(res, 200, []);
-}).listen(8791, () => console.log('mock portal-api on :8791'));
+}).listen(MOCK_PORT, () => console.log(`mock portal-api on :${MOCK_PORT}`));

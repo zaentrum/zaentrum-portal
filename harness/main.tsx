@@ -5,12 +5,15 @@ import '@nalet/design-system/styles.css';
 import '../src/app.css';
 import { OperatorConsole } from '../src/operator/OperatorConsole';
 import { SettingsConsole } from '../src/settings/SettingsConsole';
+import { Launchpad } from '../src/Launchpad';
 
-// ?view=settings renders the registry console instead. Any portal view can be
-// added here — the point is that each one becomes viewable without a cluster.
+// ?view=settings renders the registry console instead, ?view=launchpad the
+// launchpad with its setup checklist. Any portal view can be added here — the
+// point is that each one becomes viewable without a cluster.
 const params = new URLSearchParams(location.search);
 const view = params.get('view');
-const View = view === 'settings' ? SettingsConsole : OperatorConsole;
+const View =
+  view === 'settings' ? SettingsConsole : view === 'launchpad' ? () => <Launchpad isAdmin /> : OperatorConsole;
 
 // ?charts=off plays an older portal-api without chart addons, ?charts=nocrd a
 // cluster without the ZaentrumAddon resource. The mock server reads it from a
@@ -24,6 +27,11 @@ document.cookie = `mock-controller=${params.get('controller') ?? ''}; path=/; Sa
 // record the platform's verification starts from (failed by default) — `old`
 // being a portal-api older than the field, which sends none.
 document.cookie = `mock-verification=${params.get('verification') ?? ''}; path=/; SameSite=Lax`;
+// ?setup=filled|scanning|https|ready|done|unknown|old picks where first-run
+// setup starts (a fresh appliance by default); ?gpu=1 gives the cluster a GPU
+// node.
+document.cookie = `mock-setup=${params.get('setup') ?? ''}; path=/; SameSite=Lax`;
+document.cookie = `mock-gpu=${params.get('gpu') ?? ''}; path=/; SameSite=Lax`;
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

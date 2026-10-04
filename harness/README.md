@@ -13,6 +13,13 @@ became impossible for 36 hours, and several UI changes piled up unseen.
 
     http://localhost:8792/                   # operator console
     http://localhost:8792/?view=settings     # app registry console
+    http://localhost:8792/?view=launchpad    # launchpad, with the setup checklist
+
+Ports taken? `MOCK_PORT` moves the mock, and the dev proxy with it;
+`HARNESS_PORT` moves the page:
+
+    MOCK_PORT=8795 node harness/mock-server.mjs &
+    MOCK_PORT=8795 HARNESS_PORT=8796 npx vite --config harness/vite.config.ts
 
 `oidc-stub.tsx` stands in for `react-oidc-context` via a Vite alias, so
 `usePortalApi` still runs its real fetch path — only the token is fabricated.
@@ -100,6 +107,26 @@ entry (chino, the apps and manage spaces) has no delete, every other delete
 says what goes with it, tiles and spaces carry who sees them (the ops space is
 for the ops role only), and a chart addon's **values** are planned first: the
 dialog shows the plan and asks, and cancelling puts the values back.
+
+The launchpad view shows the first-run setup checklist an admin sees until
+setup is marked done. The mock stands in for portal-api's setup endpoints
+and for what they read — the catalog manager and the operator — and plays
+every action: a key saved is set (one that is the v3 API key is refused
+before it is sent), **scan now** runs four seconds and finds 14 files, the
+pipeline switched on (it asks first) brings its workers up within three —
+the transcoder stays Unschedulable, as on a box with no GPU node — and
+**done** asks while steps are open. Settings then says who marked it done,
+and **show setup again** reopens it:
+
+    http://localhost:8792/?view=launchpad                     # a fresh appliance
+    http://localhost:8792/?view=launchpad&setup=scanning      # a scan under way
+    http://localhost:8792/?view=launchpad&setup=ready&gpu=1   # every step done
+    http://localhost:8792/?view=launchpad&setup=unknown       # a catalog manager that does not answer
+    http://localhost:8792/?view=launchpad&setup=old           # a portal-api without setup: no card
+    http://localhost:8792/?view=settings&setup=done           # marked done: show setup again
+
+`setup=filled` has a key and a library, `setup=https` a public host over
+https; `gpu=1` gives the cluster a GPU node, so the transcoder runs.
 
 The mock keeps its state in memory; restart it for the seeded state.
 
