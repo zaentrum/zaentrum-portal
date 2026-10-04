@@ -1,0 +1,132 @@
+/* the setup checklist on the launchpad. reads design-system tokens. */
+.setup__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-weight: 700;
+}
+
+.setup__state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.setup__steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* A step: its name and state on the left, what it means and the one thing to
+   do on the right. Hairlines between steps, none above the first. */
+.setup__step {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  gap: 16px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border, #1F2633);
+}
+.setup__step:first-child {
+  border-top: 0;
+  padding-top: 2px;
+}
+.setup__step:last-child {
+  padding-bottom: 2px;
+}
+
+.setup__label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.setup__name {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--fg, #E6E6E6);
+}
+
+.setup__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.setup__text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.setup__text--small {
+  font-size: 13px;
+}
+
+.setup__actions,
+.setup__key {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.setup__key .nc-input {
+  flex: 1 1 260px;
+  min-width: 0;
+  max-width: 420px;
+}
+
+/* A link beside the kit's buttons reads like one: mono, and lower case as the
+   kit sets every button label. */
+.setup__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: lowercase;
+  color: var(--cloud-blue, #58A6FF);
+  text-decoration: none;
+}
+.setup__link:hover,
+.setup__link:focus-visible {
+  text-decoration: underline;
+}
+
+.setup__hint {
+  font-size: 13px;
+  color: var(--signal-amber, #F2B233);
+}
+.setup__err {
+  display: block;
+  color: var(--signal-red, #F85149);
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.setup__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* ── mobile ─────────────────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .setup__step {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+  .setup__label {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+  }
+}

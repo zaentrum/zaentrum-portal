@@ -5,6 +5,7 @@ import { Settings, Boxes, ScrollText, Radio, Database, LifeBuoy } from 'lucide-r
 import { useNavigate } from 'react-router-dom';
 import { usePortalApi, type Launchpad as LaunchpadData } from './lib/api';
 import { resolveIcon } from './lib/icons';
+import { SetupCard } from './setup/SetupCard';
 import './app.css';
 
 // The launchpad home space — rendered inside the portal shell (which owns the
@@ -44,6 +45,10 @@ export function Launchpad({
         </Heading>
         <Text variant="muted">your spaces and apps</Text>
       </div>
+
+      {/* The first-run checklist, above the tiles, for an admin until one
+          marks setup done. It renders nothing for anyone else. */}
+      <SetupCard isAdmin={isAdmin} />
 
       {err && <p style={{ color: 'var(--signal-red, #F85149)' }}>couldn’t load your launchpad: {err}</p>}
       {!lp && !err && (
