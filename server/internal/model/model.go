@@ -153,6 +153,11 @@ type Addon struct {
 	// addon from; empty for an addon added by its address.
 	ChartRef     string `json:"chartRef"`
 	ChartVersion string `json:"chartVersion"`
+	// Space is the space the addon was installed into — the one its tiles go
+	// to unless its manifest brings its own — which a refresh that names none
+	// reuses. Empty for an addon installed before it was recorded whose
+	// space could not be told.
+	Space string `json:"space"`
 
 	// Read-side joins, not columns of the addons table.
 	Title string `json:"title"`

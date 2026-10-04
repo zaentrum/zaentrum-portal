@@ -226,7 +226,9 @@ func (a *API) registerChartAddon(ctx context.Context, ca operator.ChartAddon) er
 	if !needsRegistration(reg.addon, sum, chart) {
 		return nil
 	}
-	plan, err := planAddon(proxyURL, d, a.defaultSpace(ctx), a.publicOrigin(ctx))
+	// Registered again — a new chart version, a new manifest — it stays in the
+	// space it was registered into.
+	plan, err := planAddon(proxyURL, d, a.installSpace(ctx, ca.Name), a.publicOrigin(ctx))
 	if err != nil {
 		return err
 	}

@@ -149,16 +149,20 @@ const (
 // addonPlan is what installing a manifest produces. Pure data, so the
 // transformation is testable without a database.
 type addonPlan struct {
-	App        model.App
-	Space      *model.Space // nil unless the addon asks for its own launchpad section
-	Tiles      []model.Tile // empty when the addon contributes no launchpad entry
-	Rows       []model.Extension
-	Components []model.AddonComponent // never empty: an addon has at least its primary
-	Topics     map[string][]string    // component name → topics it declares
-	Setup      *ManifestSetup         // normalised; nil when the addon reports no setup
-	Version    string
-	Manifest   []byte // the descriptor, canonically encoded
-	SHA256     string // of Manifest
+	App   model.App
+	Space *model.Space // nil unless the addon asks for its own launchpad section
+	// InstallSpace is the space the addon is installed into: where its tiles
+	// go unless it asks for its own section. Recorded with the addon, so a
+	// refresh that names none puts them back there.
+	InstallSpace string
+	Tiles        []model.Tile // empty when the addon contributes no launchpad entry
+	Rows         []model.Extension
+	Components   []model.AddonComponent // never empty: an addon has at least its primary
+	Topics       map[string][]string    // component name → topics it declares
+	Setup        *ManifestSetup         // normalised; nil when the addon reports no setup
+	Version      string
+	Manifest     []byte // the descriptor, canonically encoded
+	SHA256       string // of Manifest
 }
 
 // manifestError is a descriptor the platform refuses: the addon answered, but
@@ -486,7 +490,8 @@ func planAddon(proxyURL string, d Descriptor, spaceKey, origin string) (addonPla
 			Key: key, Title: title, Description: desc, Kind: "tool", Icon: icon, Enabled: true,
 			BaseURL: "/portal/app/" + key, ProxyURL: proxyURL,
 		},
-		Components: components, Topics: topics, Setup: setup,
+		InstallSpace: spaceKey,
+		Components:   components, Topics: topics, Setup: setup,
 		Version: d.Version, Manifest: manifest, SHA256: sum,
 	}
 	// An addon's own space, when it asks for one: a section of the launchpad
@@ -568,7 +573,7 @@ func (p addonPlan) install() store.AddonInstall {
 		App: p.App, Space: p.Space, Tiles: p.Tiles, Rows: p.Rows,
 		Addon: model.Addon{
 			Key: p.App.Key, Address: p.App.ProxyURL, Version: p.Version,
-			Manifest: p.Manifest, ManifestSHA256: p.SHA256,
+			Manifest: p.Manifest, ManifestSHA256: p.SHA256, Space: p.InstallSpace,
 		},
 		Components: p.Components,
 	}
@@ -819,9 +824,20 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	space := body.Space
-	if space == "" {
-		space = a.defaultSpace(ctx)
+	// The space the tiles go to: the one the request names, else — a refresh
+	// names none — the one the addon was installed into.
+	space := strings.TrimSpace(body.Space)
+	if space != "" {
+		switch ok, err := a.spaceExists(ctx, space); {
+		case err != nil:
+			serverError(w, err)
+			return
+		case !ok:
+			badRequest(w, fmt.Sprintf("space %q does not exist — add it in settings → spaces, or install into another", space))
+			return
+		}
+	} else {
+		space = a.installSpace(ctx, strings.TrimSpace(d.Service))
 	}
 	// The origin slot URLs are made absolute with is the instance's own: the
 	// one this request came in on, or publicBase for a scripted install from
@@ -889,7 +905,7 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := map[string]any{
-		"key": plan.App.Key, "app": plan.App, "space": plan.Space,
+		"key": plan.App.Key, "app": plan.App, "space": plan.Space, "installSpace": plan.InstallSpace,
 		"tiles": len(plan.Tiles), "slots": len(plan.Rows),
 		"commands": len(d.Commands), "checks": len(d.Checks),
 		"version":         plan.Version,
@@ -918,16 +934,19 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request) {
 
 // installedAddon is one row of settings → addons.
 type installedAddon struct {
-	Key         string          `json:"key"`
-	Title       string          `json:"title"`
-	ProxyURL    string          `json:"proxyUrl"`
-	Version     string          `json:"version"`
-	InstalledAt time.Time       `json:"installedAt"`
-	RefreshedAt time.Time       `json:"refreshedAt"`
-	Tiles       int             `json:"tiles"`
-	Slots       int             `json:"slots"`
-	Components  []componentView `json:"components"`
-	Setup       *ManifestSetup  `json:"setup"`
+	Key         string    `json:"key"`
+	Title       string    `json:"title"`
+	ProxyURL    string    `json:"proxyUrl"`
+	Version     string    `json:"version"`
+	InstalledAt time.Time `json:"installedAt"`
+	RefreshedAt time.Time `json:"refreshedAt"`
+	Tiles       int       `json:"tiles"`
+	Slots       int       `json:"slots"`
+	// Space is the space the addon was installed into, which a refresh
+	// keeps; "" when it is not recorded.
+	Space      string          `json:"space"`
+	Components []componentView `json:"components"`
+	Setup      *ManifestSetup  `json:"setup"`
 	// RefreshAvailable: the addon now serves a different manifest than the
 	// one installed — it was redeployed and its contributions may have moved.
 	RefreshAvailable bool `json:"refreshAvailable"`
@@ -974,7 +993,7 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
 		row := installedAddon{
 			Key: ad.Key, Title: ad.Title, ProxyURL: ad.Address, Version: ad.Version,
 			InstalledAt: ad.InstalledAt, RefreshedAt: ad.RefreshedAt,
-			Tiles: ad.Tiles, Slots: ad.Rows, Registered: true,
+			Tiles: ad.Tiles, Slots: ad.Rows, Space: ad.Space, Registered: true,
 		}
 		if row.Title == "" {
 			row.Title = ad.Key
@@ -1110,4 +1129,30 @@ func (a *API) defaultSpace(ctx context.Context) string {
 		return spaces[0].Key
 	}
 	return "apps"
+}
+
+// installSpace is the space an install that names none puts the addon's tiles
+// in: the one it was installed into, while that space exists — a refresh
+// leaves them where they were — else the first.
+func (a *API) installSpace(ctx context.Context, key string) string {
+	if ad, err := a.addons.GetAddon(ctx, key); err == nil && ad.Space != "" {
+		if ok, err := a.spaceExists(ctx, ad.Space); err == nil && ok {
+			return ad.Space
+		}
+	}
+	return a.defaultSpace(ctx)
+}
+
+// spaceExists answers whether the registry holds a space of that key.
+func (a *API) spaceExists(ctx context.Context, key string) (bool, error) {
+	spaces, err := a.addons.ListSpaces(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, sp := range spaces {
+		if sp.Key == key {
+			return true, nil
+		}
+	}
+	return false, nil
 }

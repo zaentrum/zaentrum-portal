@@ -174,11 +174,19 @@ func TestSyncChartAddons(t *testing.T) {
 		t.Fatalf("unchanged: fetched %d, installs %d", len(fetched), len(e.store.installs))
 	}
 
-	// Upgraded: the new chart version is recorded.
+	// Upgraded: the new chart version is recorded — and the tiles stay in
+	// the space it was registered into, though another space now comes first.
+	if in.Addon.Space != "apps" {
+		t.Errorf("registered into %q, want apps", in.Addon.Space)
+	}
+	e.store.spaces["first"] = model.Space{Key: "first", Title: "first", Order: -10}
 	e.kube.SetStatus(addonPlural, "example", readyStatus(e, "1.3.0", "example"))
 	sync()
 	if len(e.store.installs) != 2 || e.store.installs[1].Addon.ChartVersion != "1.3.0" {
 		t.Fatalf("upgrade: installs %d %+v", len(e.store.installs), e.store.installs[len(e.store.installs)-1].Addon)
+	}
+	if up := e.store.installs[1]; up.Addon.Space != "apps" || len(up.Tiles) != 1 || up.Tiles[0].SpaceKey != "apps" {
+		t.Errorf("upgrade moved the addon: space %q, tiles %+v", up.Addon.Space, up.Tiles)
 	}
 	registerInstalls(e.store)
 

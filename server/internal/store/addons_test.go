@@ -135,6 +135,60 @@ func TestAddonsBackfill(t *testing.T) {
 	}
 }
 
+// An addon installed before its space was recorded gets the space its tiles
+// are in — when its manifest brings none of its own and its tiles are all in
+// one space — once, and a space recorded since is never touched.
+func TestAddonSpaceBackfill(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	if err := st.Migrate(ctx, migrationsBefore(t, "012"), "zaentrum-admin"); err != nil {
+		t.Fatalf("pre-012 migrations: %v", err)
+	}
+	exec(t, st, `INSERT INTO spaces (key, title) VALUES ('media', 'media'), ('own', 'own')`)
+	exec(t, st, `INSERT INTO apps (key, title) VALUES ('notes', 'notes'), ('split', 'split'), ('owner', 'owner'), ('bare', 'bare')`)
+	exec(t, st, `INSERT INTO addons (key, manifest) VALUES
+		('notes', '{"service":"notes","ui":{"console":true}}'),
+		('split', '{"service":"split"}'),
+		('owner', '{"service":"owner","ui":{"space":{"key":"own"}}}'),
+		('bare', NULL)`)
+	exec(t, st, `INSERT INTO tiles (key, app_key, space_key, title) VALUES
+		('addon.notes', 'notes', 'media', 'notes'),
+		('addon.split.a', 'split', 'media', 'a'),
+		('addon.split.b', 'split', 'apps', 'b'),
+		('addon.owner.items', 'owner', 'own', 'items')`)
+
+	if err := st.Migrate(ctx, db.Migrations, "zaentrum-admin"); err != nil {
+		t.Fatal(err)
+	}
+	space := func(key string) string {
+		t.Helper()
+		ad, err := st.GetAddon(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ad.Space
+	}
+	for key, want := range map[string]string{
+		"notes": "media", // its one space
+		"split": "",      // two spaces: which one it was installed into cannot be told
+		"owner": "",      // its own space is the manifest's, not where it was installed
+		"bare":  "",      // no tiles at all
+	} {
+		if got := space(key); got != want {
+			t.Errorf("%s: space = %q, want %q", key, got, want)
+		}
+	}
+
+	// Recorded since: the next boot leaves it alone, wherever the tiles are.
+	exec(t, st, `UPDATE addons SET space = 'apps' WHERE key = 'notes'`)
+	if err := st.Migrate(ctx, db.Migrations, "zaentrum-admin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := space("notes"); got != "apps" {
+		t.Errorf("a recorded space was overwritten on boot: %q", got)
+	}
+}
+
 func TestInstallRefreshAndRemoveAddon(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
@@ -150,7 +204,7 @@ func TestInstallRefreshAndRemoveAddon(t *testing.T) {
 		App: app, Space: space,
 		Tiles: []model.Tile{tile("addon.example.items"), tile("addon.example.queue")},
 		Rows:  []model.Extension{{Key: "example.hint", Addon: "example", Slot: "search.empty", Kind: "link", Label: "hint", Method: "POST", Enabled: true}},
-		Addon: model.Addon{Key: "example", Address: "http://example", Version: "1.0.0", Manifest: []byte(`{"service":"example"}`), ManifestSHA256: "aa"},
+		Addon: model.Addon{Key: "example", Address: "http://example", Version: "1.0.0", Manifest: []byte(`{"service":"example"}`), ManifestSHA256: "aa", Space: "apps"},
 		Components: []model.AddonComponent{
 			{Name: "example", Workload: "example", Role: "primary"},
 			{Name: "worker", Workload: "example-worker", Role: "optional", Summary: "processes the queue", Order: 1},
@@ -165,6 +219,18 @@ func TestInstallRefreshAndRemoveAddon(t *testing.T) {
 	}
 	if first.Version != "1.0.0" || first.Tiles != 2 || first.Rows != 1 || len(first.Components) != 2 || string(first.Manifest) != `{"service": "example"}` {
 		t.Errorf("installed = %+v (manifest %s)", first, first.Manifest)
+	}
+	// The space it was installed into is recorded, and a refresh into
+	// another one records that.
+	if first.Space != "apps" {
+		t.Errorf("space = %q, want apps", first.Space)
+	}
+	in.Addon.Space = "manage"
+	if err := st.InstallAddon(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if moved, err := st.GetAddon(ctx, "example"); err != nil || moved.Space != "manage" {
+		t.Errorf("space after a refresh into manage = %+v, %v", moved, err)
 	}
 	claims, err := st.WorkloadClaims(ctx)
 	if err != nil || claims["example-worker"] != "example" {
