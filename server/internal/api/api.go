@@ -1000,8 +1000,9 @@ func (a *API) dbRows(w http.ResponseWriter, r *http.Request) {
 // supportBundle assembles a downloadable diagnostic bundle from the sections the
 // caller opted into (?logs=&instances=&kafka=&registry=&config=, each default on,
 // set to 0 to omit). Everything is secret-scrubbed twice: per-section (logs use
-// the same ScrubSecrets as the live viewer) and once more over the final JSON as
-// a belt-and-braces net. Never includes DB credentials or bearer tokens.
+// the same ScrubSecrets as the live viewer) and once more over the whole
+// document as a belt-and-braces net — field by field, never as its encoded
+// text (scrubBundle). Never includes DB credentials or bearer tokens.
 func (a *API) supportBundle(w http.ResponseWriter, r *http.Request) {
 	// Self-cap the whole assembly: the per-container log walk is sequential and
 	// each apiserver call can take up to the k8s client's timeout, so bound the
@@ -1079,16 +1080,31 @@ func (a *API) supportBundle(w http.ResponseWriter, r *http.Request) {
 	}
 	bundle["sections"] = sections
 
-	raw, err := json.MarshalIndent(bundle, "", "  ")
+	safe, err := scrubBundle(bundle)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
-	// Final safety net: scrub the whole serialized document once more.
-	safe := redact.Secrets(string(raw))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="zaentrum-support-bundle.json"`)
-	_, _ = w.Write([]byte(safe))
+	_, _ = w.Write(safe)
+}
+
+// scrubBundle is the bundle as it is sent: the whole document redacted once
+// more, as a net under each section's own redaction, and indented.
+//
+// It is redacted as a document, field by field (redact.Document). The text
+// rule over the encoded bundle — what this did before — broke the very file
+// it was protecting: in a string holding `token="s3cr3t"` it took the escaped
+// quote for the end of the value, kept the secret and unbalanced the JSON;
+// under a credential-named field it replaced the '[' of an array or a bare
+// number with a marker that is no JSON, and kept the array's elements.
+func scrubBundle(bundle map[string]any) ([]byte, error) {
+	doc, err := redact.JSON(bundle)
+	if err != nil {
+		return nil, err
+	}
+	return json.MarshalIndent(doc, "", "  ")
 }
 
 // configSummary returns non-secret runtime configuration for the bundle — never
