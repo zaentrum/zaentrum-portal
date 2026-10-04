@@ -67,6 +67,9 @@ type fakeKatalog struct {
 	bearers  []string
 	refuse   bool // answer FORBIDDEN, as for a token without the catalog's admin role
 	setCalls int
+	// blankKey keeps a tmdb.api_key row with no value when none is set, as
+	// one cleared by hand leaves it.
+	blankKey bool
 }
 
 func newFakeKatalog(t *testing.T) *fakeKatalog {
@@ -111,8 +114,11 @@ func (f *fakeKatalog) serve(w http.ResponseWriter, r *http.Request) {
 		answer(map[string]any{"triggerScan": job})
 	default:
 		settings := []any{map[string]any{"key": "omdb.api_key", "isSecret": true, "isSet": false, "updatedAt": nil}}
-		if f.key != "" {
+		switch {
+		case f.key != "":
 			settings = append(settings, map[string]any{"key": katalog.TMDBSetting, "isSecret": true, "isSet": true, "updatedAt": "2026-10-04T06:00:00Z"})
+		case f.blankKey:
+			settings = append(settings, map[string]any{"key": katalog.TMDBSetting, "isSecret": true, "isSet": false, "updatedAt": "2026-10-01T06:00:00Z"})
 		}
 		list := func(n int) []any {
 			out := make([]any, 0, n)
@@ -212,6 +218,22 @@ func (e *setupEnv) putWorker(name string, ready bool, reason string) {
 			"reason": "Unschedulable", "message": "0/1 nodes are available: 1 Insufficient nvidia.com/gpu."}}}
 	}
 	e.kube.Put("pods", map[string]any{"metadata": map[string]any{"name": name + "-5d9c7b8f6-x2k4p", "labels": map[string]any{"app": name}}, "status": status})
+}
+
+// devicesFrom reads the devices step of a request that came in on host over
+// scheme, as the ingress in front of portal-api forwards it.
+func (e *setupEnv) devicesFrom(scheme, host string) setupDevices {
+	e.t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/portal/setup", nil)
+	req.Header.Set("Authorization", "Bearer "+e.iss.Token(e.t, adminPortal))
+	req.Header.Set("X-Forwarded-Proto", scheme)
+	req.Header.Set("X-Forwarded-Host", host)
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		e.t.Fatalf("GET /setup from %s://%s = %d %s", scheme, host, rec.Code, rec.Body)
+	}
+	return decodeSetup(e.t, rec).Devices
 }
 
 // setup reads the checklist as an admin of the portal.
@@ -370,6 +392,11 @@ func TestSetupSetsTheTMDBKey(t *testing.T) {
 	if m := e.setup().Metadata; m.State != stepDone || m.Key != "environment" {
 		t.Errorf("metadata with the server's own key = %+v", m)
 	}
+	// A setting that holds no value is no key.
+	e.kat.envKey, e.kat.blankKey = false, true
+	if m := e.setup().Metadata; m.State != stepTodo || m.Key != "none" {
+		t.Errorf("metadata with a blank setting = %+v", m)
+	}
 }
 
 // Scan now: the scan starts with the admin's bearer, runs, and the titles it
@@ -486,16 +513,27 @@ func TestSetupDevices(t *testing.T) {
 	if d := e.setup().Devices; d.State != stepTodo || !d.HTTPS || d.IssuerHTTPS {
 		t.Errorf("an http issuer = %+v", d)
 	}
+	// Reached through a port-forward, over http: the bundled issuer's scheme
+	// is the public host's.
+	e.api.cfg.OIDCIssuer = "https://media.example.com/auth/realms/zaentrum"
+	if d := e.devicesFrom("http", "localhost:8080"); d.State != stepDone || d.Origin != "https://media.example.com" {
+		t.Errorf("through a port-forward = %+v", d)
+	}
+	// An issuer of its own (a shared realm): the resource's issuerScheme says
+	// nothing about the host, and this request's scheme on it does.
+	e.putPlatform(map[string]any{"hostname": "media.example.com",
+		"identity": map[string]any{"mode": "external", "issuer": "https://sso.example.com/realms/media", "issuerScheme": "http"}}, "")
+	e.api.cfg.OIDCIssuer = "https://sso.example.com/realms/media"
+	if d := e.devicesFrom("https", "media.example.com"); d.State != stepDone || !d.HTTPS || d.Origin != "https://media.example.com" {
+		t.Errorf("external issuer, reached over https = %+v", d)
+	}
+	if d := e.devicesFrom("http", "media.example.com"); d.State != stepTodo || d.HTTPS {
+		t.Errorf("external issuer, reached over http = %+v", d)
+	}
 	// Without an operator, the address this request came in on.
 	e.kube.Remove("zaentrums", "zaentrum")
 	e.api.cfg.OIDCIssuer = "https://media.example.com/auth/realms/zaentrum"
-	req := httptest.NewRequest(http.MethodGet, "/api/portal/setup", nil)
-	req.Header.Set("Authorization", "Bearer "+e.iss.Token(t, adminPortal))
-	req.Header.Set("X-Forwarded-Proto", "https")
-	req.Header.Set("X-Forwarded-Host", "media.example.com")
-	rec := httptest.NewRecorder()
-	e.h.ServeHTTP(rec, req)
-	if d := decodeSetup(t, rec).Devices; d.State != stepDone || d.Source != "request" || d.Origin != "https://media.example.com" {
+	if d := e.devicesFrom("https", "media.example.com"); d.State != stepDone || d.Source != "request" || d.Origin != "https://media.example.com" {
 		t.Errorf("from the request = %+v", d)
 	}
 	for host, local := range map[string]bool{"localhost": true, "zaentrum.localhost": true, "127.0.0.1": true, "[::1]": true, "media.example.com": false, "192.168.1.20": false} {

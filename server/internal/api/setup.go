@@ -473,10 +473,27 @@ func processingStep(p *operator.Platform, platformNote string, gpus gpuNodes, in
 	return out
 }
 
+// devicesStep: phones and TVs need the platform reached over https, on a name
+// they reach, and sign-in over https. Where it is reached is the operator's
+// hostname, else the host this request came in on. Whether over https is
+// this request's own scheme when it came in on that host — the ingress or the
+// proxy in front of it says so — and otherwise, with the bundled identity,
+// the resource's issuerScheme, which the operator derives the bundled
+// Keycloak's address on that same host from. With an issuer of its own, the
+// resource's issuerScheme says nothing about the platform's host.
 func devicesStep(p *operator.Platform, issuer, requested string) setupDevices {
 	out := setupDevices{Issuer: issuer, Source: "request", Origin: requested}
 	if p != nil && p.Hostname != "" {
-		out.Source, out.Origin = "operator", p.Scheme()+"://"+p.Hostname
+		scheme := "http"
+		if r, err := url.Parse(requested); err == nil && r.Host != "" {
+			scheme = r.Scheme
+			if !strings.EqualFold(r.Hostname(), hostnameOf(p.Hostname)) && p.Issuer == "" && p.IdentityMode != "external" {
+				scheme = p.Scheme()
+			}
+		} else if p.Issuer == "" && p.IdentityMode != "external" {
+			scheme = p.Scheme()
+		}
+		out.Source, out.Origin = "operator", scheme+"://"+p.Hostname
 		if out.Issuer == "" {
 			out.Issuer = p.DerivedIssuer()
 		}
@@ -494,6 +511,14 @@ func devicesStep(p *operator.Platform, issuer, requested string) setupDevices {
 		out.State = stepDone
 	}
 	return out
+}
+
+// hostnameOf is a host without its port.
+func hostnameOf(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
 }
 
 // localHost reports whether a host is this machine's alone: a localhost name
