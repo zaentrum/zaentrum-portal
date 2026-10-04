@@ -21,6 +21,11 @@ func testStore(t *testing.T) *Store {
 	t.Helper()
 	dsn := os.Getenv("PORTAL_TEST_DATABASE_URL")
 	if dsn == "" {
+		// In CI a skip would pass for a run: the gap these tests closed
+		// would open again, unseen.
+		if os.Getenv("CI") != "" {
+			t.Fatal("PORTAL_TEST_DATABASE_URL is not set in CI — the store's Postgres tests would skip; give the job a database")
+		}
 		t.Skip("PORTAL_TEST_DATABASE_URL not set — skipping Postgres tests")
 	}
 	ctx := context.Background()

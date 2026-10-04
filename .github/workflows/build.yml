@@ -26,6 +26,25 @@ jobs:
     defaults:
       run:
         working-directory: server
+    # The store's tests run the real migrations and statements against
+    # Postgres, and skip without one — so CI gives them a database, a
+    # throwaway one: they drop the registry's tables first.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: portal
+          POSTGRES_PASSWORD: portal
+          POSTGRES_DB: portal_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U portal -d portal_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PORTAL_TEST_DATABASE_URL: postgres://portal:portal@localhost:5432/portal_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
