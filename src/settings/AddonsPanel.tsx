@@ -278,7 +278,7 @@ export function AddonsPanel() {
         {spaces.length > 0 && (
           <Field
             label="space"
-            hint="where tiles are placed, unless the addon brings its own section; default is the first space"
+            hint="where tiles are placed, unless the addon brings its own section; default is the space it was installed into, else the first"
           >
             <Select
               value={space}
