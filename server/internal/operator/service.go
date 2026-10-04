@@ -390,6 +390,16 @@ type zaentrumCR struct {
 		Update   struct {
 			Mode string `json:"mode"`
 		} `json:"update"`
+		// Features and Identity are read by the setup checklist (Platform).
+		Features struct {
+			Pipeline bool `json:"pipeline"`
+			GPU      bool `json:"gpu"`
+		} `json:"features"`
+		Identity struct {
+			Mode         string `json:"mode"`
+			Issuer       string `json:"issuer"`
+			IssuerScheme string `json:"issuerScheme"`
+		} `json:"identity"`
 		// Verification.Enabled is nil when the spec says nothing — the
 		// operator's default, which is on.
 		Verification struct {

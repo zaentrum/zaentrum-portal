@@ -221,6 +221,32 @@ type Container struct {
 	Name            string `json:"name"`
 	Image           string `json:"image"`
 	ImagePullPolicy string `json:"imagePullPolicy"`
+	// Env is the container's environment as its spec writes it: a value
+	// read from a Secret or a ConfigMap is not here, only that it is named.
+	Env          []EnvVar      `json:"env"`
+	VolumeMounts []VolumeMount `json:"volumeMounts"`
+}
+
+// EnvVar is one variable of a container's environment.
+type EnvVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// VolumeMount is where a container mounts a volume of its pod.
+type VolumeMount struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mountPath"`
+	SubPath   string `json:"subPath"`
+}
+
+// Volume is a volume of a pod; PersistentVolumeClaim names the claim behind
+// it, when a claim is.
+type Volume struct {
+	Name                  string `json:"name"`
+	PersistentVolumeClaim *struct {
+		ClaimName string `json:"claimName"`
+	} `json:"persistentVolumeClaim"`
 }
 
 // RestartedAtAnnotation is the pod-template stamp a rollout restart writes.
@@ -257,6 +283,7 @@ type Deployment struct {
 			} `json:"metadata"`
 			Spec struct {
 				Containers []Container `json:"containers"`
+				Volumes    []Volume    `json:"volumes"`
 			} `json:"spec"`
 		} `json:"template"`
 	} `json:"spec"`
@@ -453,6 +480,38 @@ func (c *Client) ListPods(ctx context.Context, labelSelector string) ([]Pod, err
 		return nil, err
 	}
 	var list podList
+	if err := json.Unmarshal(data, &list); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+// Node is a cluster node, as much of one as portal-api reads: what it offers.
+type Node struct {
+	Metadata struct {
+		Name   string            `json:"name"`
+		Labels map[string]string `json:"labels"`
+	} `json:"metadata"`
+	Status struct {
+		// Capacity is what the node has, by resource ("cpu", "nvidia.com/gpu"),
+		// as quantities.
+		Capacity map[string]string `json:"capacity"`
+	} `json:"status"`
+}
+
+type nodeList struct {
+	Items []Node `json:"items"`
+}
+
+// ListNodes lists the cluster's nodes. Nodes are cluster-scoped, and the Role
+// portal-api runs with is namespaced: on a stock install this answers 403,
+// and a caller reports what it would have read as unknown.
+func (c *Client) ListNodes(ctx context.Context) ([]Node, error) {
+	data, err := c.do(ctx, http.MethodGet, "/api/v1/nodes", "", nil)
+	if err != nil {
+		return nil, err
+	}
+	var list nodeList
 	if err := json.Unmarshal(data, &list); err != nil {
 		return nil, err
 	}
