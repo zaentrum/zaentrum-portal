@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { TileGroup, Tile, Heading, Text, Spinner } from '@nalet/design-system';
 import type { TileBadgeTone, TileStatus } from '@nalet/design-system';
-import { Settings, Boxes, ScrollText, Radio, Database, LifeBuoy } from 'lucide-react';
+import { Settings, Boxes, ScrollText, Radio, Database, LifeBuoy, Users } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { usePortalApi, type Launchpad as LaunchpadData } from './lib/api';
 import { resolveIcon } from './lib/icons';
@@ -91,6 +91,15 @@ export function Launchpad({
             badge="admin"
             badgeTone="info"
             onClick={() => nav('/settings')}
+          />
+          <Tile
+            variant="app"
+            title="People"
+            description="accounts · invites · rating caps"
+            icon={Users}
+            badge="admin"
+            badgeTone="info"
+            onClick={() => nav('/people')}
           />
           <Tile
             variant="app"

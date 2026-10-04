@@ -1,0 +1,209 @@
+/* the People page and its dialogs. reads design-system tokens. */
+.ppl {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.ppl__head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ppl__sub {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 13px;
+  color: var(--fg-dim, #6E7787);
+}
+
+.ppl__toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.ppl__ok {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--cloud-blue, #58A6FF);
+}
+.ppl__err {
+  display: block;
+  color: var(--signal-red, #F85149);
+  font-size: 13px;
+}
+.ppl__state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 0;
+}
+.ppl__note {
+  max-width: 720px;
+}
+.ppl__note p {
+  margin: 0 0 12px;
+}
+
+/* a link that reads like the kit's buttons: mono, lower case. */
+.ppl__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: lowercase;
+  color: var(--cloud-blue, #58A6FF);
+  text-decoration: none;
+}
+.ppl__link:hover,
+.ppl__link:focus-visible {
+  text-decoration: underline;
+}
+
+.ppl__name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ppl__who {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ppl__email,
+.ppl__small {
+  font-size: 12px;
+  color: var(--fg-dim, #6E7787);
+}
+.ppl__mono {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--fg-2, #c9d1d9);
+}
+.ppl__dim {
+  color: var(--fg-dim, #6E7787);
+}
+.ppl__role,
+.ppl__invite,
+.ppl__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ppl__hint {
+  display: inline-flex;
+  color: var(--fg-dim, #6E7787);
+  cursor: help;
+}
+.ppl__hint:focus-visible {
+  outline: 1px solid var(--cloud-cyan, #00A4DC);
+}
+/* The kit's tooltip bubble is hidden by visibility, so a hidden one still
+   takes room — a long hint near the edge widened a phone's page to fit it.
+   Hidden here, it takes none; shown, it wraps. */
+.ppl .nc-tooltip__bubble {
+  display: none;
+  white-space: normal;
+  width: max-content;
+  max-width: min(240px, 70vw);
+}
+.ppl .nc-tooltip__trigger:hover + .nc-tooltip__bubble,
+.ppl .nc-tooltip__trigger:focus-visible + .nc-tooltip__bubble,
+.ppl .nc-tooltip__trigger:focus-within + .nc-tooltip__bubble {
+  display: block;
+}
+.ppl__actions {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+}
+
+/* the form */
+.ppl__form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* the link, shown once */
+.ppl__shown {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ppl__shown p {
+  margin: 0;
+}
+.ppl__copy {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.ppl__copy .nc-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* the list: a table, and on a phone a card per person */
+.ppl__cards {
+  display: none;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+.ppl__card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border, #1F2633);
+  background: var(--surface, #11161F);
+}
+.ppl__card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--fg-muted, #AEB8C2);
+}
+.ppl__facts {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+.ppl__facts dt {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--fg-dim, #6E7787);
+  text-transform: lowercase;
+  align-self: center;
+}
+.ppl__facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .ppl__table {
+    display: none;
+  }
+  /* On a phone a hint opens towards the middle, never past the edge. */
+  .ppl__card .nc-tooltip__bubble--top {
+    left: auto;
+    right: 0;
+    transform: none;
+  }
+  .ppl__cards {
+    display: flex;
+  }
+  .ppl__copy {
+    flex-direction: column;
+  }
+}

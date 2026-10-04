@@ -12,6 +12,7 @@ import { LogsConsole } from './debug/LogsConsole';
 import { KafkaConsole } from './debug/KafkaConsole';
 import { DbConsole } from './debug/DbConsole';
 import { ExportConsole } from './debug/ExportConsole';
+import { PeoplePage } from './people/PeoplePage';
 import { useMe } from './lib/api';
 import { adminElsewhere } from './lib/access';
 import { Splash } from './Splash';
@@ -89,6 +90,14 @@ function AuthedApp() {
           element={
             <RequireAdmin me={me}>
               <DbConsole />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="people/*"
+          element={
+            <RequireAdmin me={me}>
+              <PeoplePage />
             </RequireAdmin>
           }
         />
