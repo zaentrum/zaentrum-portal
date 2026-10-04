@@ -33,7 +33,8 @@ import (
 //	library     titles in the catalog, the latest scan, where files go
 //	processing  the media pipeline, its workers, whether a node offers a GPU
 //	devices     https, which phones and TVs sign in over only
-//	people      accounts — nothing to check from here (a later milestone)
+//	people      accounts — nothing to check; where they are managed: the
+//	            People page with bundled identity, else the identity provider
 
 // Step states.
 const (
@@ -77,7 +78,7 @@ type setupDoc struct {
 	Library    setupLibrary           `json:"library"`
 	Processing setupProcessing        `json:"processing"`
 	Devices    setupDevices           `json:"devices"`
-	People     setupStep              `json:"people"`
+	People     setupPeople            `json:"people"`
 }
 
 // setupStep is what every step says: its state, and why when it is unknown.
@@ -141,6 +142,17 @@ type setupWorker struct {
 	Reason  string `json:"reason"`
 	Ready   int    `json:"ready"`
 	Desired int    `json:"desired"`
+}
+
+// setupPeople is where the people who use the server get their accounts. Its
+// state is info: nothing to check, one account per person.
+type setupPeople struct {
+	setupStep
+	// Mode is GET /people's: bundled (the People page manages them),
+	// external (they live in the identity provider at ManageURL), or
+	// unavailable (the People page is not set up; Note says why).
+	Mode      string `json:"mode"`
+	ManageURL string `json:"manageUrl,omitempty"`
 }
 
 type setupDevices struct {
@@ -358,8 +370,20 @@ func (a *API) setupDocument(r *http.Request) (setupDoc, error) {
 		Library:    libraryStep(a.katalog != nil, overview, overviewErr, media, platform),
 		Processing: processingStep(platform, platformNote, gpus, instances, instancesErr),
 		Devices:    devicesStep(platform, a.cfg.OIDCIssuer, requestOrigin(r)),
-		People:     setupStep{State: stepInfo},
+		People:     a.peopleStep(),
 	}, nil
+}
+
+// peopleStep says where people get their accounts.
+func (a *API) peopleStep() setupPeople {
+	out := setupPeople{setupStep: setupStep{State: stepInfo}, Mode: a.peopleMode()}
+	switch out.Mode {
+	case peopleExternal:
+		out.ManageURL = manageURL(a.cfg.PeopleManageURL, a.cfg.OIDCIssuer)
+	case peopleUnavailable:
+		out.Note = notSetUp
+	}
+	return out
 }
 
 // noKatalog is the note of a step read from a catalog manager there is none of.

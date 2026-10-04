@@ -15,7 +15,9 @@ import (
 
 	"github.com/zaentrum/zaentrum-portal/server/internal/auth/authtest"
 	"github.com/zaentrum/zaentrum-portal/server/internal/katalog"
+	"github.com/zaentrum/zaentrum-portal/server/internal/keycloak"
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
+	"github.com/zaentrum/zaentrum-portal/server/internal/people"
 )
 
 // ─── fakes ───────────────────────────────────────────────────────────────────
@@ -333,7 +335,7 @@ func TestSetupOfAFreshBox(t *testing.T) {
 	if d.State != stepTodo || d.HTTPS || d.IssuerHTTPS || !d.LocalOnly || d.Origin != "http://zaentrum.localhost" || d.Source != "operator" {
 		t.Errorf("devices = %+v", d)
 	}
-	if doc.People.State != stepInfo {
+	if doc.People.State != stepInfo || doc.People.Mode != peopleExternal {
 		t.Errorf("people = %+v", doc.People)
 	}
 	// The catalog was read with the admin's own bearer, nothing else.
@@ -627,5 +629,28 @@ func TestSetupWithoutACatalog(t *testing.T) {
 	}
 	if rec := e.do(adminPortal, http.MethodPost, "/api/portal/setup/library/scan", nil); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("scan without a catalog manager = %d", rec.Code)
+	}
+}
+
+// The people step says where people get their accounts: the People page with
+// the platform's own realm (the step links there), the identity provider's
+// console with an external one, and what the page needs when its client has
+// no secret. It is never a step to tick off.
+func TestSetupSaysWherePeopleAreManaged(t *testing.T) {
+	e := newSetupEnv(t)
+	e.putPlatform(nil, "appliance")
+	e.api.cfg.OIDCIssuer = "https://sso.example.org/realms/household"
+	if p := e.setup().People; p.State != stepInfo || p.Mode != peopleExternal || p.ManageURL != "https://sso.example.org/admin/household/console/" {
+		t.Errorf("external: %+v", p)
+	}
+	e.api.people = people.New(keycloak.New(keycloak.Config{URL: "http://keycloak.invalid/auth", Realm: "zaentrum", ClientID: "zaentrum-people"}),
+		"zaentrum-admin", "zaentrum-user", nil)
+	if p := e.setup().People; p.State != stepInfo || p.Mode != peopleUnavailable || !strings.Contains(p.Note, "zaentrum-people") {
+		t.Errorf("no secret: %+v", p)
+	}
+	e.api.people = people.New(keycloak.New(keycloak.Config{URL: "http://keycloak.invalid/auth", Realm: "zaentrum", ClientID: "zaentrum-people", ClientSecret: "s"}),
+		"zaentrum-admin", "zaentrum-user", nil)
+	if p := e.setup().People; p.State != stepInfo || p.Mode != peopleBundled || p.ManageURL != "" || p.Note != "" {
+		t.Errorf("bundled: %+v", p)
 	}
 }
