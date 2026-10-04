@@ -15,6 +15,7 @@ import (
 	"github.com/zaentrum/zaentrum-portal/server/internal/auth/authtest"
 	"github.com/zaentrum/zaentrum-portal/server/internal/config"
 	"github.com/zaentrum/zaentrum-portal/server/internal/k8s/k8sfake"
+	"github.com/zaentrum/zaentrum-portal/server/internal/model"
 	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
 )
 
@@ -122,12 +123,16 @@ func TestMeSaysWhetherTheConsoleIsTheCallers(t *testing.T) {
 // clients only. Admin through the media app, a viewer, an addon: 403.
 func TestAdminRoutesTakeOnlyThePortalsClients(t *testing.T) {
 	e := newTokenEnv(t)
+	// An addon with nowhere to read a manifest from, for /addons/{key}.
+	e.store.apps["example"] = model.App{Key: "example", Title: "example"}
+	e.store.addons["example"] = model.Addon{Key: "example"}
 	routes := []struct{ method, path string }{
 		{http.MethodGet, "/api/portal/apps"},
 		{http.MethodGet, "/api/portal/spaces"},
 		{http.MethodGet, "/api/portal/tiles"},
 		{http.MethodGet, "/api/portal/operator"},
 		{http.MethodGet, "/api/portal/addons"},
+		{http.MethodGet, "/api/portal/addons/example"},
 		{http.MethodGet, "/api/portal/addon-charts"},
 		{http.MethodGet, "/api/portal/debug/kafka/topology"},
 	}

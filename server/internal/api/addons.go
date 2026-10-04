@@ -968,14 +968,58 @@ type installedAddon struct {
 // anything — merged with the ZaentrumAddons, so a chart addon shows its chart,
 // phase and components, and one not registered yet is listed too.
 func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	addons, err := a.addons.ListAddons(ctx)
+	rows, err := a.addonRows(r.Context(), "")
 	if err != nil {
 		serverError(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+// getAddon handles GET /api/portal/addons/{key}: the addon's row of the list,
+// exactly as the list has it — a chart addon not registered yet included — or
+// 404 when there is no addon by that key.
+func (a *API) getAddon(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	rows, err := a.addonRows(r.Context(), key)
+	switch {
+	case err != nil:
+		serverError(w, err)
+	case len(rows) == 0:
+		http.Error(w, "no such addon", http.StatusNotFound)
+	default:
+		writeJSON(w, http.StatusOK, rows[0])
+	}
+}
+
+// addonRows are the rows of settings → addons: every addon, or with key only
+// the one by that key (none when there is no such addon).
+func (a *API) addonRows(ctx context.Context, key string) ([]installedAddon, error) {
+	var addons []model.Addon
+	if key == "" {
+		list, err := a.addons.ListAddons(ctx)
+		if err != nil {
+			return nil, err
+		}
+		addons = list
+	} else {
+		switch ad, err := a.addons.GetAddon(ctx, key); {
+		case errors.Is(err, store.ErrNotFound):
+		case err != nil:
+			return nil, err
+		default:
+			addons = []model.Addon{*ad}
+		}
+	}
 	live, known := a.liveWorkloads(ctx)
 	charts := a.chartAddonsByName(ctx)
+	if key != "" && charts != nil {
+		only := map[string]operator.ChartAddon{}
+		if ca, ok := charts[key]; ok {
+			only[key] = ca
+		}
+		charts = only
+	}
 	var regErrors map[string]string
 	if charts != nil {
 		regErrors = a.registrationErrors(ctx)
@@ -1034,7 +1078,7 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request) {
 	for _, name := range names {
 		out = append(out, chartOnlyRow(charts[name], live, known, regErrors))
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out, nil
 }
 
 // storedManifest decodes what an install recorded. False for an addon

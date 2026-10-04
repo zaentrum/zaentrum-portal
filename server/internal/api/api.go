@@ -135,6 +135,7 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 				// its app, tiles, slot rows and component group — see addons.go.
 				ar.Get("/addons", a.listAddons)
 				ar.Post("/addons", a.installAddon)
+				ar.Get("/addons/{key}", a.getAddon)
 				ar.Delete("/addons/{key}", a.removeAddon)
 
 				// Addons as Helm charts: portal-api writes the ZaentrumAddon

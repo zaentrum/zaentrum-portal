@@ -575,6 +575,28 @@ func TestListAddonsMergesChartAddons(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"components":[]`) {
 		t.Error("an addon without components must list [] — the console tells an older portal-api by a missing list")
 	}
+
+	// One addon by its key is its row of the list, exactly — a chart addon
+	// not registered yet too — and an unknown key is 404.
+	for _, want := range rows {
+		rec := e.do(http.MethodGet, "/api/portal/addons/"+want.Key, nil)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET /addons/%s = %d %s", want.Key, rec.Code, rec.Body)
+			continue
+		}
+		var got installedAddon
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		g, _ := json.Marshal(got)
+		w, _ := json.Marshal(want)
+		if string(g) != string(w) {
+			t.Errorf("GET /addons/%s =\n%s\nwant the list's row\n%s", want.Key, g, w)
+		}
+	}
+	if rec := e.do(http.MethodGet, "/api/portal/addons/missing", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /addons/missing = %d %s, want 404", rec.Code, rec.Body)
+	}
 }
 
 // An addon installed from a chart is upgraded, reconfigured and removed as one:
