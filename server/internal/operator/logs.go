@@ -2,8 +2,11 @@ package operator
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
 	"github.com/zaentrum/zaentrum-portal/server/internal/redact"
@@ -79,29 +82,46 @@ func (s *Service) LogPods(ctx context.Context) ([]PodLog, error) {
 // of the line-count cap.
 const maxLogBytes = 2 << 20 // 2 MiB
 
-// Logs returns a pod container's recent logs with secrets redacted. tail caps the
-// number of lines (default 500, max 5000); since bounds age in seconds (0 =
-// unbounded); the response is byte-capped (maxLogBytes) server-side. Names are
-// validated before they reach the apiserver URL path.
-func (s *Service) Logs(ctx context.Context, pod, container string, tail, since int) (string, error) {
-	if err := validName(pod); err != nil {
-		return "", err
+// LogQuery is a read of one pod container's log.
+type LogQuery struct {
+	Pod       string
+	Container string // "" for the pod's only container
+	// Tail caps the number of lines: 500 when 0, at most 5000.
+	Tail int
+	// Since (seconds) or SinceTime bounds the age of the lines; zero is no
+	// bound, and they are not given together.
+	Since     int
+	SinceTime time.Time
+}
+
+// ErrBadLogQuery: a log read the apiserver is never asked for — a pod or
+// container name that is no Kubernetes name, or since and sinceTime together.
+var ErrBadLogQuery = errors.New("bad log query")
+
+// Logs returns a pod container's recent logs with secrets redacted. The
+// response is byte-capped (maxLogBytes) server-side, and names are validated
+// before they reach the apiserver URL path.
+func (s *Service) Logs(ctx context.Context, q LogQuery) (string, error) {
+	if validName(q.Pod) != nil {
+		return "", fmt.Errorf("%w: pod %q is no Kubernetes name", ErrBadLogQuery, q.Pod)
 	}
-	if container != "" {
-		if err := validName(container); err != nil {
-			return "", err
-		}
+	if q.Container != "" && validName(q.Container) != nil {
+		return "", fmt.Errorf("%w: container %q is no Kubernetes name", ErrBadLogQuery, q.Container)
 	}
+	if q.Since > 0 && !q.SinceTime.IsZero() {
+		return "", fmt.Errorf("%w: since and sinceTime both bound the lines — give one", ErrBadLogQuery)
+	}
+	tail := q.Tail
 	if tail <= 0 {
 		tail = 500
 	}
 	if tail > 5000 {
 		tail = 5000
 	}
-	if since < 0 {
-		since = 0
-	}
-	raw, err := s.k8s.PodLogs(ctx, pod, container, tail, since, maxLogBytes)
+	since := max(q.Since, 0)
+	raw, err := s.k8s.PodLogs(ctx, q.Pod, k8s.LogOptions{
+		Container: q.Container, TailLines: tail, SinceSeconds: since, SinceTime: q.SinceTime, LimitBytes: maxLogBytes,
+	})
 	if err != nil {
 		return "", err
 	}

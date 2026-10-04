@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -91,5 +92,62 @@ func TestDebugPodsSayTheirWorkload(t *testing.T) {
 	// A pod nothing owns says so with empty strings, not by leaving the field out.
 	if !strings.Contains(rec.Body.String(), `"pod":"debug-shell","phase":"Running","containers":["shell","sidecar"],"workload":"","workloadKind":""`) {
 		t.Errorf("pods = %s", rec.Body)
+	}
+}
+
+// A log read answers in terms a client can act on: a pod this namespace does
+// not run is 404, a read the apiserver refuses as asked is 400 in its words —
+// neither is the server failing — and the lines come redacted.
+func TestDebugLogsAnswerWhatWasWrong(t *testing.T) {
+	e := newTokenEnv(t)
+	const pod = "chino-api-7d9f8b6c5d-x2k4p"
+	putPod(e.kube, pod, owner("ReplicaSet", "chino-api-7d9f8b6c5d"), map[string]any{"pod-template-hash": "7d9f8b6c5d"}, "app")
+	putPod(e.kube, "debug-shell", nil, nil, "shell", "sidecar")
+	e.kube.Logs[pod+"/app"] = "2026-10-04T06:00:00.000000001Z started with password=hunter2\n"
+
+	for _, c := range []struct {
+		query string
+		code  int
+		says  string
+	}{
+		{"pod=" + pod, http.StatusOK, "started with password=***REDACTED***"},
+		{"pod=" + pod + "&container=app", http.StatusOK, "started"},
+		{"pod=gone-7d9f8b6c5d-x2k4p", http.StatusNotFound, `no pod "gone-7d9f8b6c5d-x2k4p" runs in this namespace`},
+		{"pod=" + pod + "&container=sidecar", http.StatusBadRequest, "container sidecar is not valid for pod " + pod},
+		{"pod=debug-shell", http.StatusBadRequest, "a container name must be specified for pod debug-shell"},
+		{"pod=Not_A_Pod", http.StatusBadRequest, `pod "Not_A_Pod" is no Kubernetes name`},
+		{"pod=" + pod + "&container=No_Container", http.StatusBadRequest, `container "No_Container" is no Kubernetes name`},
+		{"pod=" + pod + "&sinceTime=yesterday", http.StatusBadRequest, `sinceTime "yesterday" is no RFC 3339 time`},
+		{"pod=" + pod + "&sinceTime=2026-10-04T06:00:00Z&since=60", http.StatusBadRequest, "since and sinceTime"},
+		{"", http.StatusBadRequest, "pod is required"},
+	} {
+		rec := e.do(adminPortal, http.MethodGet, "/api/portal/debug/logs?"+c.query, nil)
+		if rec.Code != c.code || !strings.Contains(rec.Body.String(), c.says) {
+			t.Errorf("logs?%s = %d %q, want %d saying %q", c.query, rec.Code, strings.TrimSpace(rec.Body.String()), c.code, c.says)
+		}
+	}
+}
+
+// sinceTime reaches the apiserver to the nanosecond, in UTC: a follower that
+// asks for the lines after the last one it has gets no second's worth twice.
+func TestDebugLogsSinceTime(t *testing.T) {
+	e := newTokenEnv(t)
+	const pod = "chino-api-7d9f8b6c5d-x2k4p"
+	putPod(e.kube, pod, nil, nil, "app")
+	rec := e.do(adminPortal, http.MethodGet, "/api/portal/debug/logs?pod="+pod+"&sinceTime="+url.QueryEscape("2026-10-04T08:00:00.123456789+02:00"), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logs = %d %s", rec.Code, rec.Body)
+	}
+	var sent url.Values
+	for _, c := range e.kube.Calls() {
+		if strings.HasSuffix(c.Path, "/pods/"+pod+"/log") {
+			sent, _ = url.ParseQuery(c.Query)
+		}
+	}
+	if got := sent.Get("sinceTime"); got != "2026-10-04T06:00:00.123456789Z" {
+		t.Errorf("sinceTime sent = %q (%v)", got, sent)
+	}
+	if sent.Has("sinceSeconds") {
+		t.Errorf("sinceSeconds sent with sinceTime: %v", sent)
 	}
 }

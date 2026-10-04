@@ -60,6 +60,19 @@ func IsForbidden(err error) bool { return hasCode(err, http.StatusForbidden) }
 // object that already exists.
 func IsConflict(err error) bool { return hasCode(err, http.StatusConflict) }
 
+// IsBadRequest: the apiserver refused the request as it was asked — for a
+// pod's log, a container the pod does not run.
+func IsBadRequest(err error) bool { return hasCode(err, http.StatusBadRequest) }
+
+// Message is the apiserver's own words for a refusal, "" when there are none.
+func Message(err error) string {
+	var a *APIError
+	if errors.As(err, &a) {
+		return a.Message
+	}
+	return ""
+}
+
 func hasCode(err error, code int) bool {
 	var a *APIError
 	return errors.As(err, &a) && a.Code == code
@@ -379,24 +392,39 @@ func decodeDeployment(data []byte, err error) (*Deployment, error) {
 	return &d, nil
 }
 
+// LogOptions are what a read of a container's log asks for.
+type LogOptions struct {
+	Container string
+	// TailLines caps the number of lines (0 = the apiserver's default).
+	TailLines int
+	// SinceSeconds and SinceTime bound the age of the lines; zero is no
+	// bound. The apiserver takes one of them, not both.
+	SinceSeconds int
+	SinceTime    time.Time
+	// LimitBytes caps the response size server-side (0 = no cap), so a
+	// container that logs very long lines can't return an unbounded body.
+	LimitBytes int
+}
+
 // PodLogs returns a pod container's recent logs (plain text, with timestamps).
-// tailLines caps the number of lines; sinceSeconds bounds the age (0 = no bound);
-// limitBytes caps the response size server-side (0 = no cap) so a container that
-// logs very long lines can't return an unbounded body. The log subresource
-// returns text/plain, not JSON, so the body is returned raw.
-func (c *Client) PodLogs(ctx context.Context, pod, container string, tailLines, sinceSeconds, limitBytes int) ([]byte, error) {
+// The log subresource returns text/plain, not JSON, so the body is returned
+// raw. SinceTime is sent to the nanosecond, in RFC 3339.
+func (c *Client) PodLogs(ctx context.Context, pod string, o LogOptions) ([]byte, error) {
 	q := url.Values{}
-	if container != "" {
-		q.Set("container", container)
+	if o.Container != "" {
+		q.Set("container", o.Container)
 	}
-	if tailLines > 0 {
-		q.Set("tailLines", strconv.Itoa(tailLines))
+	if o.TailLines > 0 {
+		q.Set("tailLines", strconv.Itoa(o.TailLines))
 	}
-	if sinceSeconds > 0 {
-		q.Set("sinceSeconds", strconv.Itoa(sinceSeconds))
+	if o.SinceSeconds > 0 {
+		q.Set("sinceSeconds", strconv.Itoa(o.SinceSeconds))
 	}
-	if limitBytes > 0 {
-		q.Set("limitBytes", strconv.Itoa(limitBytes))
+	if !o.SinceTime.IsZero() {
+		q.Set("sinceTime", o.SinceTime.UTC().Format(time.RFC3339Nano))
+	}
+	if o.LimitBytes > 0 {
+		q.Set("limitBytes", strconv.Itoa(o.LimitBytes))
 	}
 	q.Set("timestamps", "true")
 	p := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log?%s", c.namespace, url.PathEscape(pod), q.Encode())

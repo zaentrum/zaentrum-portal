@@ -921,27 +921,55 @@ func (a *API) debugPods(w http.ResponseWriter, r *http.Request) {
 }
 
 // debugLogs returns a pod container's recent logs (secrets redacted) as text.
-// Query: pod (required), container, tail (lines), since (seconds).
+// Query: pod (required), container, tail (lines), since (seconds) or
+// sinceTime (RFC 3339, to the nanosecond — a follower asks for the lines
+// after the last one it has).
+//
+// A pod this namespace does not run is 404 — definitive, as for a workload
+// the console does not run — and a read the apiserver refuses as asked — a
+// container the pod does not run, none named for a pod of several, a name
+// that is no Kubernetes name, a time that is none — is 400 in the
+// apiserver's words. Neither is the server failing.
 func (a *API) debugLogs(w http.ResponseWriter, r *http.Request) {
 	if !a.op.Available() {
 		http.Error(w, "log viewer is unavailable (not running in a cluster)", http.StatusServiceUnavailable)
 		return
 	}
 	q := r.URL.Query()
-	pod := q.Get("pod")
-	if strings.TrimSpace(pod) == "" {
+	pod := strings.TrimSpace(q.Get("pod"))
+	if pod == "" {
 		badRequest(w, "pod is required")
 		return
 	}
 	tail, _ := strconv.Atoi(q.Get("tail"))
 	since, _ := strconv.Atoi(q.Get("since"))
-	logs, err := a.op.Logs(r.Context(), pod, q.Get("container"), tail, since)
-	if err != nil {
-		serverError(w, err)
-		return
+	lq := operator.LogQuery{Pod: pod, Container: q.Get("container"), Tail: tail, Since: since}
+	if v := strings.TrimSpace(q.Get("sinceTime")); v != "" {
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			badRequest(w, fmt.Sprintf("sinceTime %q is no RFC 3339 time, e.g. 2026-10-04T06:00:00.123456789Z", v))
+			return
+		}
+		lq.SinceTime = t
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte(logs))
+	logs, err := a.op.Logs(r.Context(), lq)
+	switch {
+	case errors.Is(err, operator.ErrBadLogQuery):
+		badRequest(w, err.Error())
+	case k8s.IsNotFound(err):
+		http.Error(w, fmt.Sprintf("no pod %q runs in this namespace", pod), http.StatusNotFound)
+	case k8s.IsBadRequest(err):
+		msg := k8s.Message(err)
+		if msg == "" {
+			msg = err.Error()
+		}
+		badRequest(w, msg)
+	case err != nil:
+		serverError(w, err)
+	default:
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(logs))
+	}
 }
 
 // ─── debug: kafka event tap ────────────────────────────────────────────────────
@@ -1074,7 +1102,7 @@ func (a *API) supportBundle(w http.ResponseWriter, r *http.Request) {
 							truncated = true
 							break collect
 						}
-						txt, err := a.op.Logs(ctx, p.Pod, c, 200, 0)
+						txt, err := a.op.Logs(ctx, operator.LogQuery{Pod: p.Pod, Container: c, Tail: 200})
 						if err != nil {
 							continue
 						}
