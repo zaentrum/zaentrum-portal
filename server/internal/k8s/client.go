@@ -293,7 +293,16 @@ type Pod struct {
 		} `json:"containers"`
 	} `json:"spec"`
 	Status struct {
-		Phase             string `json:"phase"`
+		Phase string `json:"phase"`
+		// Conditions say what the scheduler made of the pod, among other
+		// things: PodScheduled False with reason Unschedulable is a pod no
+		// node can take — one asking for a GPU none offers, say.
+		Conditions []struct {
+			Type    string `json:"type"`
+			Status  string `json:"status"`
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
+		} `json:"conditions"`
 		ContainerStatuses []struct {
 			RestartCount int32 `json:"restartCount"`
 			Ready        bool  `json:"ready"`

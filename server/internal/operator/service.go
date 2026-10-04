@@ -661,10 +661,19 @@ func ownedByZaentrum(d k8s.Deployment) bool {
 //
 // Waiting beats terminated: a container that crashed and is now waiting to be
 // restarted reports both, and the waiting reason is the current state.
+//
+// A pod no node can take has no container to report on: the scheduler says
+// so in its PodScheduled condition, and Unschedulable is the reason — the
+// transcoder on a cluster with no GPU node sits there for good.
 func unhealthyReason(pods []k8s.Pod, d k8s.Deployment) string {
 	for _, p := range pods {
 		if !podMatches(p, d) {
 			continue
+		}
+		for _, c := range p.Status.Conditions {
+			if c.Type == "PodScheduled" && c.Status == "False" && c.Reason == "Unschedulable" {
+				return "Unschedulable"
+			}
 		}
 		for _, cs := range p.Status.ContainerStatuses {
 			if cs.Ready {
