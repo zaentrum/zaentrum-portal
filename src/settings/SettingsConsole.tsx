@@ -23,6 +23,7 @@ import { deletable, deleteConfirmation, type RegistryKind } from '../lib/confirm
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { useResource } from './useResource';
 import { AddonsPanel } from './AddonsPanel';
+import { SetupAgain } from '../setup/SetupAgain';
 import './settings.css';
 
 const KINDS = ['product', 'manage', 'tool', 'external'];
@@ -68,6 +69,7 @@ export function SettingsConsole() {
           settings
         </Heading>
         <span className="set__sub">app registry — install addons, register apps, spaces &amp; tiles</span>
+        <SetupAgain />
       </div>
       <Tabs
         items={[

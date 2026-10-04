@@ -10,6 +10,18 @@
   font-size: 13px;
   color: var(--fg-dim, #6E7787);
 }
+/* first-run setup: who marked it done, and "show setup again". */
+.set__setup {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+.set__setup .set__err {
+  flex-basis: 100%;
+}
 
 .set__body {
   margin-top: 20px;
