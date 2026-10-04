@@ -712,14 +712,9 @@ func TestInvitesThatDoNotWorkAnswerAlike(t *testing.T) {
 	_ = e.api.people.Keycloak().Update(context.Background(), u)
 	_, expired := newLink("expired")
 
-	tokens := map[string]string{
-		"unknown": base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)), "malformed": "not-a-token",
-		"too long": strings.Repeat("A", 44), "used": used, "replaced": replaced, "gone": gone, "off": off,
-	}
-	clock = start.Add(7*24*time.Hour + time.Second)
-	tokens["expired"] = expired
 	var want string
-	for name, token := range tokens {
+	closed := func(name, token string) {
+		t.Helper()
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
 			rec := e.public("203.0.113.21", method, "/api/portal/invites/"+token, map[string]any{"password": "a-good-password"})
 			if rec.Code != http.StatusNotFound {
@@ -734,6 +729,18 @@ func TestInvitesThatDoNotWorkAnswerAlike(t *testing.T) {
 			}
 		}
 	}
+	// Each while the others still work: none of them is merely expired.
+	for name, token := range map[string]string{
+		"unknown": base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)), "malformed": "not-a-token",
+		"too long": strings.Repeat("A", 44), "used": used, "replaced": replaced, "gone": gone, "off": off,
+	} {
+		closed(name, token)
+	}
+	if rec := e.public("203.0.113.21", http.MethodGet, "/api/portal/invites/"+expired, nil); rec.Code != http.StatusOK {
+		t.Fatalf("the invite that expires next still works now: %d %s", rec.Code, rec.Body)
+	}
+	clock = start.Add(7*24*time.Hour + time.Second)
+	closed("expired", expired)
 	if !strings.Contains(want, `"valid":false`) {
 		t.Errorf("the refusal: %s", want)
 	}
