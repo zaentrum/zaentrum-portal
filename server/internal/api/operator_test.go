@@ -322,6 +322,37 @@ func TestPatchOperatorAnswersWithVersionAndGeneration(t *testing.T) {
 	}
 }
 
+// The media pipeline is switched on the operator's resource — its own field,
+// patched alone: the platform's other features stay as they were — and the
+// answer is the generation the switch made, for a caller to wait on.
+func TestPatchOperatorSwitchesThePipeline(t *testing.T) {
+	e := newOpEnv(t)
+	e.putCR("")
+	spec := e.kube.Object("zaentrums", "zaentrum")["spec"].(map[string]any)
+	spec["features"] = map[string]any{"kafka": true, "gpu": false}
+	e.kube.Put("zaentrums", map[string]any{"apiVersion": "zaentrum.io/v1alpha1", "kind": "Zaentrum",
+		"metadata": map[string]any{"name": "zaentrum"}, "spec": spec})
+
+	for _, on := range []bool{true, false} {
+		before := e.kube.Generation("zaentrums", "zaentrum")
+		rec := e.do(http.MethodPatch, "/api/portal/operator", map[string]any{"pipeline": on})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("pipeline %v = %d %s", on, rec.Code, rec.Body)
+		}
+		if got := e.decodeBody(rec)["generation"]; got != float64(before+1) {
+			t.Errorf("pipeline %v answered generation %v, want %d", on, got, before+1)
+		}
+		features := e.kube.Object("zaentrums", "zaentrum")["spec"].(map[string]any)["features"].(map[string]any)
+		if features["pipeline"] != on || features["kafka"] != true || features["gpu"] != false {
+			t.Errorf("pipeline %v: features = %v", on, features)
+		}
+	}
+	// Not a switch: refused as the JSON it is.
+	if rec := e.do(http.MethodPatch, "/api/portal/operator", `{"pipeline": "on"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf(`pipeline "on" = %d, want 400`, rec.Code)
+	}
+}
+
 // apply-update names the update it applies — the one the caller was shown —
 // so that a channel that moved, or a release that landed, while the caller
 // decided is refused instead of rolled out. Without the name there is nothing

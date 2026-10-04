@@ -552,24 +552,40 @@ func versionFromImage(image string) string {
 	return SourceUnknown
 }
 
-// SetOperator patches the Zaentrum CR spec (version/channel/update mode). Empty
-// fields are left unchanged. Requires an operator to be present. It answers
-// with the version the resource now asks for and the generation the patch
-// made, so a caller can wait for the operator to reconcile THIS write.
-func (s *Service) SetOperator(ctx context.Context, version, channel, updateMode *string) (Update, error) {
+// OperatorChange is a write to the operator's resource: each field set is
+// changed, each nil one left as it is.
+type OperatorChange struct {
+	Version    *string
+	Channel    *string
+	UpdateMode *string
+	// Pipeline switches the media pipeline (spec.features.pipeline): the
+	// operator starts or stops its workloads.
+	Pipeline *bool
+}
+
+// SetOperator patches the Zaentrum CR spec (version/channel/update mode, the
+// media pipeline). Nil fields are left unchanged. Requires an operator to be
+// present. It answers with the version the resource now asks for and the
+// generation the patch made, so a caller can wait for the operator to
+// reconcile THIS write.
+func (s *Service) SetOperator(ctx context.Context, c OperatorChange) (Update, error) {
 	info, _ := s.operatorInfo(ctx)
 	if !info.Present {
 		return Update{}, fmt.Errorf("no operator instance to configure")
 	}
 	spec := map[string]any{}
-	if version != nil {
-		spec["version"] = *version
+	if c.Version != nil {
+		spec["version"] = *c.Version
 	}
-	if channel != nil {
-		spec["channel"] = *channel
+	if c.Channel != nil {
+		spec["channel"] = *c.Channel
 	}
-	if updateMode != nil {
-		spec["update"] = map[string]any{"mode": *updateMode}
+	if c.UpdateMode != nil {
+		spec["update"] = map[string]any{"mode": *c.UpdateMode}
+	}
+	if c.Pipeline != nil {
+		// A merge patch of features.pipeline alone: kafka and gpu stay.
+		spec["features"] = map[string]any{"pipeline": *c.Pipeline}
 	}
 	if len(spec) == 0 {
 		return Update{}, fmt.Errorf("nothing to change")

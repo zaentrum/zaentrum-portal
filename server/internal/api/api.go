@@ -239,20 +239,37 @@ func (a *API) operatorPatch(w http.ResponseWriter, r *http.Request) {
 	if !a.operatorReady(w) {
 		return
 	}
+	// pipeline switches the media pipeline (spec.features.pipeline). An older
+	// portal-api refuses the field as unknown, which is how a console tells.
 	var body struct {
 		Version    *string `json:"version"`
 		Channel    *string `json:"channel"`
 		UpdateMode *string `json:"updateMode"`
+		Pipeline   *bool   `json:"pipeline"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	out, err := a.op.SetOperator(r.Context(), body.Version, body.Channel, body.UpdateMode)
+	out, err := a.op.SetOperator(r.Context(), operator.OperatorChange{
+		Version: body.Version, Channel: body.Channel, UpdateMode: body.UpdateMode, Pipeline: body.Pipeline,
+	})
 	if err != nil {
 		badRequest(w, err.Error())
 		return
 	}
+	if body.Pipeline != nil {
+		// Who switched it, in the log: the request reaches the cluster as
+		// portal-api's own service account.
+		log.Printf("operator: %s switched the media pipeline %s", requester(r), onOff(*body.Pipeline))
+	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }
 
 func (a *API) operatorApplyUpdate(w http.ResponseWriter, r *http.Request) {

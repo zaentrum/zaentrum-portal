@@ -221,7 +221,7 @@ func TestSetOperatorAnswersWithTheVersionAndGeneration(t *testing.T) {
 	putCR(fake, "1.4.0", "stable", "1.5.0")
 
 	v := "1.6.0"
-	out, err := s.SetOperator(context.Background(), &v, nil, nil)
+	out, err := s.SetOperator(context.Background(), OperatorChange{Version: &v})
 	if err != nil {
 		t.Fatal(err)
 	}
