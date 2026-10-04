@@ -1,0 +1,75 @@
+/* the invite page: no shell, nothing to sign in with yet. reads design-system tokens. */
+.inv {
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  padding: 56px 16px 32px;
+  background:
+    radial-gradient(900px 420px at 50% -8%, color-mix(in srgb, var(--cloud-blue) 9%, transparent), transparent 60%),
+    var(--bg, #0B0F19);
+  color: var(--fg, #E6E6E6);
+}
+.inv__brand {
+  display: flex;
+  justify-content: center;
+}
+.inv__card {
+  width: 100%;
+  max-width: 440px;
+}
+.inv__title {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-weight: 700;
+}
+.inv__state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+.inv__text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.inv__mono {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-weight: 600;
+}
+.inv__form,
+.inv__done {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.inv__rules {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--fg-muted, #AEB8C2);
+}
+.inv__err {
+  display: block;
+  color: var(--signal-red, #F85149);
+  font-size: 13px;
+}
+.inv__ok {
+  vertical-align: -3px;
+  color: var(--signal-green, #2EA043);
+}
+.inv__signin {
+  display: flex;
+}
+
+@media (max-width: 720px) {
+  .inv {
+    padding-top: 32px;
+  }
+}

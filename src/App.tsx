@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { useAuth } from 'react-oidc-context';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Spinner, Text } from '@nalet/design-system';
 import { Shell } from './shell/Shell';
 import { Launchpad } from './Launchpad';
@@ -13,24 +13,30 @@ import { KafkaConsole } from './debug/KafkaConsole';
 import { DbConsole } from './debug/DbConsole';
 import { ExportConsole } from './debug/ExportConsole';
 import { PeoplePage } from './people/PeoplePage';
+import { InvitePage } from './invite/InvitePage';
 import { useMe } from './lib/api';
 import { adminElsewhere } from './lib/access';
+import { isInvitePath } from './lib/people';
 import { Splash } from './Splash';
 
 // You sign into zaentrum (the portal) once; products + apps ride the same SSO
-// session. Unauthenticated hits bounce to Keycloak.
+// session. Unauthenticated hits bounce to Keycloak — all but an invite link,
+// whose person has no password to sign in with yet.
 export function App() {
   const auth = useAuth();
+  const inviting = isInvitePath(useLocation().pathname);
 
   useEffect(() => {
+    if (inviting) return;
     if (!auth.isLoading && !auth.isAuthenticated && !auth.activeNavigator && !auth.error) {
       // Remember where the user was going; onSigninCallback restores it.
       const { pathname, search, hash } = window.location;
       const returnTo = pathname.startsWith('/portal/auth/') ? '/portal/' : pathname + search + hash;
       void auth.signinRedirect({ state: { returnTo } });
     }
-  }, [auth.isLoading, auth.isAuthenticated, auth.activeNavigator, auth.error]);
+  }, [inviting, auth.isLoading, auth.isAuthenticated, auth.activeNavigator, auth.error]);
 
+  if (inviting) return <InvitePage />;
   if (auth.error) return <Splash message={`sign-in failed: ${auth.error.message}`} />;
   if (!auth.isAuthenticated) return <Splash message="signing you in…" />;
   return <AuthedApp />;
