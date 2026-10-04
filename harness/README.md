@@ -14,6 +14,8 @@ became impossible for 36 hours, and several UI changes piled up unseen.
     http://localhost:8792/                   # operator console
     http://localhost:8792/?view=settings     # app registry console
     http://localhost:8792/?view=launchpad    # launchpad, with the setup checklist
+    http://localhost:8792/?view=people       # the People page
+    http://localhost:8792/?view=invite&token=<token>  # the invite page a link opens
 
 Ports taken? `MOCK_PORT` moves the mock, and the dev proxy with it;
 `HARNESS_PORT` moves the page:
@@ -127,6 +129,19 @@ and **show setup again** reopens it:
 
 `setup=filled` has a key and a library, `setup=https` a public host over
 https; `gpu=1` gives the cluster a GPU node, so the transcoder runs.
+
+The People page reads seven people as portal-api answers them: you (Anna, an
+admin), the first admin — Keycloak's, so it offers no change — another admin,
+a child capped at 12 with an open invite, one capped at 6 who joined, one whose
+link expired and one switched off whose link was revoked. Every change asks
+first and plays out as the server answers it, refusals included: add a person
+(the link is shown once, Copy Invite Link copies it), change a name or a cap,
+switch someone off or on, make a new link, delete. The mock logs the token of
+the seeded open invite at start; `?view=invite&token=…` opens it, and a link
+made on the People page works there too — once:
+
+    http://localhost:8792/?view=people&people=external     # people in an identity provider
+    http://localhost:8792/?view=people&people=unavailable  # a People page without its client's secret
 
 The mock keeps its state in memory; restart it for the seeded state.
 

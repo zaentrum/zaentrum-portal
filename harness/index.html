@@ -1,3 +1,8 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>operator console harness</title></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>operator console harness</title>
+<style>
+  /* the page the views render in: the shell's main area, and a phone's */
+  .harness-page { padding: 24px; max-width: 1200px; margin: 0 auto; box-sizing: border-box; }
+  @media (max-width: 720px) { .harness-page { padding: 16px 12px; } }
+</style></head>
 <body><div id="root"></div><script type="module" src="./main.tsx"></script></body></html>

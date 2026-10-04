@@ -2,6 +2,7 @@
 // shaped like live zaentrum-beta (14 platform services) plus one installed
 // addon made of three containers, a few addon workloads no installed addon
 // declares, and one deliberately unclaimed workload so every group renders.
+import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 
 const platform = [
@@ -779,7 +780,11 @@ const setupDoc = (req) => {
     devices: s.https
       ? { state: 'done', origin: 'https://media.example.com', https: true, issuer: 'https://media.example.com/auth/realms/zaentrum', issuerHttps: true, localOnly: false, source: 'operator' }
       : { state: 'todo', origin: 'http://zaentrum.localhost', https: false, issuer: 'http://zaentrum.localhost/auth/realms/zaentrum', issuerHttps: false, localOnly: true, source: 'operator' },
-    people: { state: 'info' },
+    people: peopleMode(req) === 'external'
+      ? { state: 'info', mode: 'external', manageUrl: 'https://sso.example.org/admin/household/console/' }
+      : peopleMode(req) === 'unavailable'
+        ? { state: 'info', mode: 'unavailable', note: 'The People page is not set up: it needs Secret zaentrum-people (key client-secret).' }
+        : { state: 'info', mode: 'bundled' },
   };
 };
 
@@ -826,6 +831,148 @@ async function serveSetup(req, res, pathname) {
   return text(res, 405, 'method not allowed'), true;
 }
 
+// ─── people ──────────────────────────────────────────────────────────────────
+//
+// The People page and the invite page, as portal-api answers them, with the
+// same rules: the last enabled admin stays one, nobody changes their own role
+// or switches themselves off, the first admin is Keycloak's, a cap is for a
+// user, an invite works once and a new one revokes the old. ?people= picks
+// the mode: '' the platform's own realm, external an identity provider,
+// unavailable the people client without its secret. ?view=invite&token=…
+// opens an invite: the token of the seeded open invite is logged at start.
+
+const peopleMode = (req) => (req.headers.cookie ?? '').match(/(?:^|;\s*)mock-people=([a-z]*)/)?.[1] ?? '';
+const DAY_MS = 24 * 60 * 60 * 1000;
+const isoIn = (ms) => new Date(Date.now() + ms).toISOString();
+const newToken = () => randomBytes(32).toString('base64url');
+const POLICY = { minLength: 8, notUsername: true, notEmail: true, hints: ['At least 8 characters.', 'Not your username.'] };
+
+let personSeq = 0;
+const person = (over) => ({
+  id: `p-${++personSeq}`, username: '', displayName: '', enabled: true, role: 'user', maxRating: null,
+  createdAt: isoIn(-3 * DAY_MS), managed: '', ...over,
+});
+const people = [
+  person({ id: 'user-owner', username: 'admin', displayName: 'Zaentrum Administrator', email: 'admin@zaentrum.local', role: 'admin', createdAt: null, managed: 'keycloak' }),
+  person({ id: 'user-harness', username: 'harness', displayName: 'Anna', role: 'admin' }),
+  person({ username: 'lukas', displayName: 'Lukas', role: 'admin', createdAt: isoIn(-2 * DAY_MS) }),
+  person({ username: 'mia', displayName: 'Mia', maxRating: 12, createdAt: isoIn(-1 * DAY_MS) }),
+  person({ username: 'leo', displayName: 'Leo', maxRating: 6, createdAt: isoIn(-2 * DAY_MS) }),
+  person({ username: 'opa', displayName: 'Opa Hans', createdAt: isoIn(-9 * DAY_MS) }),
+  person({ username: 'gast', displayName: 'Gast', enabled: false, createdAt: isoIn(-20 * DAY_MS) }),
+];
+// invites: token -> {personId, createdAt, expiresAt, usedAt, revokedAt}
+const invites = new Map();
+const invite = (personId, created, expires, extra = {}) => {
+  const token = newToken();
+  invites.set(token, { personId, createdAt: isoIn(created), expiresAt: isoIn(expires), usedAt: null, revokedAt: null, ...extra });
+  return token;
+};
+const miaToken = invite(people[3].id, -1 * DAY_MS, 6 * DAY_MS);
+invite(people[4].id, -2 * DAY_MS, 5 * DAY_MS, { usedAt: isoIn(-1 * DAY_MS) });
+invite(people[5].id, -9 * DAY_MS, -2 * DAY_MS);
+invite(people[6].id, -20 * DAY_MS, -13 * DAY_MS, { revokedAt: isoIn(-15 * DAY_MS) });
+console.log(`mock: an open invite — /?view=invite&token=${miaToken}`);
+
+const inviteStatus = (i) => (i.usedAt ? 'used' : i.revokedAt ? 'revoked' : Date.parse(i.expiresAt) <= Date.now() ? 'expired' : 'pending');
+const latestInvite = (id) => {
+  let latest = null;
+  for (const i of invites.values()) if (i.personId === id && (!latest || i.createdAt > latest.createdAt)) latest = i;
+  return latest && { status: inviteStatus(latest), createdAt: latest.createdAt, expiresAt: latest.expiresAt, ...(latest.usedAt ? { usedAt: latest.usedAt } : {}) };
+};
+const view = (p) => ({ ...p, invite: latestInvite(p.id), self: p.id === 'user-harness' });
+const enabledAdmins = (except) => people.filter((p) => p.id !== except && p.role === 'admin' && p.enabled).length;
+const issue = (p) => {
+  for (const i of invites.values()) if (i.personId === p.id && !i.usedAt && !i.revokedAt) i.revokedAt = new Date().toISOString();
+  const token = invite(p.id, 0, 7 * DAY_MS);
+  return { url: `https://media.example.org/portal/invite/${token}`, path: `/portal/invite/${token}`, token, expiresAt: invites.get(token).expiresAt };
+};
+const CLOSED_INVITE = { valid: false, message: 'This invite link does not work: it was used, it expired, or a newer one replaced it. Ask whoever invited you for a new link.' };
+
+async function servePeople(req, res, pathname) {
+  const inv = pathname.match(/^\/api\/portal\/invites\/([^/]+)$/);
+  if (inv) {
+    const i = invites.get(inv[1]);
+    const p = i && people.find((x) => x.id === i.personId);
+    if (!i || !p || !p.enabled || inviteStatus(i) !== 'pending') return json(res, 404, CLOSED_INVITE), true;
+    if (req.method === 'GET') {
+      return json(res, 200, { valid: true, username: p.username, displayName: p.displayName, expiresAt: i.expiresAt, passwordPolicy: POLICY }), true;
+    }
+    const body = await readBody(req);
+    const pw = typeof body?.password === 'string' ? body.password : '';
+    if ([...pw].length < 8) return json(res, 400, { error: 'password', message: 'The password needs at least 8 characters.' }), true;
+    if (pw.toLowerCase() === p.username) return json(res, 400, { error: 'password', message: 'The password may not be your username.' }), true;
+    i.usedAt = new Date().toISOString();
+    console.log(`mock: ${p.username} chose a password with their invite`);
+    return json(res, 200, { username: p.username, signIn: '/portal/' }), true;
+  }
+  if (pathname !== '/api/portal/people' && !pathname.startsWith('/api/portal/people/')) return false;
+  const mode = peopleMode(req);
+  if (mode === 'external') {
+    if (req.method !== 'GET') return text(res, 409, 'People live in your identity provider: add and change them there.'), true;
+    return json(res, 200, { mode: 'external', manageUrl: 'https://sso.example.org/admin/household/console/', people: [], deletesData: false, inviteDays: 7 }), true;
+  }
+  if (mode === 'unavailable') {
+    const note = 'The People page is not set up: it needs Secret zaentrum-people (key client-secret). The operator makes it; where Secrets are made by hand, make it with a random value, and the realm Job sets it in the realm.';
+    if (req.method !== 'GET') return text(res, 503, note), true;
+    return json(res, 200, { mode: 'unavailable', note, people: [], deletesData: false, inviteDays: 7 }), true;
+  }
+  const m = pathname.match(/^\/api\/portal\/people(?:\/([^/]+))?(\/invite)?$/);
+  if (!m) return text(res, 404, '404 page not found'), true;
+  const [, id, inviting] = m;
+  if (!id && req.method === 'GET') {
+    const list = [...people].sort((a, b) => a.displayName.localeCompare(b.displayName)).map(view);
+    return json(res, 200, { mode: 'bundled', people: list, deletesData: true, inviteDays: 7 }), true;
+  }
+  if (!id && req.method === 'POST') {
+    const b = (await readBody(req)) ?? {};
+    const username = String(b.username ?? '').trim().toLowerCase();
+    if (!/^[a-z0-9]([a-z0-9._-]{1,62})[a-z0-9]$/.test(username)) return text(res, 400, 'A username has letters a to z, digits, and . _ - between them.'), true;
+    if (people.some((p) => p.username === username)) return text(res, 409, 'That username is taken: choose another.'), true;
+    if (b.role === 'admin' && b.maxRating != null) return text(res, 400, 'An admin can change every rating cap, their own too: a cap is for a user.'), true;
+    const p = person({ username, displayName: String(b.displayName ?? '').trim(), role: b.role === 'admin' ? 'admin' : 'user',
+      maxRating: b.maxRating ?? null, createdAt: new Date().toISOString() });
+    people.push(p);
+    const link = issue(p);
+    console.log(`mock: added ${username}`);
+    return json(res, 201, { person: view(p), invite: link }), true;
+  }
+  const p = people.find((x) => x.id === id);
+  if (!p) return text(res, 404, 'No such person.'), true;
+  const self = p.id === 'user-harness';
+  if (p.managed === 'keycloak') return text(res, 409, `${p.displayName} administers Keycloak itself: change this account in Keycloak's admin console.`), true;
+  if (inviting && req.method === 'POST') {
+    if (self) return text(res, 409, 'You are signed in already: change your own password in your account settings.'), true;
+    if (!p.enabled) return text(res, 409, `${p.displayName} is switched off: switch them on first, or the invite leads nowhere.`), true;
+    console.log(`mock: invited ${p.username} again`);
+    return json(res, 201, issue(p)), true;
+  }
+  if (req.method === 'PATCH') {
+    const b = (await readBody(req)) ?? {};
+    const role = b.role ?? p.role;
+    const enabled = b.enabled ?? p.enabled;
+    const rating = 'maxRating' in b ? b.maxRating : p.maxRating;
+    if (role === 'admin' && rating != null) return text(res, 400, 'An admin can change every rating cap, their own too: a cap is for a user.'), true;
+    if (self && (role !== p.role || enabled !== p.enabled)) return text(res, 409, 'You cannot change your own role or switch yourself off: another admin can.'), true;
+    if (p.role === 'admin' && p.enabled && (role !== 'admin' || !enabled) && enabledAdmins(p.id) === 0) {
+      return text(res, 409, `${p.displayName} is the last admin: make someone else an admin first.`), true;
+    }
+    Object.assign(p, { role, enabled, maxRating: rating, ...(b.displayName ? { displayName: b.displayName } : {}) });
+    if (!enabled) for (const i of invites.values()) if (i.personId === p.id && !i.usedAt && !i.revokedAt) i.revokedAt = new Date().toISOString();
+    console.log(`mock: changed ${p.username}`);
+    return json(res, 200, view(p)), true;
+  }
+  if (req.method === 'DELETE') {
+    if (self) return text(res, 409, 'You cannot delete your own account here: another admin can, or you delete it from the apps.'), true;
+    if (p.role === 'admin' && p.enabled && enabledAdmins(p.id) === 0) return text(res, 409, `${p.displayName} is the last admin: make someone else an admin first.`), true;
+    people.splice(people.indexOf(p), 1);
+    for (const [t, i] of invites) if (i.personId === p.id) invites.delete(t);
+    console.log(`mock: deleted ${p.username}`);
+    return json(res, 200, { deleted: p.id, data: 'deleted' }), true;
+  }
+  return text(res, 405, 'method not allowed'), true;
+}
+
 // The launchpad as portal-api assembles it from the registry: spaces in
 // order, each with the tiles the caller's roles see.
 const roles = ['zaentrum-admin', 'zaentrum-user'];
@@ -854,6 +1001,7 @@ createServer(async (req, res) => {
   if (await serveCharts(req, res, pathname, searchParams)) return;
   if (await serveRegistry(req, res, pathname)) return;
   if (await serveSetup(req, res, pathname)) return;
+  if (await servePeople(req, res, pathname)) return;
   if (pathname === '/api/portal/launchpad') return json(res, 200, launchpad());
   if (pathname === '/api/portal/me') {
     return json(res, 200, {
