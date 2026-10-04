@@ -1,5 +1,6 @@
 import type { BadgeTone } from '@nalet/design-system';
 import type { Confirmation } from './confirm';
+import type { PeopleStep } from './people.ts';
 import { since } from './verification.ts';
 
 // The setup checklist, worded for the launchpad.
@@ -84,7 +85,10 @@ export interface SetupDoc {
   library: SetupLibrary;
   processing: SetupProcessing;
   devices: SetupDevices;
-  people: SetupStep;
+  // people: where accounts are made — the People page (mode bundled), an
+  // identity provider (external, manageUrl), or not set up (unavailable,
+  // note). No mode from an older portal-api.
+  people: PeopleStep;
 }
 
 export type StepKey = 'metadata' | 'library' | 'processing' | 'devices' | 'people';
@@ -367,11 +371,9 @@ export function devicesText(d: SetupDevices): string {
 }
 
 // ─── people ──────────────────────────────────────────────────────────────────
-
-// PEOPLE_TEXT: accounts are not the portal's yet; the guide says where they
-// are made.
-export const PEOPLE_TEXT =
-  "Accounts for the people who use this server are made in Keycloak's admin console, which is not on the public host.";
+//
+// The step's sentence is people.ts's peopleStepText: the People page with
+// the platform's own realm, the identity provider with an external one.
 
 // ─── done ────────────────────────────────────────────────────────────────────
 

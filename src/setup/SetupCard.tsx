@@ -9,7 +9,6 @@ import {
   DOCS,
   DOCS_ADMIN_CONSOLE,
   DOCS_FIRST_RUN,
-  PEOPLE_TEXT,
   STEPS,
   TMDB_KEYS,
   completeConfirmation,
@@ -35,6 +34,7 @@ import {
   type SetupProcessing,
   type StepKey,
 } from '../lib/setup';
+import { peopleStepText } from '../lib/people';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import './setup.css';
 
@@ -45,7 +45,8 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 // SetupCard is the first-run checklist the launchpad shows an admin until one
 // marks setup done: the TMDB key, the library, the media pipeline, https for
-// phones and TVs, the people who use the server. portal-api reads each step
+// phones and TVs, the people who use the server — and where they get their
+// accounts: the People page, or the identity provider. portal-api reads each step
 // live, from where it is configured; the card says what that means, offers
 // the one thing to do next, and reads again while something is under way.
 // Every change that reaches past the catalog asks first, as the operator
@@ -208,10 +209,18 @@ export function SetupCard({ isAdmin }: { isAdmin: boolean }) {
                   {key === 'people' && (
                     <>
                       <Text as="p" variant="muted" className="setup__text">
-                        {PEOPLE_TEXT}
+                        {peopleStepText(doc.people)}
                       </Text>
                       <div className="setup__actions">
-                        <DocLink href={DOCS_ADMIN_CONSOLE}>Read How</DocLink>
+                        {doc.people.mode === 'bundled' ? (
+                          <Link className="setup__link" to="/people">
+                            People
+                          </Link>
+                        ) : doc.people.mode === 'external' && doc.people.manageUrl ? (
+                          <DocLink href={doc.people.manageUrl}>Identity Provider</DocLink>
+                        ) : (
+                          <DocLink href={DOCS_ADMIN_CONSOLE}>Read How</DocLink>
+                        )}
                       </div>
                     </>
                   )}
