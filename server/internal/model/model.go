@@ -7,6 +7,7 @@
 package model
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"time"
 )
@@ -170,6 +171,52 @@ type Addon struct {
 type SetupCompletion struct {
 	At time.Time `json:"at"`
 	By string    `json:"by"`
+}
+
+// Invite is an invite as it is stored: never its token, which only the link
+// carries — the store keeps its SHA-256 (TokenHash), which never leaves
+// portal-api either.
+type Invite struct {
+	ID        int64      `json:"-"`
+	TokenHash []byte     `json:"-"`
+	UserID    string     `json:"-"`
+	CreatedBy string     `json:"createdBy"`
+	CreatedAt time.Time  `json:"createdAt"`
+	ExpiresAt time.Time  `json:"expiresAt"`
+	UsedAt    *time.Time `json:"usedAt"`
+	RevokedAt *time.Time `json:"revokedAt"`
+}
+
+// Invite states, as the People page lists them.
+const (
+	InvitePending = "pending" // open, until ExpiresAt
+	InviteExpired = "expired"
+	InviteUsed    = "used"
+	InviteRevoked = "revoked"
+)
+
+// Opens reports whether the invite opens for a token of SHA-256 hash, at
+// now: it is that token's — compared in constant time, though the store
+// found it by the hash already — and neither used, revoked nor expired.
+func (i *Invite) Opens(hash []byte, now time.Time) bool {
+	if i == nil || len(hash) != 32 {
+		return false
+	}
+	same := subtle.ConstantTimeCompare(i.TokenHash, hash) == 1
+	return same && i.Status(now) == InvitePending
+}
+
+// Status is what became of the invite, at now.
+func (i Invite) Status(now time.Time) string {
+	switch {
+	case i.UsedAt != nil:
+		return InviteUsed
+	case i.RevokedAt != nil:
+		return InviteRevoked
+	case !now.Before(i.ExpiresAt):
+		return InviteExpired
+	}
+	return InvitePending
 }
 
 // AddonComponent is one workload an addon declares. Workload is the name of

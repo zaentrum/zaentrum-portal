@@ -34,7 +34,7 @@ func testStore(t *testing.T) *Store {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(st.Close)
-	if _, err := st.pool.Exec(ctx, `DROP TABLE IF EXISTS setup_completion, addon_registration_errors, addon_components, addons, ui_extensions, tiles, spaces, apps CASCADE`); err != nil {
+	if _, err := st.pool.Exec(ctx, `DROP TABLE IF EXISTS invites, setup_completion, addon_registration_errors, addon_components, addons, ui_extensions, tiles, spaces, apps CASCADE`); err != nil {
 		t.Fatalf("reset: %v", err)
 	}
 	return st
