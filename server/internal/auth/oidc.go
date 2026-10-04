@@ -26,6 +26,9 @@ type Principal struct {
 	// it serves, so who a person is says nothing about which application they
 	// are using. This does.
 	Client string
+	// Expiry is when the token stops being accepted (its exp claim); zero for
+	// the synthetic dev principal, which no token stands behind.
+	Expiry time.Time
 
 	// Admin and Addon are decided by the middleware's Policy once the token is
 	// verified, never by a caller (see Policy.grant).
@@ -222,7 +225,9 @@ func (j *JWTVerifier) verifyBearer(ctx context.Context, r *http.Request) (*Princ
 	}
 	var c claims
 	if err := tok.Claims(&c); err != nil {
-		return &Principal{Subject: tok.Subject}, true
+		return &Principal{Subject: tok.Subject, Expiry: tok.Expiry}, true
 	}
-	return principalOf(tok.Subject, c), true
+	p := principalOf(tok.Subject, c)
+	p.Expiry = tok.Expiry
+	return p, true
 }

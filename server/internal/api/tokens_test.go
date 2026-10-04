@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -105,14 +106,36 @@ func TestMeSaysWhetherTheConsoleIsTheCallers(t *testing.T) {
 			t.Fatalf("%s: /me = %d %s", c.name, rec.Code, rec.Body)
 		}
 		var me struct {
-			IsAdmin   bool   `json:"isAdmin"`
-			Client    string `json:"client"`
-			AdminRole string `json:"adminRole"`
+			IsAdmin   bool    `json:"isAdmin"`
+			Client    string  `json:"client"`
+			AdminRole string  `json:"adminRole"`
+			Subject   string  `json:"subject"`
+			ExpiresAt *string `json:"expiresAt"`
 		}
 		_ = json.Unmarshal(rec.Body.Bytes(), &me)
 		if me.IsAdmin != c.admin || me.Client != c.client || me.AdminRole != "zaentrum-admin" {
 			t.Errorf("%s: /me = %s", c.name, rec.Body)
 		}
+		// Who the token is, and until when it is accepted: the test issuer
+		// names its people user-<name> and signs them for an hour.
+		if me.Subject != c.claims["sub"] {
+			t.Errorf("%s: subject = %q, want %q", c.name, me.Subject, c.claims["sub"])
+		}
+		if me.ExpiresAt == nil {
+			t.Errorf("%s: no expiresAt: %s", c.name, rec.Body)
+		} else if at, err := time.Parse(time.RFC3339, *me.ExpiresAt); err != nil || at.Before(time.Now().Add(50*time.Minute)) || at.After(time.Now().Add(61*time.Minute)) {
+			t.Errorf("%s: expiresAt = %q (%v), want an hour from now", c.name, *me.ExpiresAt, err)
+		}
+	}
+	// Without a token behind it — authentication switched off — there is no
+	// expiry to say.
+	jwt, _ := auth.NewJWTVerifier(context.Background(), "", "", "zaentrum-admin", false, true)
+	r := chi.NewRouter()
+	e.api.Register(r, auth.NewMiddleware(jwt, auth.Policy{AdminRole: "zaentrum-admin"}))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/portal/me", nil))
+	if !strings.Contains(rec.Body.String(), `"expiresAt":null`) || !strings.Contains(rec.Body.String(), `"subject":"anonymous"`) {
+		t.Errorf("/me without authentication = %s", rec.Body)
 	}
 	if rec := e.do(nil, http.MethodGet, "/api/portal/me", nil); rec.Code != http.StatusUnauthorized {
 		t.Errorf("/me without a bearer = %d", rec.Code)

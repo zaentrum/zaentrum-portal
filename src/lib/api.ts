@@ -104,6 +104,11 @@ export interface Me {
   // was issued to. Absent from an older portal-api.
   adminRole?: string;
   client?: string;
+  // subject: the token's sub; expiresAt: when portal-api stops taking it
+  // (RFC 3339), null when no token stands behind the caller. Absent from an
+  // older portal-api.
+  subject?: string;
+  expiresAt?: string | null;
 }
 
 // ─── operator / instances ────────────────────────────────────────────────────

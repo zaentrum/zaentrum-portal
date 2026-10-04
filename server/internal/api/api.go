@@ -405,15 +405,25 @@ func (a *API) launchpad(w http.ResponseWriter, r *http.Request) {
 // me says who the caller is and whether the console is theirs. isAdmin is the
 // gate the admin routes apply — the admin role on a token of one of the
 // portal's own clients — so a token that carries the role through another
-// client reads false, and client says which one it came through.
+// client reads false, and client says which one it came through. subject is
+// the token's sub, which a username may not be unique enough to stand for,
+// and expiresAt (RFC 3339) when the token stops being accepted — null when no
+// token stands behind the caller (authentication switched off).
 func (a *API) me(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.PrincipalFrom(r.Context())
-	out := map[string]any{"username": "", "roles": []string{}, "isAdmin": false, "adminRole": a.cfg.AdminRole, "client": ""}
+	out := map[string]any{
+		"username": "", "subject": "", "roles": []string{}, "isAdmin": false,
+		"adminRole": a.cfg.AdminRole, "client": "", "expiresAt": nil,
+	}
 	if p != nil {
 		out["username"] = p.Username
+		out["subject"] = p.Subject
 		out["roles"] = nonNil(p.Roles)
 		out["isAdmin"] = p.Admin
 		out["client"] = p.Client
+		if !p.Expiry.IsZero() {
+			out["expiresAt"] = p.Expiry.UTC().Format(time.RFC3339)
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
