@@ -200,6 +200,8 @@ type metaStatus struct {
 type OwnerRef struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
+	// Controller marks the one owner that manages the object.
+	Controller bool `json:"controller"`
 }
 
 type Container struct {
@@ -268,6 +270,9 @@ type Pod struct {
 	Metadata struct {
 		Name   string            `json:"name"`
 		Labels map[string]string `json:"labels"`
+		// OwnerReferences say what runs the pod: a Deployment's ReplicaSet,
+		// a StatefulSet, a DaemonSet, a Job.
+		OwnerReferences []OwnerRef `json:"ownerReferences"`
 	} `json:"metadata"`
 	Spec struct {
 		Containers []struct {

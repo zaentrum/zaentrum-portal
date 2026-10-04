@@ -3,7 +3,9 @@ package operator
 import (
 	"context"
 	"sort"
+	"strings"
 
+	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
 	"github.com/zaentrum/zaentrum-portal/server/internal/redact"
 )
 
@@ -12,6 +14,40 @@ type PodLog struct {
 	Pod        string   `json:"pod"`
 	Phase      string   `json:"phase"`
 	Containers []string `json:"containers"`
+	// Workload is the name of what runs the pod, from its owner references,
+	// and WorkloadKind its kind: Deployment, StatefulSet, DaemonSet, Job, or
+	// ReplicaSet for one no Deployment made. Both "" for a pod nothing owns.
+	// A client finds a workload's pods by it rather than by guessing from
+	// their names.
+	Workload     string `json:"workload"`
+	WorkloadKind string `json:"workloadKind"`
+}
+
+// workloadOf is what runs a pod: its controlling owner — the first owner when
+// none says it controls — and, for a ReplicaSet a Deployment made, that
+// Deployment. A Deployment names its ReplicaSets <deployment>-<template hash>
+// and labels their pods pod-template-hash; the ReplicaSet itself is not read,
+// which portal-api's Role does not grant.
+func workloadOf(p k8s.Pod) (kind, name string) {
+	refs := p.Metadata.OwnerReferences
+	if len(refs) == 0 {
+		return "", ""
+	}
+	owner := refs[0]
+	for _, o := range refs {
+		if o.Controller {
+			owner = o
+			break
+		}
+	}
+	if owner.Kind == "ReplicaSet" {
+		if hash := p.Metadata.Labels["pod-template-hash"]; hash != "" {
+			if deployment, ok := strings.CutSuffix(owner.Name, "-"+hash); ok && deployment != "" {
+				return "Deployment", deployment
+			}
+		}
+	}
+	return owner.Kind, owner.Name
 }
 
 // Namespace is the namespace the console operates in (empty when not in-cluster).
@@ -30,7 +66,8 @@ func (s *Service) LogPods(ctx context.Context) ([]PodLog, error) {
 		for _, c := range p.Spec.Containers {
 			cs = append(cs, c.Name)
 		}
-		out = append(out, PodLog{Pod: p.Metadata.Name, Phase: p.Status.Phase, Containers: cs})
+		kind, workload := workloadOf(p)
+		out = append(out, PodLog{Pod: p.Metadata.Name, Phase: p.Status.Phase, Containers: cs, Workload: workload, WorkloadKind: kind})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Pod < out[j].Pod })
 	return out, nil

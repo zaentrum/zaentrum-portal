@@ -462,6 +462,10 @@ export interface DebugPod {
   pod: string;
   phase: string;
   containers: string[];
+  // workload: what runs the pod (its owner references), workloadKind its
+  // kind — '' for a pod nothing owns. Absent from an older portal-api.
+  workload?: string;
+  workloadKind?: string;
 }
 
 // ─── kafka event tap (mirror server/internal/eventtap) ───────────────────────

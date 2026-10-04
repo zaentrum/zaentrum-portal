@@ -2,7 +2,9 @@
 // custom resources and Secrets with the semantics portal-api relies on:
 // resourceVersion conflicts on update and on a patch that carries one,
 // generation bumps on spec changes, JSON merge patch, server-side dry runs,
-// generateName, and owner-reference garbage collection on delete.
+// generateName, and owner-reference garbage collection on delete. Pods are
+// served for reading — listed, read, and their containers' logs — and nodes,
+// which are cluster-scoped, are listed.
 //
 // Secrets are create-only for portal-api: reading, changing or deleting one —
 // get, list, watch, update, patch or delete — fails the test.
@@ -54,6 +56,9 @@ type Server struct {
 	// it says so: a failure injected at exactly one step. It runs with the fake
 	// locked and must not call the fake.
 	Fail func(c Call) (code int, message string, fail bool)
+	// Logs is what a pod container's log answers, by "<pod>/<container>".
+	// Pods are seeded with Put("pods", …), nodes with Put("nodes", …).
+	Logs map[string]string
 }
 
 // New starts a fake apiserver that stops with the test.
@@ -65,6 +70,7 @@ func New(t testing.TB) *Server {
 		secrets:   map[string]map[string]any{},
 		Unserved:  map[string]bool{},
 		Forbidden: map[string]bool{},
+		Logs:      map[string]string{},
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.Close)
@@ -203,10 +209,24 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	core := len(parts) >= 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces"
 	switch {
 	// /api/v1/namespaces/<ns>/secrets[/<name>]
-	case len(parts) >= 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces" && parts[4] == "secrets":
+	case core && parts[4] == "secrets":
 		s.serveSecret(w, r, len(parts) == 6, body)
+	// /api/v1/namespaces/<ns>/pods/<name>/log
+	case core && parts[4] == "pods" && len(parts) == 7 && parts[6] == "log":
+		s.servePodLog(w, r, parts[5])
+	// /api/v1/namespaces/<ns>/pods[/<name>]: read only
+	case core && parts[4] == "pods" && len(parts) <= 6 && r.Method == http.MethodGet:
+		name := ""
+		if len(parts) == 6 {
+			name = parts[5]
+		}
+		s.serveResource(w, r, "pods", name, body)
+	// /api/v1/nodes: cluster-scoped, listed only
+	case len(parts) == 3 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && r.Method == http.MethodGet:
+		s.serveResource(w, r, "nodes", "", body)
 	// /apis/<group>/<version>/namespaces/<ns>/<plural>[/<name>]
 	case len(parts) >= 6 && parts[0] == "apis" && parts[3] == "namespaces":
 		name := ""
@@ -217,6 +237,50 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "404 page not found", http.StatusNotFound)
 	}
+}
+
+// servePodLog answers a container's log as the apiserver does: 404 for a pod
+// that does not exist, 400 for a container the pod does not run — or none
+// named, when it runs more than one — and the text otherwise.
+func (s *Server) servePodLog(w http.ResponseWriter, r *http.Request, pod string) {
+	if s.Forbidden["pods/log"] {
+		status(w, http.StatusForbidden, "Forbidden", "pods/log is forbidden")
+		return
+	}
+	o, ok := s.objects["pods/"+pod]
+	if !ok {
+		status(w, http.StatusNotFound, "NotFound", fmt.Sprintf("pods %q not found", pod))
+		return
+	}
+	var containers []string
+	spec, _ := o["spec"].(map[string]any)
+	list, _ := spec["containers"].([]any)
+	for _, c := range list {
+		m, _ := c.(map[string]any)
+		containers = append(containers, str(m["name"]))
+	}
+	container := r.URL.Query().Get("container")
+	switch {
+	case container == "" && len(containers) == 1:
+		container = containers[0]
+	case container == "":
+		status(w, http.StatusBadRequest, "BadRequest", fmt.Sprintf("a container name must be specified for pod %s, choose one of: %v", pod, containers))
+		return
+	case !contains(containers, container):
+		status(w, http.StatusBadRequest, "BadRequest", fmt.Sprintf("container %s is not valid for pod %s", container, pod))
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	_, _ = io.WriteString(w, s.Logs[pod+"/"+container])
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) serveSecret(w http.ResponseWriter, r *http.Request, named bool, body []byte) {
