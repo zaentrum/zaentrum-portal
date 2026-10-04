@@ -72,6 +72,13 @@ type Config struct {
 	// chino app's seed-default base_url ("/chino/") to this absolute URL at
 	// boot. Registry values an admin already edited are never touched.
 	ChinoPublicURL string // CHINO_PUBLIC_URL
+
+	// KatalogManagerURL is katalog-manager's in-cluster address, which the
+	// setup checklist reads the catalog from — with the admin's own bearer.
+	// Its first DNS label is the catalog's Deployment, which says where the
+	// library is read. Set to "-" for none: the catalog's steps then read
+	// unknown.
+	KatalogManagerURL string // PORTAL_KATALOG_MANAGER_URL (default http://katalog-manager-api)
 }
 
 func env(keys ...string) string {
@@ -153,7 +160,17 @@ func Load() Config {
 		KafkaTopicPrefix: envDefault("stube.", "KAFKA_TOPIC_PREFIX"),
 
 		ChinoPublicURL: env("CHINO_PUBLIC_URL"),
+
+		KatalogManagerURL: katalogManagerURL(envDefault("http://katalog-manager-api", "PORTAL_KATALOG_MANAGER_URL")),
 	}
+}
+
+// katalogManagerURL is PORTAL_KATALOG_MANAGER_URL as given, or none for "-".
+func katalogManagerURL(raw string) string {
+	if raw == "-" {
+		return ""
+	}
+	return raw
 }
 
 // adminClients is PORTAL_ADMIN_CLIENTS as given — set, even to nothing, it is

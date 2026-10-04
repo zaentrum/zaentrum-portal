@@ -23,6 +23,7 @@ import (
 	"github.com/zaentrum/zaentrum-portal/server/internal/dbbrowse"
 	"github.com/zaentrum/zaentrum-portal/server/internal/eventtap"
 	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
+	"github.com/zaentrum/zaentrum-portal/server/internal/katalog"
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
 	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
 	"github.com/zaentrum/zaentrum-portal/server/internal/redact"
@@ -42,6 +43,10 @@ type API struct {
 	charts chartClient
 	// registration is the chart addon registration loop's state.
 	registration chartRegistration
+	// setup is the first-run record; katalog the catalog manager the setup
+	// checklist reads, nil when none is configured (setup.go).
+	setup   setupStore
+	katalog katalogAPI
 }
 
 // addonStore is the part of the registry the addon endpoints and capability
@@ -85,11 +90,14 @@ type registryStore interface {
 }
 
 func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap, br *dbbrowse.Browser) *API {
-	a := &API{reg: st, addons: st, cfg: cfg, op: op, tap: tap, br: br}
+	a := &API{reg: st, addons: st, setup: st, cfg: cfg, op: op, tap: tap, br: br}
 	a.registration.kick = make(chan struct{}, 1)
 	if op != nil {
 		a.workloads = op // never a typed nil inside the interface
 		a.charts = op
+	}
+	if kc := katalog.New(cfg.KatalogManagerURL); kc != nil {
+		a.katalog = kc // likewise
 	}
 	return a
 }
@@ -188,6 +196,15 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 
 				// Debug: downloadable support bundle (all sections secret-scrubbed).
 				ar.Get("/debug/support-bundle", a.supportBundle)
+
+				// First-run setup: the checklist the launchpad shows an admin
+				// until one marks it done, each step read live (setup.go).
+				ar.Get("/setup", a.getSetup)
+				ar.Get("/setup/complete", a.setupCompletion)
+				ar.Post("/setup/complete", a.completeSetup)
+				ar.Delete("/setup/complete", a.reopenSetup)
+				ar.Post("/setup/metadata", a.setTMDBKey)
+				ar.Post("/setup/library/scan", a.startScan)
 			})
 
 			// UI extension registry — writable by a human admin OR an addon's

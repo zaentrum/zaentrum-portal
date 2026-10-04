@@ -28,3 +28,18 @@ func TestAdminClients(t *testing.T) {
 		})
 	}
 }
+
+// The catalog manager the setup checklist reads is the bundled one unless
+// named — and "-" names none.
+func TestKatalogManagerURL(t *testing.T) {
+	for raw, want := range map[string]string{
+		"":                    "http://katalog-manager-api",
+		"http://catalog:8080": "http://catalog:8080",
+		"-":                   "",
+	} {
+		t.Setenv("PORTAL_KATALOG_MANAGER_URL", raw)
+		if got := Load().KatalogManagerURL; got != want {
+			t.Errorf("PORTAL_KATALOG_MANAGER_URL=%q: %q, want %q", raw, got, want)
+		}
+	}
+}

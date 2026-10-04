@@ -165,6 +165,13 @@ type Addon struct {
 	Rows  int    `json:"rows"`
 }
 
+// SetupCompletion is the record that an admin marked first-run setup done:
+// when, and who.
+type SetupCompletion struct {
+	At time.Time `json:"at"`
+	By string    `json:"by"`
+}
+
 // AddonComponent is one workload an addon declares. Workload is the name of
 // its Deployment and Service; the console matches live state by it.
 type AddonComponent struct {
