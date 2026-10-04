@@ -1,6 +1,7 @@
 package eventtap
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,47 @@ func TestParseExtractsAndRedacts(t *testing.T) {
 	}
 	if e.Size != len(msg.Value) {
 		t.Errorf("size = %d, want %d", e.Size, len(msg.Value))
+	}
+}
+
+// The key is redacted by the rules the value is: a producer keys its messages
+// by whatever it likes, and the console shows the key beside the payload.
+func TestParseRedactsTheKey(t *testing.T) {
+	for _, key := range []string{
+		"token=k3y-s3cr3t",
+		"Bearer k3y-s3cr3t-0123456789abcdef",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJrM3ktczNjcjN0In0.c2lnbmF0dXJlLWszeQ",
+		"postgres://portal:k3y-s3cr3t@postgres:5432/portal",
+	} {
+		e := parse(kafka.Message{Topic: "stube.x", Key: []byte(key), Value: []byte(`{"type":"seen"}`)})
+		if strings.Contains(e.Key, "k3y-s3cr3t") || strings.Contains(e.Key, "eyJzdWIi") {
+			t.Errorf("key %q reaches the console as %q", key, e.Key)
+		}
+	}
+	// An ordinary key stays as it is.
+	if e := parse(kafka.Message{Topic: "stube.x", Key: []byte("item-7")}); e.Key != "item-7" {
+		t.Errorf("key = %q", e.Key)
+	}
+}
+
+// A JSON payload is redacted field by field: a quoted secret inside a string
+// and an array under a credential-named field are gone, and what the console
+// shows is still a document.
+func TestParseRedactsADocumentFieldByField(t *testing.T) {
+	e := parse(kafka.Message{Topic: "stube.x", Value: []byte(
+		`{"type":"enriched","itemId":"item-7","note":"called with token=\"s3cr3t-a\"","tokens":["s3cr3t-b","s3cr3t-c"],"attempts":2}`)})
+	if strings.Contains(e.Payload, "s3cr3t") {
+		t.Errorf("payload leaked a secret: %s", e.Payload)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(e.Payload), &doc); err != nil {
+		t.Fatalf("payload is no JSON: %v: %s", err, e.Payload)
+	}
+	if tokens, ok := doc["tokens"].([]any); !ok || len(tokens) != 2 {
+		t.Errorf("tokens = %#v — the array keeps its shape", doc["tokens"])
+	}
+	if e.Type != "enriched" || e.ItemID != "item-7" || doc["attempts"] != float64(2) {
+		t.Errorf("type = %q, itemId = %q, attempts = %#v", e.Type, e.ItemID, doc["attempts"])
 	}
 }
 

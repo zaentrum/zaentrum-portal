@@ -295,27 +295,36 @@ func (t *Tap) Topology(ctx context.Context) Topology {
 	return top
 }
 
-// parse normalises a Kafka message: it pulls a Type/ItemID from a JSON body when
-// present, compacts + redacts the payload, and caps its length.
+// parse normalises a Kafka message: it redacts its key and its value, pulls a
+// Type/ItemID from a JSON object's redacted fields, compacts the payload and
+// caps its length.
+//
+// The key is redacted by the rules the value is: a producer may key its
+// messages by anything, a token included. A value that is a JSON document is
+// redacted field by field (redact.Document) — run over its encoded text, the
+// text rule takes an escaped quote for the end of a value and an array under
+// a credential-named field for its '[', and leaves the rest of the secret in
+// the console — and any other value as text.
 func parse(msg kafka.Message) Event {
 	e := Event{
 		Topic:     msg.Topic,
 		Partition: msg.Partition,
 		Offset:    msg.Offset,
-		Key:       string(msg.Key),
+		Key:       redact.Secrets(string(msg.Key)),
 		Time:      msg.Time,
 		Size:      len(msg.Value),
 	}
-	payload := string(msg.Value)
-	var m map[string]any
-	if json.Unmarshal(msg.Value, &m) == nil {
-		e.Type = firstString(m, "type", "eventType", "event", "action", "status")
-		e.ItemID = firstString(m, "itemId", "item_id", "itemID", "id")
-		if b, err := json.Marshal(m); err == nil {
-			payload = string(b)
+	var payload string
+	if doc, err := redact.DecodeJSON(msg.Value); err == nil {
+		if m, ok := doc.(map[string]any); ok {
+			e.Type = firstString(m, "type", "eventType", "event", "action", "status")
+			e.ItemID = firstString(m, "itemId", "item_id", "itemID", "id")
 		}
+		b, _ := json.Marshal(doc)
+		payload = string(b)
+	} else {
+		payload = redact.Secrets(string(msg.Value))
 	}
-	payload = redact.Secrets(payload)
 	if len(payload) > payloadCap {
 		payload = payload[:payloadCap] + "…(truncated)"
 	}
