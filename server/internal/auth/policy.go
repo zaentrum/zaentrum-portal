@@ -76,6 +76,10 @@ func (p Policy) addonKey(pr *Principal) string {
 	return key
 }
 
+// IsServiceAccount reports whether the principal is a client's service
+// account rather than a person (serviceAccount).
+func IsServiceAccount(pr *Principal) bool { return pr != nil && serviceAccount(pr) }
+
 // serviceAccount reports whether a token is a client's own, from the client
 // credentials grant: Keycloak names a client's service-account user
 // service-account-<client id>; other providers make the client its subject.

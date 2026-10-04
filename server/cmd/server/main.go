@@ -133,6 +133,17 @@ func run() error {
 	// everything else requires a signed-in user.
 	registry := api.New(st, cfg, opSvc, tap, br)
 	registry.Register(r, authMW)
+	switch {
+	case cfg.PeopleClientID == "":
+		log.Printf("people: no people client — people live in the identity provider, and the People page says so")
+	case cfg.PeopleClientSecret == "":
+		log.Printf("people: the people client %s has no secret (PORTAL_PEOPLE_CLIENT_SECRET) — the People page is not set up", cfg.PeopleClientID)
+	default:
+		log.Printf("people: managing realm %s as %s at %s; invites hold %s", cfg.PeopleRealm, cfg.PeopleClientID, cfg.PeopleKeycloakURL, cfg.InviteTTL)
+	}
+	if cfg.AccountDeletionToken == "" {
+		log.Printf("people: no account deletion token (PORTAL_ACCOUNT_DELETION_TOKEN) — accounts are not deleted from the apps")
+	}
 	// Chart addons the operator reports ready are registered from their primary
 	// Service; outside a cluster this returns at once. Stops with bgCtx.
 	go registry.RunAddonRegistration(bgCtx)

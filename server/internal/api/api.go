@@ -19,13 +19,17 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/zaentrum/zaentrum-portal/server/internal/auth"
+	"github.com/zaentrum/zaentrum-portal/server/internal/chino"
 	"github.com/zaentrum/zaentrum-portal/server/internal/config"
 	"github.com/zaentrum/zaentrum-portal/server/internal/dbbrowse"
 	"github.com/zaentrum/zaentrum-portal/server/internal/eventtap"
 	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
 	"github.com/zaentrum/zaentrum-portal/server/internal/katalog"
+	"github.com/zaentrum/zaentrum-portal/server/internal/keycloak"
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
 	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
+	"github.com/zaentrum/zaentrum-portal/server/internal/people"
+	"github.com/zaentrum/zaentrum-portal/server/internal/ratelimit"
 	"github.com/zaentrum/zaentrum-portal/server/internal/redact"
 	"github.com/zaentrum/zaentrum-portal/server/internal/store"
 )
@@ -47,6 +51,18 @@ type API struct {
 	// checklist reads, nil when none is configured (setup.go).
 	setup   setupStore
 	katalog katalogAPI
+
+	// people is the realm's people (people.go), nil with an external
+	// identity provider; invites their invites; inviteIP and inviteToken
+	// the public invite endpoints' limits; chino the chino-api that deletes
+	// a deleted person's data, nil when none is configured.
+	people      *people.Service
+	invites     inviteStore
+	inviteIP    *ratelimit.Limiter
+	inviteToken *ratelimit.Limiter
+	chino       *chino.Client
+	// now is the clock; time.Now unless a test sets one.
+	now func() time.Time
 }
 
 // addonStore is the part of the registry the addon endpoints and capability
@@ -90,8 +106,16 @@ type registryStore interface {
 }
 
 func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap, br *dbbrowse.Browser) *API {
-	a := &API{reg: st, addons: st, setup: st, cfg: cfg, op: op, tap: tap, br: br}
+	a := &API{reg: st, addons: st, setup: st, invites: st, cfg: cfg, op: op, tap: tap, br: br}
 	a.registration.kick = make(chan struct{}, 1)
+	a.inviteIP, a.inviteToken = newInviteLimits()
+	if cfg.PeopleClientID != "" {
+		kc := keycloak.New(keycloak.Config{
+			URL: cfg.PeopleKeycloakURL, Realm: cfg.PeopleRealm, ClientID: cfg.PeopleClientID, ClientSecret: cfg.PeopleClientSecret,
+		})
+		a.people = people.New(kc, cfg.AdminRole, cfg.UserRole, cfg.PeopleHidden)
+	}
+	a.chino = chino.New(cfg.ChinoAPIURL, cfg.AccountDeletionToken)
 	if op != nil {
 		a.workloads = op // never a typed nil inside the interface
 		a.charts = op
@@ -124,6 +148,13 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 		// the platform's own registries, never from the request).
 		r.Get("/cli/discovery", a.cliDiscovery)
 
+		// Invites — open too: the person they are for has no password to
+		// sign in with yet. The token is the credential: 32 random bytes,
+		// stored as their SHA-256, used once, limited per client address
+		// and per token (people.go).
+		r.Get("/invites/{token}", a.getInvite)
+		r.Post("/invites/{token}", a.acceptInvite)
+
 		// Everything below needs a signed-in user.
 		r.Group(func(r chi.Router) {
 			r.Use(mw.Authn)
@@ -131,6 +162,10 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 			// Reads for any signed-in user.
 			r.Get("/launchpad", a.launchpad)
 			r.Get("/me", a.me)
+			// The signed-in person's own account, deleted: chino-api calls it
+			// with the person's bearer and the account deletion token, once
+			// it deleted their data (people.go).
+			r.Delete("/me", a.deleteMe)
 			// Product apps read the enabled extension contributions for a slot
 			// (chino forwards the user's bearer here). Any signed-in user.
 			r.Get("/slots/{slot}", a.slotExtensions)
@@ -205,6 +240,15 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 				ar.Delete("/setup/complete", a.reopenSetup)
 				ar.Post("/setup/metadata", a.setTMDBKey)
 				ar.Post("/setup/library/scan", a.startScan)
+
+				// People: one account per person, an admin's to add, change,
+				// invite and delete, through the realm's people client
+				// (people.go).
+				ar.Get("/people", a.listPeople)
+				ar.Post("/people", a.createPerson)
+				ar.Patch("/people/{id}", a.patchPerson)
+				ar.Delete("/people/{id}", a.deletePerson)
+				ar.Post("/people/{id}/invite", a.invitePerson)
 			})
 
 			// UI extension registry — writable by a human admin OR an addon's
@@ -1198,6 +1242,16 @@ func (a *API) configSummary() map[string]any {
 		"addonPlural":      a.cfg.AddonPlural,
 		"kafkaBrokers":     a.cfg.KafkaBrokers,
 		"kafkaTopicPrefix": a.cfg.KafkaTopicPrefix,
+		// The People page: where and as which client, never its secret; and
+		// whether account deletion is set up, never its token.
+		"people":           a.peopleMode(),
+		"peopleClientId":   a.cfg.PeopleClientID,
+		"peopleKeycloak":   a.cfg.PeopleKeycloakURL,
+		"peopleRealm":      a.cfg.PeopleRealm,
+		"inviteTtl":        a.cfg.InviteTTL.String(),
+		"passwordPolicy":   a.cfg.PasswordPolicy,
+		"accountDeletion":  a.cfg.AccountDeletionToken != "",
+		"chinoDataCleanup": a.chino != nil,
 	}
 }
 

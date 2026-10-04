@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -79,6 +80,36 @@ type Config struct {
 	// library is read. Set to "-" for none: the catalog's steps then read
 	// unknown.
 	KatalogManagerURL string // PORTAL_KATALOG_MANAGER_URL (default http://katalog-manager-api)
+
+	// People: the People page manages the platform's own realm through its
+	// people client — a confidential client that may view, query and manage
+	// the realm's users and nothing else — reached in-cluster at
+	// PeopleKeycloakURL. With no client id, people live in an identity
+	// provider the platform does not manage (external identity), and the
+	// page says so and links there (PeopleManageURL, else the issuer's
+	// Keycloak admin console when the issuer is a Keycloak realm). A client
+	// id without its secret: the page says it is not set up.
+	PeopleKeycloakURL  string   // PORTAL_PEOPLE_KEYCLOAK_URL (e.g. http://keycloak:80/auth)
+	PeopleRealm        string   // PORTAL_PEOPLE_REALM (default zaentrum)
+	PeopleClientID     string   // PORTAL_PEOPLE_CLIENT_ID
+	PeopleClientSecret string   // PORTAL_PEOPLE_CLIENT_SECRET
+	PeopleManageURL    string   // PORTAL_PEOPLE_MANAGE_URL
+	PeopleHidden       []string // PORTAL_PEOPLE_HIDDEN — the platform's own accounts, not people (default zaentrum-verify)
+	// UserRole is the realm role every person holds; AdminRole makes one an
+	// admin.
+	UserRole string // PORTAL_USER_ROLE (default zaentrum-user)
+	// PasswordPolicy is the realm's password policy, in Keycloak's syntax,
+	// for the invite page's hint and a check before Keycloak's own.
+	PasswordPolicy string // PORTAL_PASSWORD_POLICY (default length(8))
+	// InviteTTL is how long an invite link holds.
+	InviteTTL time.Duration // PORTAL_INVITE_TTL (default 168h)
+	// AccountDeletionToken is what chino-api shows to delete the signed-in
+	// person's account (DELETE /api/portal/me, after it deleted their data),
+	// and what portal-api shows chino-api to delete the data of someone an
+	// admin deletes (at ChinoAPIURL). Empty: no account deletion from the
+	// apps, and an admin's delete leaves chino's data of the person.
+	AccountDeletionToken string // PORTAL_ACCOUNT_DELETION_TOKEN
+	ChinoAPIURL          string // PORTAL_CHINO_API_URL (e.g. http://chino-api)
 }
 
 func env(keys ...string) string {
@@ -162,7 +193,29 @@ func Load() Config {
 		ChinoPublicURL: env("CHINO_PUBLIC_URL"),
 
 		KatalogManagerURL: katalogManagerURL(envDefault("http://katalog-manager-api", "PORTAL_KATALOG_MANAGER_URL")),
+
+		PeopleKeycloakURL:  env("PORTAL_PEOPLE_KEYCLOAK_URL"),
+		PeopleRealm:        envDefault("zaentrum", "PORTAL_PEOPLE_REALM"),
+		PeopleClientID:     env("PORTAL_PEOPLE_CLIENT_ID"),
+		PeopleClientSecret: env("PORTAL_PEOPLE_CLIENT_SECRET"),
+		PeopleManageURL:    env("PORTAL_PEOPLE_MANAGE_URL"),
+		PeopleHidden:       splitCSV(envDefault("zaentrum-verify", "PORTAL_PEOPLE_HIDDEN")),
+		UserRole:           envDefault("zaentrum-user", "PORTAL_USER_ROLE"),
+		PasswordPolicy:     envDefault("length(8)", "PORTAL_PASSWORD_POLICY"),
+		InviteTTL:          envDuration(7*24*time.Hour, "PORTAL_INVITE_TTL"),
+
+		AccountDeletionToken: env("PORTAL_ACCOUNT_DELETION_TOKEN"),
+		ChinoAPIURL:          env("PORTAL_CHINO_API_URL"),
 	}
+}
+
+// envDuration is a positive Go duration ("168h"), else def.
+func envDuration(def time.Duration, keys ...string) time.Duration {
+	d, err := time.ParseDuration(env(keys...))
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
 }
 
 // katalogManagerURL is PORTAL_KATALOG_MANAGER_URL as given, or none for "-".
