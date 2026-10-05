@@ -70,6 +70,10 @@ func TestNoticesAreTheirPersonsOwn(t *testing.T) {
 		!noticeID.MatchString(first.ID) || first.Body != "body of first" {
 		t.Errorf("posted %+v", first)
 	}
+	// Served in UTC, whatever zone portal-api runs in.
+	if first.CreatedAt.Location() != time.UTC {
+		t.Errorf("created at %v, in %v", first.CreatedAt, first.CreatedAt.Location())
+	}
 	mine, unread, err := st.Notices(ctx, "user-mia", 0)
 	if err != nil || titles(mine) != "second,first" || unread != 2 {
 		t.Fatalf("mia's = %q, %d unread, %v", titles(mine), unread, err)
@@ -103,6 +107,9 @@ func TestNoticesAreTheirPersonsOwn(t *testing.T) {
 	at := read[1].ReadAt
 	if at == nil {
 		t.Fatal("not read")
+	}
+	if at.Location() != time.UTC {
+		t.Errorf("read at %v, in %v", at, at.Location())
 	}
 	time.Sleep(5 * time.Millisecond)
 	if _, err := st.ReadNotice(ctx, "user-mia", first.ID); err != nil {
@@ -287,7 +294,7 @@ func TestNoticeCounts(t *testing.T) {
 	if c := all[1]; c.Addon != "sample" || c.Notices != 3 || c.Unread != 2 || c.People != 2 || c.Latest == nil {
 		t.Errorf("sample = %+v", c)
 	}
-	if c := all[0]; c.Addon != "other" || c.Notices != 1 || c.Unread != 1 || c.People != 1 || !c.Latest.Equal(latest.CreatedAt) {
+	if c := all[0]; c.Addon != "other" || c.Notices != 1 || c.Unread != 1 || c.People != 1 || !c.Latest.Equal(latest.CreatedAt) || c.Latest.Location() != time.UTC {
 		t.Errorf("other = %+v (latest %v)", c, latest.CreatedAt)
 	}
 	if one, err := st.NoticeCounts(ctx, "other"); err != nil || len(one) != 1 || one[0].Addon != "other" {

@@ -50,9 +50,16 @@ const noticeCols = `n.id::text, n.addon, a.title, a.icon, n.title, n.body, n.lin
 // addon's key is its app's (008), so every notice has one.
 const noticeFrom = `notices n JOIN apps a ON a.key = n.addon`
 
+// scanNotice reads a notice, its times in UTC: what every client is served
+// does not depend on the zone portal-api runs in.
 func scanNotice(r rowScanner) (model.Notice, error) {
 	var n model.Notice
 	err := r.Scan(&n.ID, &n.Addon, &n.AddonTitle, &n.AddonIcon, &n.Title, &n.Body, &n.Link, &n.ItemID, &n.CreatedAt, &n.ReadAt)
+	n.CreatedAt = n.CreatedAt.UTC()
+	if n.ReadAt != nil {
+		at := n.ReadAt.UTC()
+		n.ReadAt = &at
+	}
 	return n, err
 }
 
@@ -200,6 +207,10 @@ func (s *Store) NoticeCounts(ctx context.Context, addon string) ([]model.NoticeC
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (model.NoticeCount, error) {
 		var c model.NoticeCount
 		err := r.Scan(&c.Addon, &c.Notices, &c.Unread, &c.People, &c.Latest)
+		if c.Latest != nil {
+			at := c.Latest.UTC()
+			c.Latest = &at
+		}
 		return c, err
 	})
 }
