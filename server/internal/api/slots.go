@@ -34,6 +34,10 @@ import (
 //
 // Rows written before these rules are filtered on the way out (servable): a
 // row whose scheme, kind or method could never have passed is not served.
+//
+// A notice's link is rendered the same way — a link a client opens with its
+// signed-in user — and slotURL decides it too (notices.go): one rule for
+// every place an addon may send a person.
 
 // slotMethod is the one method a slot action is sent with.
 const slotMethod = http.MethodPost
@@ -254,6 +258,11 @@ func servable(e model.Extension) (model.Extension, bool) {
 // through the API: the platform's public origin, and — for an admin, whose
 // browser is on the instance — the origin the request came in on.
 func (a *API) instanceOrigins(r *http.Request) []string {
+	return originsOf(r, a.publicOrigin(r.Context()))
+}
+
+// originsOf is instanceOrigins with the public origin already looked up.
+func originsOf(r *http.Request, public string) []string {
 	var out []string
 	add := func(raw string) {
 		if raw == "" {
@@ -263,7 +272,7 @@ func (a *API) instanceOrigins(r *http.Request) []string {
 			out = append(out, o)
 		}
 	}
-	add(a.publicOrigin(r.Context()))
+	add(public)
 	if p, _ := auth.PrincipalFrom(r.Context()); p != nil && p.Admin {
 		add(requestOrigin(r))
 	}

@@ -25,12 +25,13 @@ import (
 // clients the bundled realm has — the portal (zaentrum-web), the CLI (zae),
 // the media app (chino-web) — and an addon's service account.
 type tokenEnv struct {
-	t     *testing.T
-	iss   *authtest.Issuer
-	api   *API
-	store *fakeAddonStore
-	kube  *k8sfake.Server
-	h     http.Handler
+	t       *testing.T
+	iss     *authtest.Issuer
+	api     *API
+	store   *fakeAddonStore
+	notices *fakeNotices
+	kube    *k8sfake.Server
+	h       http.Handler
 }
 
 func newTokenEnv(t *testing.T) *tokenEnv {
@@ -42,16 +43,18 @@ func newTokenEnv(t *testing.T) *tokenEnv {
 		OperatorGroup: "zaentrum.io", OperatorVersion: "v1alpha1", OperatorPlural: "zaentrums", AddonPlural: addonPlural,
 	}
 	st := newFakeStore()
+	nt := newFakeNotices(st)
 	op := operator.New(kube.Client("zaentrum"), cfg)
-	a := &API{reg: st, addons: st, cfg: cfg, op: op, charts: op, workloads: op}
+	a := &API{reg: st, addons: st, notices: nt, cfg: cfg, op: op, charts: op, workloads: op}
 	a.registration.kick = make(chan struct{}, 1)
+	a.noticeAddon, a.noticePerson = newNoticeLimits()
 	jwt, err := auth.NewJWTVerifier(context.Background(), iss.URL, "", cfg.AdminRole, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := chi.NewRouter()
 	a.Register(r, auth.NewMiddleware(jwt, auth.Policy{AdminRole: cfg.AdminRole, AddonRole: cfg.AddonRole, AdminClients: cfg.AdminClients}))
-	return &tokenEnv{t: t, iss: iss, api: a, store: st, kube: kube, h: r}
+	return &tokenEnv{t: t, iss: iss, api: a, store: st, notices: nt, kube: kube, h: r}
 }
 
 // The callers every rule is checked against.
@@ -158,6 +161,7 @@ func TestAdminRoutesTakeOnlyThePortalsClients(t *testing.T) {
 		{http.MethodGet, "/api/portal/addons/example"},
 		{http.MethodGet, "/api/portal/addon-charts"},
 		{http.MethodGet, "/api/portal/debug/kafka/topology"},
+		{http.MethodGet, "/api/portal/notices"},
 	}
 	for _, rt := range routes {
 		for _, c := range []struct {
@@ -189,7 +193,7 @@ func TestAdminRoutesTakeOnlyThePortalsClients(t *testing.T) {
 // above all the slot rows chino-api reads with its user's media-app token.
 func TestReadsTakeAnySignedInUser(t *testing.T) {
 	e := newTokenEnv(t)
-	for _, path := range []string{"/api/portal/launchpad", "/api/portal/me", "/api/portal/slots/search.empty"} {
+	for _, path := range []string{"/api/portal/launchpad", "/api/portal/me", "/api/portal/slots/search.empty", "/api/portal/me/notices"} {
 		for name, claims := range map[string]map[string]any{
 			"viewer through the media app": viewerMedia, "viewer through the portal": viewerPortal,
 			"admin through the media app": adminMedia, "admin through the portal": adminPortal,

@@ -12,12 +12,11 @@ import (
 
 const own = "https://media.example.org"
 
-// A slot URL is rendered by a product app as a link, or fetched with the
-// signed-in user's bearer. It may lead to a path on this instance or to its
-// own origin, over http(s) — nowhere else.
-func TestSlotURLRules(t *testing.T) {
-	origins := []string{own}
-	for _, ok := range []string{
+// slotURLsTaken and slotURLsRefused are the cases of the slot URL rule,
+// against the origin own — each refusal with what its error mentions. A
+// notice's link is held to the same cases (notices_test.go).
+var (
+	slotURLsTaken = []string{
 		"/portal/app/example?q={q}",
 		"/portal/app/example?q={q}#/discover",
 		"/api/portal/apps/example/api/request?title={q}",
@@ -29,12 +28,8 @@ func TestSlotURLRules(t *testing.T) {
 		"  /portal/app/example  ",
 		"/portal/app/example?next=https://elsewhere.example", // a query is the destination's business
 		"/v%2e1/items", // an encoded dot inside a segment climbs nowhere
-	} {
-		if _, err := slotURL(ok, origins); err != nil {
-			t.Errorf("slotURL(%q) = %v, want accepted", ok, err)
-		}
 	}
-	for _, c := range []struct{ url, mention string }{
+	slotURLsRefused = []struct{ url, mention string }{
 		{"", "required"},
 		{"javascript:alert(document.cookie)", "never to a javascript: URL"},
 		{"JavaScript:alert(1)", "never to a javascript: URL"},
@@ -62,7 +57,20 @@ func TestSlotURLRules(t *testing.T) {
 		{"/api/portal/apps/example/./x", "'.'"},
 		{"https://media.example.org/api/portal/apps/x/../../addons", "'..'"},
 		{"/api/portal/apps/example%2f..%2faddons", "encoded '/'"},
-	} {
+	}
+)
+
+// A slot URL is rendered by a product app as a link, or fetched with the
+// signed-in user's bearer. It may lead to a path on this instance or to its
+// own origin, over http(s) — nowhere else.
+func TestSlotURLRules(t *testing.T) {
+	origins := []string{own}
+	for _, ok := range slotURLsTaken {
+		if _, err := slotURL(ok, origins); err != nil {
+			t.Errorf("slotURL(%q) = %v, want accepted", ok, err)
+		}
+	}
+	for _, c := range slotURLsRefused {
 		_, err := slotURL(c.url, origins)
 		if err == nil || !strings.Contains(err.Error(), c.mention) {
 			t.Errorf("slotURL(%q) = %v, want refused mentioning %q", c.url, err, c.mention)

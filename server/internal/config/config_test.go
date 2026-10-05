@@ -3,7 +3,25 @@ package config
 import (
 	"slices"
 	"testing"
+	"time"
 )
+
+// A notice is kept 90 days unless PORTAL_NOTICE_RETENTION names another
+// positive duration; one that is none keeps the default.
+func TestNoticeRetention(t *testing.T) {
+	for raw, want := range map[string]time.Duration{
+		"":      90 * 24 * time.Hour,
+		"720h":  30 * 24 * time.Hour,
+		"0s":    90 * 24 * time.Hour,
+		"-1h":   90 * 24 * time.Hour,
+		"three": 90 * 24 * time.Hour,
+	} {
+		t.Setenv("PORTAL_NOTICE_RETENTION", raw)
+		if got := Load().NoticeRetention; got != want {
+			t.Errorf("PORTAL_NOTICE_RETENTION=%q: %s, want %s", raw, got, want)
+		}
+	}
+}
 
 // Unset, the admin clients are the bundled realm's portal client and the
 // CLI's — whichever client the CLI is told to sign in as, so a renamed CLI

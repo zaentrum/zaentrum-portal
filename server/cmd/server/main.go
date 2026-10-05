@@ -147,6 +147,9 @@ func run() error {
 	// Chart addons the operator reports ready are registered from their primary
 	// Service; outside a cluster this returns at once. Stops with bgCtx.
 	go registry.RunAddonRegistration(bgCtx)
+	// Notices past their retention go now and every hour. Stops with bgCtx.
+	log.Printf("notices: kept %s, a person's newest %d", cfg.NoticeRetention, store.NoticesKept)
+	go registry.RunNoticeSweep(bgCtx)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

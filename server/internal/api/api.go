@@ -61,6 +61,12 @@ type API struct {
 	inviteIP    *ratelimit.Limiter
 	inviteToken *ratelimit.Limiter
 	chino       *chino.Client
+	// notices are what addons tell people (notices.go); noticeAddon and
+	// noticePerson the limits of posting them, per addon and per person
+	// posting to themselves.
+	notices      noticeStore
+	noticeAddon  *ratelimit.Limiter
+	noticePerson *ratelimit.Limiter
 	// now is the clock; time.Now unless a test sets one.
 	now func() time.Time
 }
@@ -106,9 +112,10 @@ type registryStore interface {
 }
 
 func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap, br *dbbrowse.Browser) *API {
-	a := &API{reg: st, addons: st, setup: st, invites: st, cfg: cfg, op: op, tap: tap, br: br}
+	a := &API{reg: st, addons: st, setup: st, invites: st, notices: st, cfg: cfg, op: op, tap: tap, br: br}
 	a.registration.kick = make(chan struct{}, 1)
 	a.inviteIP, a.inviteToken = newInviteLimits()
+	a.noticeAddon, a.noticePerson = newNoticeLimits()
 	if cfg.PeopleClientID != "" {
 		kc := keycloak.New(keycloak.Config{
 			URL: cfg.PeopleKeycloakURL, Realm: cfg.PeopleRealm, ClientID: cfg.PeopleClientID, ClientSecret: cfg.PeopleClientSecret,
@@ -169,6 +176,19 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 			// Product apps read the enabled extension contributions for a slot
 			// (chino forwards the user's bearer here). Any signed-in user.
 			r.Get("/slots/{slot}", a.slotExtensions)
+
+			// Notices: what addons tell the signed-in person — their own and
+			// nobody else's, read, marked read and deleted (chino-api
+			// forwards the person's bearer here) — and one a person posts to
+			// themselves, from an installed addon they name (notices.go).
+			r.Get("/me/notices", a.myNotices)
+			r.Post("/me/notices", a.postOwnNotice)
+			r.Post("/me/notices/read-all", a.readAllNotices)
+			r.Post("/me/notices/{id}/read", a.readNotice)
+			r.Delete("/me/notices/{id}", a.deleteNotice)
+			// An addon's service account tells one person something, as that
+			// addon and no other.
+			r.With(mw.RequireAddon).Post("/notices", a.postNotice)
 
 			// Registry administration (settings console).
 			r.Group(func(ar chi.Router) {
@@ -249,6 +269,10 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 				ar.Patch("/people/{id}", a.patchPerson)
 				ar.Delete("/people/{id}", a.deletePerson)
 				ar.Post("/people/{id}/invite", a.invitePerson)
+
+				// Each addon's notices, counted — never what they say
+				// (notices.go).
+				ar.Get("/notices", a.noticeCounts)
 			})
 
 			// UI extension registry — writable by a human admin OR an addon's
@@ -1252,6 +1276,7 @@ func (a *API) configSummary() map[string]any {
 		"passwordPolicy":   a.cfg.PasswordPolicy,
 		"accountDeletion":  a.cfg.AccountDeletionToken != "",
 		"chinoDataCleanup": a.chino != nil,
+		"noticeRetention":  a.noticeRetention().String(),
 	}
 }
 

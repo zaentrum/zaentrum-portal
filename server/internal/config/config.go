@@ -110,6 +110,10 @@ type Config struct {
 	// apps, and an admin's delete leaves chino's data of the person.
 	AccountDeletionToken string // PORTAL_ACCOUNT_DELETION_TOKEN
 	ChinoAPIURL          string // PORTAL_CHINO_API_URL (e.g. http://chino-api)
+
+	// NoticeRetention is how long a notice an addon posted is kept, read or
+	// not: older ones are swept every hour.
+	NoticeRetention time.Duration // PORTAL_NOTICE_RETENTION (default 2160h — 90 days)
 }
 
 func env(keys ...string) string {
@@ -206,6 +210,8 @@ func Load() Config {
 
 		AccountDeletionToken: env("PORTAL_ACCOUNT_DELETION_TOKEN"),
 		ChinoAPIURL:          env("PORTAL_CHINO_API_URL"),
+
+		NoticeRetention: envDuration(90*24*time.Hour, "PORTAL_NOTICE_RETENTION"),
 	}
 }
 
