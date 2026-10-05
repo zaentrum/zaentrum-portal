@@ -15,6 +15,7 @@ became impossible for 36 hours, and several UI changes piled up unseen.
     http://localhost:8792/?view=settings     # app registry console
     http://localhost:8792/?view=launchpad    # launchpad, with the setup checklist
     http://localhost:8792/?view=people       # the People page
+    http://localhost:8792/?view=shell        # the launchpad in the shell, with the notices bell
     http://localhost:8792/?view=invite&token=<token>  # the invite page a link opens
 
 Ports taken? `MOCK_PORT` moves the mock, and the dev proxy with it;
@@ -142,6 +143,17 @@ made on the People page works there too — once:
 
     http://localhost:8792/?view=people&people=external     # people in an identity provider
     http://localhost:8792/?view=people&people=unavailable  # a People page without its client's secret
+
+The shell view is the launchpad inside the portal's header, with the notices
+bell: five notices from two addons, two unread. One body carries markup, to
+show it renders as text; one has lines, one is as long as a body may be; one
+link leads into the shell (opening it reads the notice and routes there), and
+one leads off the instance, which the bell does not offer to open. Read one,
+**Mark All Read** and delete play out as portal-api answers them:
+
+    http://localhost:8792/?view=shell&notices=none   # no notices yet
+    http://localhost:8792/?view=shell&notices=down   # a portal-api that does not answer: the panel says so
+    http://localhost:8792/?view=shell&notices=old    # a portal-api without notices: no bell
 
 The mock keeps its state in memory; restart it for the seeded state.
 

@@ -973,6 +973,68 @@ async function servePeople(req, res, pathname) {
   return text(res, 405, 'method not allowed'), true;
 }
 
+// ─── notices ─────────────────────────────────────────────────────────────────
+//
+// What addons told the signed-in person, as GET /api/portal/me/notices
+// answers it: newest first, the unread count, read / read-all / delete as
+// portal-api does them — someone else's id is 404. One body carries markup on
+// purpose (it renders as text), one is as long as a body may be, one has
+// lines, one link leads off the instance (the bell does not follow it).
+// ?notices=none: nothing yet; old: a portal-api without notices (404, no
+// bell); down: one that does not answer.
+const noticesMode = (req) => (req.headers.cookie ?? '').match(/(?:^|;\s*)mock-notices=([a-z]*)/)?.[1] ?? '';
+const ago = (ms) => new Date(Date.now() - ms).toISOString();
+const MIN_MS = 60_000;
+let noticeSeq = 0;
+const seedNotice = (over) => ({
+  id: `0000000${++noticeSeq}-0000-4000-8000-00000000000${noticeSeq}`,
+  addon: 'example', addonTitle: 'Example', addonIcon: 'puzzle', link: '', itemId: '', readAt: null, ...over,
+});
+const notices = [
+  seedNotice({ title: 'Your title is ready', body: 'It is in your library now: open it from the Example console.',
+    link: '/portal/app/example', itemId: 'item-1', createdAt: ago(4 * MIN_MS) }),
+  seedNotice({ title: 'Three titles are ready', body: 'First one\nSecond one\nThird one', createdAt: ago(3 * 60 * MIN_MS) }),
+  seedNotice({ addon: 'sample', addonTitle: 'Sample addon', title: 'Hello from the sample addon',
+    body: 'Sent from its console. <b>This is not bold</b>: a notice is plain text.', createdAt: ago(26 * 60 * MIN_MS),
+    readAt: ago(25 * 60 * MIN_MS) }),
+  seedNotice({ title: 'A link off the instance', body: 'The bell does not follow it.', link: 'https://elsewhere.example/x',
+    createdAt: ago(3 * DAY_MS), readAt: ago(3 * DAY_MS) }),
+  seedNotice({ title: 'As long as a body may be',
+    body: 'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse.',
+    createdAt: ago(9 * DAY_MS), readAt: ago(8 * DAY_MS) }),
+];
+const unreadNotices = () => notices.filter((n) => n.readAt === null).length;
+
+function serveNotices(req, res, pathname) {
+  if (pathname !== '/api/portal/me/notices' && !pathname.startsWith('/api/portal/me/notices/')) return false;
+  const mode = noticesMode(req);
+  if (mode === 'old') return text(res, 404, '404 page not found'), true;
+  if (mode === 'down') return text(res, 502, 'portal-api did not answer'), true;
+  if (pathname === '/api/portal/me/notices' && req.method === 'GET') {
+    return json(res, 200, mode === 'none' ? { notices: [], unread: 0 } : { notices, unread: unreadNotices() }), true;
+  }
+  if (pathname === '/api/portal/me/notices/read-all' && req.method === 'POST') {
+    let read = 0;
+    for (const n of notices) if (n.readAt === null) (n.readAt = new Date().toISOString()), read++;
+    console.log(`mock: read all notices (${read})`);
+    return json(res, 200, { read, unread: 0 }), true;
+  }
+  const m = pathname.match(/^\/api\/portal\/me\/notices\/([^/]+)(\/read)?$/);
+  const n = m && notices.find((x) => x.id === m[1]);
+  if (!n) return text(res, 404, 'no such notice'), true;
+  if (m[2] && req.method === 'POST') {
+    n.readAt ??= new Date().toISOString();
+    console.log(`mock: read notice ${n.id}`);
+    return json(res, 200, { unread: unreadNotices() }), true;
+  }
+  if (!m[2] && req.method === 'DELETE') {
+    notices.splice(notices.indexOf(n), 1);
+    console.log(`mock: deleted notice ${n.id}`);
+    return res.writeHead(204).end(), true;
+  }
+  return text(res, 405, 'method not allowed'), true;
+}
+
 // The launchpad as portal-api assembles it from the registry: spaces in
 // order, each with the tiles the caller's roles see.
 const roles = ['zaentrum-admin', 'zaentrum-user'];
@@ -1002,6 +1064,7 @@ createServer(async (req, res) => {
   if (await serveRegistry(req, res, pathname)) return;
   if (await serveSetup(req, res, pathname)) return;
   if (await servePeople(req, res, pathname)) return;
+  if (serveNotices(req, res, pathname)) return;
   if (pathname === '/api/portal/launchpad') return json(res, 200, launchpad());
   if (pathname === '/api/portal/me') {
     return json(res, 200, {
