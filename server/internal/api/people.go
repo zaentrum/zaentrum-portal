@@ -42,7 +42,7 @@ import (
 //	GET    /people               admin   everyone, with their invite's state
 //	POST   /people               admin   add a person; answers their invite link
 //	PATCH  /people/{id}          admin   name, role, rating cap, switched on or off
-//	DELETE /people/{id}          admin   delete a person, chino's data of them first
+//	DELETE /people/{id}          admin   delete a person, chino's data of them first, their notices after
 //	POST   /people/{id}/invite   admin   a new invite link; older ones stop working
 //	GET    /invites/{token}      public  whose invite it is, while it is open
 //	POST   /invites/{token}      public  set the password, once
@@ -323,8 +323,8 @@ func (a *API) patchPerson(w http.ResponseWriter, r *http.Request) {
 }
 
 // deletePerson handles DELETE /people/{id}: chino's data of the person first
-// (with the admin's bearer), then their account, then their invites. A
-// refusal of chino-api's deletes nothing.
+// (with the admin's bearer), then their account, then their invites and the
+// notices addons left them. A refusal of chino-api's deletes nothing.
 func (a *API) deletePerson(w http.ResponseWriter, r *http.Request) {
 	if !a.peopleReady(w) {
 		return
@@ -352,6 +352,7 @@ func (a *API) deletePerson(w http.ResponseWriter, r *http.Request) {
 	if err := a.invites.DeleteInvites(r.Context(), id); err != nil {
 		log.Printf("people: the invites of %s stay: %v", p.Username, err)
 	}
+	a.dropNotices(r.Context(), id, p.Username)
 	log.Printf("people: %s deleted %s (chino's data: %s)", requester(r), p.Username, data)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "data": data})
 }
@@ -582,7 +583,7 @@ func (a *API) acceptInvite(w http.ResponseWriter, r *http.Request) {
 // person once it deleted their data: the account deletion token
 // (chino.DeletionHeader) and the person's own bearer. The account deleted is
 // the token's subject, never one the request names; the last admin and a
-// Keycloak administrator are refused.
+// Keycloak administrator are refused. Their invites and notices go with it.
 func (a *API) deleteMe(w http.ResponseWriter, r *http.Request) {
 	want := a.cfg.AccountDeletionToken
 	if want == "" {
@@ -620,6 +621,7 @@ func (a *API) deleteMe(w http.ResponseWriter, r *http.Request) {
 	if err := a.invites.DeleteInvites(r.Context(), p.Subject); err != nil {
 		log.Printf("people: the invites of %s stay: %v", who.Username, err)
 	}
+	a.dropNotices(r.Context(), p.Subject, who.Username)
 	log.Printf("people: %s deleted their own account", who.Username)
 	w.WriteHeader(http.StatusNoContent)
 }

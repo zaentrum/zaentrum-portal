@@ -595,6 +595,52 @@ func TestDeletingAPerson(t *testing.T) {
 	}
 }
 
+// Deleting a person deletes their notices — an admin's delete on the People
+// page, and their own from the apps — and nobody else's.
+func TestDeletingAPersonDeletesTheirNotices(t *testing.T) {
+	e := newPeopleEnv(t)
+	e.store.apps["sample"] = model.App{Key: "sample", Title: "Sample Addon"}
+	e.store.addons["sample"] = model.Addon{Key: "sample"}
+	lena := e.add(map[string]any{"username": "lena", "displayName": "Lena", "role": "user"}).Person.ID
+	noah := e.add(map[string]any{"username": "noah", "displayName": "Noah", "role": "user"}).Person.ID
+	for _, sub := range []string{lena, noah, e.admin} {
+		if rec := e.do(addonSample, http.MethodPost, "/api/portal/notices", notice(sub)); rec.Code != http.StatusCreated {
+			t.Fatalf("post to %s: %d %s", sub, rec.Code, rec.Body)
+		}
+	}
+	if rec := e.do(adminPortal, http.MethodDelete, "/api/portal/people/"+lena, nil); rec.Code != http.StatusOK {
+		t.Fatalf("delete lena: %d %s", rec.Code, rec.Body)
+	}
+	if n := len(e.notices.of(lena)); n != 0 {
+		t.Errorf("lena's %d notices stay", n)
+	}
+	if len(e.notices.of(noah)) != 1 || len(e.notices.of(e.admin)) != 1 {
+		t.Errorf("deleting lena took others': %+v", e.notices.all())
+	}
+
+	noahs := authtest.Person("chino-tv", "noah", "zaentrum-user")
+	noahs["sub"] = noah
+	req := httptest.NewRequest(http.MethodDelete, "/api/portal/me", nil)
+	req.Header.Set("Authorization", "Bearer "+e.iss.Token(t, noahs))
+	req.Header.Set(chino.DeletionHeader, deletionToken)
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("noah deletes his account: %d %s", rec.Code, rec.Body)
+	}
+	if len(e.notices.of(noah)) != 0 || len(e.notices.of(e.admin)) != 1 {
+		t.Errorf("after noah: %+v", e.notices.all())
+	}
+	// A refused deletion deletes no notice.
+	e.chino.status = http.StatusBadGateway
+	if rec := e.do(adminPortal, http.MethodDelete, "/api/portal/people/"+e.admin, nil); rec.Code == http.StatusOK {
+		t.Fatalf("deleting oneself: %d", rec.Code)
+	}
+	if len(e.notices.of(e.admin)) != 1 {
+		t.Error("a refused deletion took the notices")
+	}
+}
+
 // ─── invites ─────────────────────────────────────────────────────────────────
 
 // The invite page reads whose invite it is and the password's rules; the
