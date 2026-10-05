@@ -219,6 +219,36 @@ func (i Invite) Status(now time.Time) string {
 	return InvitePending
 }
 
+// Notice is what an addon told one person: plain text — never markup — and,
+// when set, a link on this instance and the id of a catalog item a client can
+// open. Whose it is is never in an answer: a person reads their own.
+type Notice struct {
+	ID    string `json:"id"`
+	Addon string `json:"addon"`
+	// AddonTitle and AddonIcon are the addon's app as the registry has it:
+	// what a client shows the notice is from. Read-side joins.
+	AddonTitle string `json:"addonTitle"`
+	AddonIcon  string `json:"addonIcon"`
+	Title      string `json:"title"`
+	Body       string `json:"body"`
+	// Link is "" for none; ItemID likewise.
+	Link      string     `json:"link"`
+	ItemID    string     `json:"itemId"`
+	CreatedAt time.Time  `json:"createdAt"`
+	ReadAt    *time.Time `json:"readAt"`
+}
+
+// NoticeCount is an addon's notices, counted — never what one says.
+type NoticeCount struct {
+	Addon   string `json:"addon"`
+	Notices int    `json:"notices"`
+	Unread  int    `json:"unread"`
+	// People is how many people the notices are for.
+	People int `json:"people"`
+	// Latest is when the newest was posted; null when there is none.
+	Latest *time.Time `json:"latest"`
+}
+
 // AddonComponent is one workload an addon declares. Workload is the name of
 // its Deployment and Service; the console matches live state by it.
 type AddonComponent struct {
