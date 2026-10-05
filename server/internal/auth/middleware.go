@@ -82,6 +82,31 @@ func (m *Middleware) RequireAdminOrAddon(next http.Handler) http.Handler {
 	})
 }
 
+// RequireAddon gates a handler on an addon's service account alone: a
+// client-credentials token with the addon role whose client id, or
+// zaentrum_addon claim, is the addon's key. An admin is refused as well —
+// what it guards speaks for an addon, and no person does. The handler acts
+// for Principal.Addon and for no other addon.
+func (m *Middleware) RequireAddon(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, ok := PrincipalFrom(r.Context())
+		if !ok || p.Addon == "" {
+			http.Error(w, m.addonRefusal(p), http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// addonRefusal says why a caller is no addon's service account.
+func (m *Middleware) addonRefusal(p *Principal) string {
+	if p.HasRole(m.policy.AddonRole) {
+		return "forbidden: the " + m.policy.AddonRole + " role counts on an addon's service account only — a client-credentials token whose client id, or zaentrum_addon claim, is the addon key"
+	}
+	return "forbidden: requires an addon's service account — a client-credentials token with the " + m.policy.AddonRole +
+		" role whose client id, or zaentrum_addon claim, is the addon key"
+}
+
 // refusal says why a signed-in caller was refused, in the terms that fix it.
 // The client id it names comes from a verified token.
 func (m *Middleware) refusal(p *Principal, addonToo bool) string {

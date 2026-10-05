@@ -167,6 +167,47 @@ func TestRefusalsNameTheClient(t *testing.T) {
 	}
 }
 
+// What only an addon may do takes an addon's service account and nobody else:
+// not an admin, not a person given the addon role, not a service account
+// without it.
+func TestRequireAddonTakesOnlyAnAddon(t *testing.T) {
+	iss := authtest.New(t)
+	j, _ := NewJWTVerifier(context.Background(), iss.URL, "", "zaentrum-admin", false, false)
+	m := NewMiddleware(j, testPolicy)
+	var seen string
+	h := m.Authn(m.RequireAddon(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, _ := PrincipalFrom(r.Context())
+		seen = p.Addon
+		w.WriteHeader(http.StatusNoContent)
+	})))
+	for _, c := range []struct {
+		name    string
+		claims  map[string]any
+		code    int
+		mention string
+	}{
+		{"an addon's service account", authtest.ServiceAccount("sample", "zaentrum-addon"), http.StatusNoContent, ""},
+		{"an admin through the portal", authtest.Person("zaentrum-web", "admin", "zaentrum-admin"), http.StatusForbidden, "requires an addon's service account"},
+		{"a person with the addon role", authtest.Person("chino-web", "alice", "zaentrum-addon"), http.StatusForbidden, "counts on an addon's service account only"},
+		{"a service account without the addon role", authtest.ServiceAccount("sample"), http.StatusForbidden, "requires an addon's service account"},
+		{"no bearer", nil, http.StatusUnauthorized, ""},
+	} {
+		seen = ""
+		r := httptest.NewRequest(http.MethodPost, "/api/portal/notices", nil)
+		if c.claims != nil {
+			r.Header.Set("Authorization", "Bearer "+iss.Token(t, c.claims))
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code != c.code || !strings.Contains(rec.Body.String(), c.mention) {
+			t.Errorf("%s = %d %q, want %d mentioning %q", c.name, rec.Code, rec.Body, c.code, c.mention)
+		}
+		if want := map[bool]string{true: "sample"}[c.code == http.StatusNoContent]; seen != want {
+			t.Errorf("%s: the handler acted for %q", c.name, seen)
+		}
+	}
+}
+
 // With authentication disabled the synthetic principal is an admin — the
 // no-IdP dev profile — but never an addon.
 func TestDisabledVerifierGrantsAdmin(t *testing.T) {

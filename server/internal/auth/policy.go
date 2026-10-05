@@ -19,10 +19,10 @@ import (
 // /me, the slot rows a product app reads with its user's token.
 //
 // An addon's service account is the one other writer: it may change the slot
-// rows of its own addon, and nothing else. Its addon is its client id — the
-// confidential client is named after the addon — or, where a shared realm
-// names clients per instance, the zaentrum_addon claim a hardcoded-claim
-// mapper on that client sets.
+// rows of its own addon and post notices as that addon, and nothing else. Its
+// addon is its client id — the confidential client is named after the addon
+// — or, where a shared realm names clients per instance, the zaentrum_addon
+// claim a hardcoded-claim mapper on that client sets.
 type Policy struct {
 	AdminRole string
 	AddonRole string
