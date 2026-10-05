@@ -71,6 +71,42 @@ configuration: `PORTAL_PEOPLE_KEYCLOAK_URL` (in-cluster, e.g. `http://keycloak:8
 `PORTAL_ACCOUNT_DELETION_TOKEN`, `PORTAL_CHINO_API_URL`. the platform chart sets them with
 bundled identity.
 
+## notices
+
+an addon can tell one person something — "your title is ready" — and every client that
+person uses shows it: the bell in the portal's header, and the product apps through
+chino-api (`GET /api/v1/notices`). the core does not know what a notice says: the text is
+the addon's, plain text, and portal-api keeps it for its person (migration 015), shows it to
+them and to nobody else, and forgets it.
+
+| route | who | what |
+|---|---|---|
+| `POST /api/portal/notices` | an installed addon's service account | `{sub, title, body, link?, itemId?}`: a notice for the person whose token subject is `sub`, from that addon — the token binds the addon, and a body that names one is refused |
+| `POST /api/portal/me/notices` | a person | `{addon, title, body, link?, itemId?}`: a notice for themselves, from an installed addon they name — for an addon that holds no credential; it reaches nobody else |
+| `GET /api/portal/me/notices` | a person | `{notices, unread}`: their own, newest first, each with the addon's `addonTitle` and `addonIcon` — never whom it is for |
+| `POST /api/portal/me/notices/{id}/read` | a person | one of theirs, read: `{unread}` |
+| `POST /api/portal/me/notices/read-all` | a person | all of theirs, read: `{read, unread}` |
+| `DELETE /api/portal/me/notices/{id}` | a person | one of theirs, deleted (`204`) |
+| `GET /api/portal/notices?addon=` | admin | each addon's notices counted — `notices`, `unread`, `people`, `latest` — with `kept` and `retentionHours`; never what one says |
+
+the rules hold whoever asks. a title is at most 80 characters and a body at most 280 (line
+breaks allowed there), plain text without control or bidirectional formatting characters;
+an item id is a short id (letters, digits and `. _ : -`, at most 128). the link is held to
+the rule a slot row's link is — a path on this instance or an absolute http(s) URL on its
+own origin, never `javascript:`, another host or `//host` — and a path is made absolute on
+the instance's public origin when portal-api knows it. someone else's notice is `404`, as
+one there is not. posting is limited per addon (100 at once, then one a second) and per
+person posting to themselves (10, then one every six seconds): `429` with `Retry-After`. a
+person keeps their newest 100, and every notice goes after `PORTAL_NOTICE_RETENTION`
+(default `2160h`, 90 days), swept at boot and every hour. removing an addon removes its
+notices; deleting a person removes theirs. every write is logged — who, and which notice —
+and what a notice says never is.
+
+a notice to oneself proves no addon sent it: whoever holds a person's bearer may name any
+installed addon, and it reaches that person only. an addon that tells someone something
+later — when their title is ready — posts with its service account (`zaentrum-addon`, the
+client named after the addon), whose token binds the addon.
+
 ## develop
 
 ```bash
