@@ -3,11 +3,13 @@ import { LogOut } from 'lucide-react';
 import { Link, Outlet } from 'react-router-dom';
 import { useAuth } from 'react-oidc-context';
 import { ZaentrumLockup } from '../glyphs';
+import { NoticesBell } from './NoticesBell';
 import './shell.css';
 
-// The portal shell: persistent chrome (lockup -> home, user badge, sign out)
-// around a routed content area. Apps (the launchpad, the katalog console) render
-// in the Outlet — the Fiori "shell + app" pattern, on @nalet/design-system.
+// The portal shell: persistent chrome (lockup -> home, the notices bell, user
+// badge, sign out) around a routed content area. Apps (the launchpad, the
+// katalog console) render in the Outlet — the Fiori "shell + app" pattern, on
+// @nalet/design-system.
 export function Shell() {
   const auth = useAuth();
   const p = auth.user?.profile;
@@ -20,6 +22,7 @@ export function Shell() {
           <ZaentrumLockup height={24} />
         </Link>
         <div className="sh__bar-right">
+          <NoticesBell />
           <Badge tone="blue" dot>
             {name}
           </Badge>
