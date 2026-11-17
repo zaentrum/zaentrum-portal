@@ -388,7 +388,11 @@ func (a *API) patchPerson(w http.ResponseWriter, r *http.Request) {
 
 // deletePerson handles DELETE /people/{id}: chino's data of the person first
 // (with the admin's bearer), then their account, then their invites and the
-// notices addons left them. A refusal of chino-api's deletes nothing.
+// notices addons left them. A refusal of chino-api's deletes nothing. Where
+// the account's deletion fails after chino-api deleted the data, the admin is
+// answered that failure, and chino-api is asked to undo its deletion
+// (undoDataDeletion), so that the person, who keeps their account, writes
+// again at once; their data stays deleted.
 func (a *API) deletePerson(w http.ResponseWriter, r *http.Request) {
 	if !a.peopleReady(w) {
 		return
@@ -399,9 +403,10 @@ func (a *API) deletePerson(w http.ResponseWriter, r *http.Request) {
 		peopleFailure(w, err)
 		return
 	}
-	data := "kept"
+	data, deletion := "kept", ""
 	if a.chino != nil {
-		if err := a.chino.DeleteData(r.Context(), r.Header.Get("Authorization"), id); err != nil {
+		deletion, err = a.chino.DeleteData(r.Context(), r.Header.Get("Authorization"), id)
+		if err != nil {
 			log.Printf("people: chino-api did not delete the data of %s: %v", p.Username, err)
 			http.Error(w, fmt.Sprintf("chino-api did not delete %s's watch history and lists, so nothing was deleted. Try again.", p.DisplayName),
 				http.StatusBadGateway)
@@ -410,6 +415,9 @@ func (a *API) deletePerson(w http.ResponseWriter, r *http.Request) {
 		data = "deleted"
 	}
 	if err := a.people.Delete(r.Context(), id); err != nil {
+		if data == "deleted" {
+			a.undoDataDeletion(r, id, p.Username, deletion)
+		}
 		peopleFailure(w, err)
 		return
 	}
@@ -419,6 +427,56 @@ func (a *API) deletePerson(w http.ResponseWriter, r *http.Request) {
 	a.dropNotices(r.Context(), id, p.Username)
 	log.Printf("people: %s deleted %s (chino's data: %s)", requester(r), p.Username, data)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "data": data})
+}
+
+// The bounds of what follows a failed deletion of an account whose data
+// chino-api deleted: the look at whether the account stays, and chino-api's
+// undo. Each has its own, apart from the request's.
+const (
+	accountLookTimeout = 5 * time.Second
+	undoTimeout        = 10 * time.Second
+)
+
+// undoDataDeletion runs where the deletion of the account id failed after
+// chino-api deleted its data: chino-api is asked to forget that deletion —
+// the value its answer named, with the admin's bearer and the deletion token
+// — so that the person, who keeps their account, writes again at once and
+// not after an hour. It runs apart from the request, which neither ends nor
+// cancels it. It is asked only where the realm shows the account still
+// there. Nothing is asked where chino-api named no deletion, as a chino-api
+// from before it named them answers, where the realm says the account is
+// gone after all, or where the look fails and cannot tell: then chino-api
+// keeps the deletion, and a bearer of the account still valid writes nothing.
+// It logs what became of the look and the undo; the admin's answer is the
+// failure either way.
+func (a *API) undoDataDeletion(r *http.Request, id, username, deletion string) {
+	if deletion == "" {
+		log.Printf("people: chino-api named no deletion of the data of %s: nothing to undo", username)
+		return
+	}
+	detached := context.WithoutCancel(r.Context())
+	look, cancel := context.WithTimeout(detached, accountLookTimeout)
+	_, err := a.people.Keycloak().User(look, id)
+	cancel()
+	switch {
+	case errors.Is(err, keycloak.ErrNotFound):
+		log.Printf("people: the account of %s is gone after all: chino-api keeps its deletion of their data", username)
+		return
+	case err != nil:
+		log.Printf("people: could not tell whether the account of %s is gone (%v): chino-api keeps its deletion of their data, and an account that stays cannot write there for up to an hour", username, err)
+		return
+	}
+	undo, cancel := context.WithTimeout(detached, undoTimeout)
+	defer cancel()
+	err = a.chino.ForgetDeletion(undo, r.Header.Get("Authorization"), id, deletion)
+	switch {
+	case err == nil:
+		log.Printf("people: chino-api undid its deletion of the data of %s: they write again, and their data stays deleted", username)
+	case errors.Is(err, chino.ErrNotKept):
+		log.Printf("people: chino-api keeps no id of its deletion of the data of %s: nothing to undo", username)
+	default:
+		log.Printf("people: chino-api did not undo its deletion of the data of %s (%v): they cannot write there for up to an hour", username, err)
+	}
 }
 
 // invitePerson handles POST /people/{id}/invite {send}, the body optional: a

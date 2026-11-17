@@ -55,7 +55,8 @@ type API struct {
 	// people is the realm's people (people.go), nil with an external
 	// identity provider; invites their invites; inviteIP and inviteToken
 	// the public invite endpoints' limits; chino the chino-api that deletes
-	// a deleted person's data, nil when none is configured.
+	// a deleted person's data, and undoes that deletion where the account
+	// stays, nil when none is configured.
 	people      *people.Service
 	invites     inviteStore
 	inviteIP    *ratelimit.Limiter

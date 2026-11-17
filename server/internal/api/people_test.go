@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -113,26 +114,57 @@ func (f *fakeInvites) DeleteInvites(_ context.Context, userID string) error {
 	return nil
 }
 
-// fakeChino is chino-api's data deletion: it records each call, and answers
-// what status says.
+// fakeChino is chino-api's data deletion and its undo. It records each call;
+// /data answers status, with dataBody where that is 2xx, and /deleted
+// answers undoStatus, with undoBody.
 type fakeChino struct {
 	*httptest.Server
-	mu     sync.Mutex
-	status int
-	calls  []*http.Request
+	mu         sync.Mutex
+	status     int
+	dataBody   string
+	undoStatus int
+	undoBody   string
+	calls      []*http.Request
 }
+
+// chinoDeletion is the deletion the fake's /data names.
+const chinoDeletion = "deletion-value-for-tests-0001"
 
 func newFakeChino(t *testing.T) *fakeChino {
 	t.Helper()
-	f := &fakeChino{status: http.StatusOK}
+	f := &fakeChino{status: http.StatusOK, dataBody: `{"deleted":{"progress":3,"history":5},"deletion":"` + chinoDeletion + `"}`,
+		undoStatus: http.StatusNoContent}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.calls = append(f.calls, r.Clone(context.Background()))
-		w.WriteHeader(f.status)
+		status, body := f.status, f.dataBody
+		if strings.HasSuffix(r.URL.Path, "/deleted") {
+			status, body = f.undoStatus, f.undoBody
+		} else if status/100 != 2 {
+			body = ""
+		}
+		if body != "" {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(f.Close)
 	return f
+}
+
+// undos are the calls to chino-api's undo of a deletion.
+func (f *fakeChino) undos() []*http.Request {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*http.Request
+	for _, c := range f.calls {
+		if strings.HasSuffix(c.URL.Path, "/deleted") {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 const deletionToken = "deletion-token-for-tests-0123456789abcdefghijk"
@@ -159,8 +191,7 @@ func newPeopleEnv(t *testing.T) *peopleEnv {
 	e.api.cfg.PasswordPolicy = "length(8) and notUsername and notEmail"
 	e.api.cfg.InviteTTL = 7 * 24 * time.Hour
 	e.api.cfg.AccountDeletionToken = deletionToken
-	e.api.people = people.New(keycloak.New(keycloak.Config{URL: kc.Base(), Realm: kc.Realm, ClientID: kc.ClientID, ClientSecret: kc.ClientSecret}),
-		"zaentrum-admin", "zaentrum-user", []string{"zaentrum-verify"})
+	e.api.people = peopleAt(kc, kc.Base())
 	e.api.invites = inv
 	e.api.inviteIP, e.api.inviteToken = newInviteLimits()
 	e.api.chino = chino.New(ch.URL, deletionToken)
@@ -169,6 +200,51 @@ func newPeopleEnv(t *testing.T) *peopleEnv {
 	admin := kc.Add(kctest.Seed{ID: "user-admin", Username: "admin", FirstName: "Anna", Roles: []string{kctest.AdminRole, kctest.UserRole}})
 	kc.Add(kctest.Seed{Username: "zaentrum-verify", FirstName: "Zaentrum", LastName: "Verification", Roles: []string{kctest.UserRole}})
 	return &peopleEnv{tokenEnv: e, kc: kc, invites: inv, chino: ch, owner: owner, admin: admin}
+}
+
+// peopleAt is the people service of the fake realm kc, reached at base.
+func peopleAt(kc *kctest.Server, base string) *people.Service {
+	return people.New(keycloak.New(keycloak.Config{URL: base, Realm: kc.Realm, ClientID: kc.ClientID, ClientSecret: kc.ClientSecret}),
+		"zaentrum-admin", "zaentrum-user", []string{"zaentrum-verify"})
+}
+
+// interceptAccountCalls puts a stand-in in front of the fake Keycloak: answer
+// sees each call on one account — a read or a deletion of /users/{id} — and
+// says true where it answered it; the fake answers the rest.
+func (e *peopleEnv) interceptAccountCalls(answer func(w http.ResponseWriter, r *http.Request) bool) {
+	e.t.Helper()
+	users := "/auth/admin/realms/" + e.kc.Realm + "/users/"
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rest, ok := strings.CutPrefix(r.URL.Path, users); ok && !strings.Contains(rest, "/") && answer(w, r) {
+			return
+		}
+		e.kc.Config.Handler.ServeHTTP(w, r)
+	}))
+	e.t.Cleanup(front.Close)
+	e.api.people = peopleAt(e.kc, front.URL+"/auth")
+}
+
+// interceptAccountDeletions has answer answer each deletion of an account,
+// and the fake every other call.
+func (e *peopleEnv) interceptAccountDeletions(answer http.HandlerFunc) {
+	e.t.Helper()
+	e.interceptAccountCalls(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method != http.MethodDelete {
+			return false
+		}
+		answer(w, r)
+		return true
+	})
+}
+
+// failAccountDeletions has Keycloak answer each deletion of an account with
+// status, and delete none.
+func (e *peopleEnv) failAccountDeletions(status int) {
+	e.interceptAccountDeletions(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"error":"unknown_error"}`))
+	})
 }
 
 // public sends a request with no bearer, from the client address ip.
@@ -639,6 +715,243 @@ func TestDeletingAPersonDeletesTheirNotices(t *testing.T) {
 	if len(e.notices.of(e.admin)) != 1 {
 		t.Error("a refused deletion took the notices")
 	}
+}
+
+// checkUndo says whether call is chino-api's undo of the deletion /data named
+// for the account id, asked as /data was: the admin's bearer and the token.
+func checkUndo(t *testing.T, call, data *http.Request, id string) {
+	t.Helper()
+	if call.Method != http.MethodDelete || call.URL.Path != "/api/v1/admin/accounts/"+id+"/deleted" ||
+		!slices.Equal(call.URL.Query()["deletion"], []string{chinoDeletion}) {
+		t.Errorf("the undo was %s %s", call.Method, call.URL)
+	}
+	if call.Header.Get(chino.DeletionHeader) != deletionToken || call.Header.Get("Authorization") != data.Header.Get("Authorization") {
+		t.Errorf("the undo was asked with %v", call.Header)
+	}
+}
+
+// Where the account's deletion fails after chino-api deleted the data, the
+// person keeps their account, and chino-api is asked to undo the deletion
+// its answer named, with the admin's bearer and the token. The admin's
+// answer is the failure, as without chino-api.
+func TestAFailedDeletionUndoesChinosDeletion(t *testing.T) {
+	e := newPeopleEnv(t)
+	logged := captureLog(t)
+	e.failAccountDeletions(http.StatusInternalServerError)
+	id := e.add(map[string]any{"username": "mia", "displayName": "Mia", "role": "user"}).Person.ID
+
+	rec := e.do(adminPortal, http.MethodDelete, "/api/portal/people/"+id, nil)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "Keycloak refused the change (HTTP 500)") {
+		t.Fatalf("the account's deletion failing: %d %s", rec.Code, rec.Body)
+	}
+	if e.kc.User(id) == nil {
+		t.Fatal("the account went")
+	}
+	if len(e.chino.calls) != 2 {
+		t.Fatalf("%d calls to chino-api", len(e.chino.calls))
+	}
+	checkUndo(t, e.chino.calls[1], e.chino.calls[0], id)
+	if !strings.Contains(logged.String(), "chino-api undid its deletion of the data of mia") {
+		t.Errorf("log: %s", logged)
+	}
+
+	e.api.chino = nil
+	without := e.do(adminPortal, http.MethodDelete, "/api/portal/people/"+id, nil)
+	if without.Code != rec.Code || without.Body.String() != rec.Body.String() {
+		t.Errorf("with the undo %d %q, without chino-api %d %q", rec.Code, rec.Body, without.Code, without.Body)
+	}
+}
+
+// No undo where there is none to ask for: the deletion went through, chino-api
+// deleted nothing, or chino-api named no deletion, as one from before it
+// named them answers.
+func TestNoUndoWhereNothingIsToUndo(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		prep   func(e *peopleEnv)
+		status int
+		log    string
+	}{
+		{name: "the deletion succeeds", status: http.StatusOK},
+		{name: "chino-api's deletion fails", status: http.StatusBadGateway, prep: func(e *peopleEnv) {
+			e.chino.status = http.StatusInternalServerError
+			e.failAccountDeletions(http.StatusInternalServerError)
+		}},
+		{name: "chino-api answers no body", status: http.StatusBadGateway, log: "named no deletion", prep: func(e *peopleEnv) {
+			e.chino.dataBody = ""
+			e.failAccountDeletions(http.StatusInternalServerError)
+		}},
+		{name: "chino-api answers no deletion", status: http.StatusBadGateway, log: "named no deletion", prep: func(e *peopleEnv) {
+			e.chino.dataBody = `{"deleted":{"progress":3}}`
+			e.failAccountDeletions(http.StatusInternalServerError)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newPeopleEnv(t)
+			logged := captureLog(t)
+			id := e.add(map[string]any{"username": "mia", "displayName": "Mia", "role": "user"}).Person.ID
+			if c.prep != nil {
+				c.prep(e)
+			}
+			if rec := e.do(adminPortal, http.MethodDelete, "/api/portal/people/"+id, nil); rec.Code != c.status {
+				t.Fatalf("%d %s", rec.Code, rec.Body)
+			}
+			if n := len(e.chino.calls); n != 1 {
+				t.Errorf("%d calls to chino-api", n)
+			}
+			if undos := e.chino.undos(); len(undos) != 0 {
+				t.Errorf("chino-api was asked to undo: %s", undos[0].URL)
+			}
+			if c.log != "" && !strings.Contains(logged.String(), c.log) {
+				t.Errorf("log: %s", logged)
+			}
+		})
+	}
+}
+
+// After the account's deletion failed, the realm is looked at first, and only
+// an account it shows still there gets the undo. One gone after all — the
+// answer to its deletion lost — gets none, and nor does one where the look
+// fails and cannot tell: chino-api keeps the deletion, and the log says so.
+func TestTheLookAtTheAccountDecidesTheUndo(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		answer func(e *peopleEnv, deleted *atomic.Bool) func(w http.ResponseWriter, r *http.Request) bool
+		undos  int
+		log    string
+		gone   bool
+	}{
+		{name: "the account is still there", undos: 1, log: "chino-api undid its deletion of the data of mia",
+			answer: func(_ *peopleEnv, _ *atomic.Bool) func(w http.ResponseWriter, r *http.Request) bool {
+				return func(w http.ResponseWriter, r *http.Request) bool {
+					if r.Method != http.MethodDelete {
+						return false
+					}
+					w.WriteHeader(http.StatusInternalServerError)
+					return true
+				}
+			}},
+		{name: "the account is gone", log: "the account of mia is gone after all: chino-api keeps its deletion", gone: true,
+			answer: func(e *peopleEnv, _ *atomic.Bool) func(w http.ResponseWriter, r *http.Request) bool {
+				return func(w http.ResponseWriter, r *http.Request) bool {
+					if r.Method != http.MethodDelete {
+						return false
+					}
+					e.kc.Config.Handler.ServeHTTP(httptest.NewRecorder(), r)
+					w.WriteHeader(http.StatusBadGateway)
+					return true
+				}
+			}},
+		{name: "the look fails", log: "could not tell whether the account of mia is gone (keycloak answered 503): chino-api keeps its deletion",
+			answer: func(_ *peopleEnv, deleted *atomic.Bool) func(w http.ResponseWriter, r *http.Request) bool {
+				return func(w http.ResponseWriter, r *http.Request) bool {
+					switch {
+					case r.Method == http.MethodDelete:
+						deleted.Store(true)
+						w.WriteHeader(http.StatusInternalServerError)
+					case deleted.Load():
+						w.WriteHeader(http.StatusServiceUnavailable)
+					default:
+						return false
+					}
+					return true
+				}
+			}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newPeopleEnv(t)
+			logged := captureLog(t)
+			id := e.add(map[string]any{"username": "mia", "displayName": "Mia", "role": "user"}).Person.ID
+			var deleted atomic.Bool
+			e.interceptAccountCalls(c.answer(e, &deleted))
+			if rec := e.do(adminPortal, http.MethodDelete, "/api/portal/people/"+id, nil); rec.Code != http.StatusBadGateway {
+				t.Fatalf("%d %s", rec.Code, rec.Body)
+			}
+			if gone := e.kc.User(id) == nil; gone != c.gone {
+				t.Fatalf("the account gone: %v", gone)
+			}
+			undos := e.chino.undos()
+			if len(undos) != c.undos {
+				t.Fatalf("%d undos", len(undos))
+			}
+			if c.undos == 1 {
+				checkUndo(t, undos[0], e.chino.calls[0], id)
+			}
+			if !strings.Contains(logged.String(), c.log) {
+				t.Errorf("log: %s", logged)
+			}
+		})
+	}
+}
+
+// The undo's answer is logged: undone, nothing of its own to undo (409
+// deletion_not_kept, no error), or any other answer with its status. The
+// admin's answer is the failure each time.
+func TestTheUndosAnswerIsLogged(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		status       int
+		body         string
+		want, unwant string
+	}{
+		{"undone", http.StatusNoContent, "", "chino-api undid its deletion of the data of mia", "did not undo"},
+		{"nothing to undo", http.StatusConflict,
+			`{"error":"deletion_not_kept","detail":"no id of this deletion is kept: nothing of its own to undo"}`,
+			"chino-api keeps no id of its deletion of the data of mia: nothing to undo", "did not undo"},
+		{"another answer", http.StatusInternalServerError, "", "did not undo its deletion of the data of mia (chino-api answered 500)", "undid"},
+		{"a conflict of another kind", http.StatusConflict, `{"error":"something_else"}`, "(chino-api answered 409)", "nothing to undo"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newPeopleEnv(t)
+			logged := captureLog(t)
+			e.failAccountDeletions(http.StatusInternalServerError)
+			e.chino.undoStatus, e.chino.undoBody = c.status, c.body
+			id := e.add(map[string]any{"username": "mia", "displayName": "Mia", "role": "user"}).Person.ID
+			if rec := e.do(adminPortal, http.MethodDelete, "/api/portal/people/"+id, nil); rec.Code != http.StatusBadGateway {
+				t.Fatalf("%d %s", rec.Code, rec.Body)
+			}
+			if len(e.chino.undos()) != 1 {
+				t.Fatalf("%d undos", len(e.chino.undos()))
+			}
+			if !strings.Contains(logged.String(), c.want) || strings.Contains(logged.String(), c.unwant) {
+				t.Errorf("log: %s", logged)
+			}
+		})
+	}
+}
+
+// The undo runs apart from the request: an admin who goes once chino-api has
+// deleted the data, before the account's deletion is answered, still leaves
+// the person, who keeps their account, able to write.
+func TestTheUndoOutlivesTheRequest(t *testing.T) {
+	e := newPeopleEnv(t)
+	id := e.add(map[string]any{"username": "mia", "displayName": "Mia", "role": "user"}).Person.ID
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.interceptAccountDeletions(func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/portal/people/"+id, nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+e.iss.Token(t, adminPortal))
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	if ctx.Err() == nil || rec.Code == http.StatusOK {
+		t.Fatalf("the request went on: %d %s", rec.Code, rec.Body)
+	}
+	if e.kc.User(id) == nil {
+		t.Fatal("the account went")
+	}
+	undos := e.chino.undos()
+	if len(undos) != 1 {
+		t.Fatalf("%d undos after the request was cancelled", len(undos))
+	}
+	checkUndo(t, undos[0], e.chino.calls[0], id)
 }
 
 // ─── invites ─────────────────────────────────────────────────────────────────

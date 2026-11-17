@@ -34,7 +34,7 @@ identity provider people live there: the page says so and links to it.
 | `GET /api/portal/people` | admin | everyone (the platform's own accounts aside): `email` (none for an address at the placeholder domain `zaentrum.local`), role, rating cap, enabled, created, their newest invite's state — never its token; `mode` bundled, external (`manageUrl`) or unavailable (`note`) |
 | `POST /api/portal/people` | admin | `{username, displayName, email, role, maxRating, sendInvite}`: an enabled account with no password and the address, if one is given, `zaentrum-user` (+ `zaentrum-admin`); answers the person and their invite link, once, and with `sendInvite` true `mail`: `sent`, `not-set-up`, `no-address` or `failed`, with `mailError` when it failed |
 | `PATCH /api/portal/people/{id}` | admin | `displayName`, `email` (empty: the address removed), `role`, `maxRating` (`null`: no cap), `enabled`; switched off, the open invite is revoked |
-| `DELETE /api/portal/people/{id}` | admin | chino-api deletes the person's data first, then the account goes, then their invites |
+| `DELETE /api/portal/people/{id}` | admin | chino-api deletes the person's data first, then the account goes, then their invites; where the account's deletion fails, chino-api's deletion is undone (see below) |
 | `POST /api/portal/people/{id}/invite` | admin | `{send}`, the body optional: a new link, and older ones stop working; with `send` true, `mail` and `mailError` as for `POST /api/portal/people` |
 | `GET /api/portal/invites/{token}` | anyone with the link | `{valid, username, displayName, expiresAt, passwordPolicy}` while it works |
 | `POST /api/portal/invites/{token}` | anyone with the link | `{password}`: set (not temporary), required actions cleared, the invite used — once; answers where to sign in |
@@ -94,6 +94,18 @@ person's bearer and the account deletion token (`X-Account-Deletion-Token`,
 deleted is the bearer's own; a service account, the last admin and a Keycloak
 administrator are refused. an admin's delete on the People page asks chino-api
 (`PORTAL_CHINO_API_URL`) for the person's data first, with the same token.
+where the account's deletion then fails, the admin is answered that failure, and
+portal-api asks chino-api to undo its deletion — `DELETE
+/api/v1/admin/accounts/{sub}/deleted?deletion=…`, with the value chino-api's answer
+named, the admin's bearer and the token — within 10 seconds of its own, also where
+the admin has gone before the answer: the person, who keeps their account, writes
+again at once, and their data stays deleted. it is asked only where the realm shows
+the account still there: nothing is asked where chino-api named no deletion, as one
+from before it named them answers, where the realm says the account is gone after
+all, or where the look at the realm fails and cannot tell; then chino-api keeps the
+deletion. chino-api's `409` `deletion_not_kept` is nothing to undo; portal-api's log
+says what became of the look and the undo. where the account stays and the undo is
+not asked for or fails, the person cannot write to chino-api for up to an hour.
 
 configuration: `PORTAL_PEOPLE_KEYCLOAK_URL` (in-cluster, e.g. `http://keycloak:80/auth`),
 `PORTAL_PEOPLE_REALM`, `PORTAL_PEOPLE_CLIENT_ID`, `PORTAL_PEOPLE_CLIENT_SECRET`,
