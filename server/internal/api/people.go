@@ -23,6 +23,7 @@ import (
 	"github.com/zaentrum/zaentrum-portal/server/internal/auth"
 	"github.com/zaentrum/zaentrum-portal/server/internal/chino"
 	"github.com/zaentrum/zaentrum-portal/server/internal/keycloak"
+	"github.com/zaentrum/zaentrum-portal/server/internal/mail"
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
 	"github.com/zaentrum/zaentrum-portal/server/internal/people"
 	"github.com/zaentrum/zaentrum-portal/server/internal/ratelimit"
@@ -40,16 +41,53 @@ import (
 // 014): their tokens' SHA-256, never the tokens.
 //
 //	GET    /people               admin   everyone, with their invite's state
-//	POST   /people               admin   add a person; answers their invite link
-//	PATCH  /people/{id}          admin   name, role, rating cap, switched on or off
+//	POST   /people               admin   add a person; answers their invite link, mailed on request
+//	PATCH  /people/{id}          admin   name, address, role, rating cap, switched on or off
 //	DELETE /people/{id}          admin   delete a person, chino's data of them first, their notices after
-//	POST   /people/{id}/invite   admin   a new invite link; older ones stop working
+//	POST   /people/{id}/invite   admin   a new invite link, mailed on request; older ones stop working
 //	GET    /invites/{token}      public  whose invite it is, while it is open
 //	POST   /invites/{token}      public  set the password, once
 //	DELETE /me                   chino-api, for the signed-in person: their account
 //
 // With an external identity provider people live there: the page says so and
-// links there, and nothing here changes anyone.
+// links there, and nothing here changes anyone — nor keeps or mails to an
+// address: invites and password resets are the provider's own.
+//
+// A person's address is their account's in the identity provider, optional,
+// and one address belongs to one account (people.ErrEmailUsed). The invite by
+// mail is invitemail.go's.
+
+// The people page's refusal of an address another account has. Its others —
+// no address, a placeholder, accented or non-Latin letters — are worded as
+// the mail page's are, and share their codes. An account the people page
+// does not list, such as one of the platform's own, can have it.
+var refuseAddressTaken = refusal{Error: "address_taken", Message: "Another account already has this address."}
+
+// personAddress reads a person's address as the page sends it: "" for none,
+// else one address alone, trimmed (mail.ReadAddress), in ASCII letters, and
+// no placeholder. A refusal with a code where it is not one.
+func personAddress(raw string) (string, refusal) {
+	if strings.TrimSpace(raw) == "" {
+		return "", refusal{}
+	}
+	address, err := mail.ReadAddress(raw)
+	switch {
+	case err != nil:
+		return "", addressRefusal(err, refuseNotAnAddress)
+	case placeholder(address):
+		return "", refusePlaceholder
+	}
+	return address, refusal{}
+}
+
+// shown is a person as the people routes answer them: an address at the
+// placeholder domain is no address, and is not in the answer.
+func shown(p people.Person) people.Person {
+	if placeholder(p.Email) {
+		p.Email = ""
+	}
+	return p
+}
 
 // inviteStore is the invites as the People page uses them. *store.Store
 // implements it; tests substitute an in-memory one.
@@ -218,7 +256,7 @@ func (a *API) listPeople(w http.ResponseWriter, r *http.Request) {
 	}
 	now, me := a.clock(), caller(r)
 	for _, p := range list {
-		v := personView{Person: p, Self: p.ID == me}
+		v := personView{Person: shown(p), Self: p.ID == me}
 		if inv, ok := invites[p.ID]; ok {
 			v.Invite = viewInvite(inv, now)
 		}
@@ -227,8 +265,10 @@ func (a *API) listPeople(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, doc)
 }
 
-// createPerson handles POST /people {username, displayName, role, maxRating}:
-// the person, enabled and without a password, and their invite link.
+// createPerson handles POST /people {username, displayName, email, role,
+// maxRating, sendInvite}: the person, enabled and without a password, and
+// their invite link; with sendInvite, mailed to their address while the admin
+// waits, and mail says what became of it (invitemail.go).
 func (a *API) createPerson(w http.ResponseWriter, r *http.Request) {
 	if !a.peopleReady(w) {
 		return
@@ -236,31 +276,45 @@ func (a *API) createPerson(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Username    string `json:"username"`
 		DisplayName string `json:"displayName"`
+		Email       string `json:"email"`
 		Role        string `json:"role"`
 		MaxRating   *int   `json:"maxRating"`
+		SendInvite  bool   `json:"sendInvite"`
 	}
 	if !decode(w, r, &body) {
+		return
+	}
+	email, refused := personAddress(body.Email)
+	if refused.Error != "" {
+		refuse(w, http.StatusBadRequest, refused)
 		return
 	}
 	if body.Role == "" {
 		body.Role = people.RoleUser
 	}
 	p, err := a.people.Create(r.Context(), people.NewPerson{
-		Username: body.Username, DisplayName: body.DisplayName, Role: body.Role, MaxRating: body.MaxRating,
+		Username: body.Username, DisplayName: body.DisplayName, Email: email, Role: body.Role, MaxRating: body.MaxRating,
 	})
 	if err != nil {
 		peopleFailure(w, err)
 		return
 	}
 	log.Printf("people: %s added %s (%s%s)", requester(r), p.Username, p.Role, ratingNote(p.MaxRating))
-	out := map[string]any{"person": personView{Person: p}, "invite": nil}
+	out := map[string]any{"person": personView{Person: shown(p)}, "invite": nil}
 	link, err := a.issueInvite(r, p.ID)
 	if err != nil {
 		log.Printf("people: no invite for %s: %v", p.Username, err)
 		out["note"] = "The person is added, but no invite could be made: send one from the list."
 	} else {
 		out["invite"] = link
-		out["person"] = personView{Person: p, Invite: &inviteView{Status: model.InvitePending, CreatedAt: a.clock(), ExpiresAt: link.ExpiresAt}}
+		out["person"] = personView{Person: shown(p), Invite: &inviteView{Status: model.InvitePending, CreatedAt: a.clock(), ExpiresAt: link.ExpiresAt}}
+		if body.SendInvite {
+			mailed := a.mailInvite(r, p, link, false)
+			out["mail"] = mailed.Mail
+			if mailed.MailError != nil {
+				out["mailError"] = mailed.MailError
+			}
+		}
 	}
 	writeJSON(w, http.StatusCreated, out)
 }
@@ -272,14 +326,16 @@ func ratingNote(n *int) string {
 	return ", rating cap " + strconv.Itoa(*n)
 }
 
-// patchPerson handles PATCH /people/{id} {displayName, role, maxRating,
-// enabled}: what is sent changes, maxRating null removes the cap.
+// patchPerson handles PATCH /people/{id} {displayName, email, role,
+// maxRating, enabled}: what is sent changes, an empty email removes the
+// address, maxRating null removes the cap.
 func (a *API) patchPerson(w http.ResponseWriter, r *http.Request) {
 	if !a.peopleReady(w) {
 		return
 	}
 	var body struct {
 		DisplayName *string         `json:"displayName"`
+		Email       *string         `json:"email"`
 		Role        *string         `json:"role"`
 		MaxRating   json.RawMessage `json:"maxRating"`
 		Enabled     *bool           `json:"enabled"`
@@ -288,6 +344,14 @@ func (a *API) patchPerson(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ch := people.Change{DisplayName: body.DisplayName, Role: body.Role, Enabled: body.Enabled}
+	if body.Email != nil {
+		email, refused := personAddress(*body.Email)
+		if refused.Error != "" {
+			refuse(w, http.StatusBadRequest, refused)
+			return
+		}
+		ch.Email = &email
+	}
 	switch raw := strings.TrimSpace(string(body.MaxRating)); {
 	case raw == "":
 	case raw == "null":
@@ -313,7 +377,7 @@ func (a *API) patchPerson(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	log.Printf("people: %s changed %s", requester(r), p.Username)
-	v := personView{Person: p, Self: p.ID == caller(r)}
+	v := personView{Person: shown(p), Self: p.ID == caller(r)}
 	if invites, err := a.invites.LatestInvites(r.Context()); err == nil {
 		if inv, ok := invites[p.ID]; ok {
 			v.Invite = viewInvite(inv, a.clock())
@@ -357,10 +421,18 @@ func (a *API) deletePerson(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "data": data})
 }
 
-// invitePerson handles POST /people/{id}/invite: a new invite link; every
-// older one of the person's stops working.
+// invitePerson handles POST /people/{id}/invite {send}, the body optional: a
+// new invite link; every older one of the person's stops working. With send,
+// the link is mailed to the person's address while the admin waits, and mail
+// says what became of it (invitemail.go).
 func (a *API) invitePerson(w http.ResponseWriter, r *http.Request) {
 	if !a.peopleReady(w) {
+		return
+	}
+	var body struct {
+		Send bool `json:"send"`
+	}
+	if !decodeOptional(w, r, &body) {
 		return
 	}
 	id := chi.URLParam(r, "id")
@@ -375,7 +447,18 @@ func (a *API) invitePerson(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("people: %s invited %s again", requester(r), p.Username)
-	writeJSON(w, http.StatusCreated, link)
+	out := invited{inviteLink: link}
+	if body.Send {
+		out.mailedInvite = a.mailInvite(r, p, link, true)
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+// invited is POST /people/{id}/invite: the link, and with send what became of
+// its mail.
+type invited struct {
+	inviteLink
+	mailedInvite
 }
 
 // issueInvite makes an invite for the account id: 32 random bytes as the
@@ -638,6 +721,13 @@ func peopleFailure(w http.ResponseWriter, err error) {
 		http.Error(w, "No such person.", http.StatusNotFound)
 	case errors.Is(err, people.ErrUsernameUsed):
 		http.Error(w, "That username is taken: choose another.", http.StatusConflict)
+	case errors.Is(err, people.ErrEmailUsed):
+		refuse(w, http.StatusConflict, refuseAddressTaken)
+	case errors.As(err, &kcInvalid) && kcInvalid.Field == "email":
+		// An address Keycloak's own check declines, such as one with a
+		// local part over 64 characters.
+		log.Printf("people: keycloak declined %s (%s)", kcInvalid.Field, kcInvalid.Code)
+		refuse(w, http.StatusBadRequest, refuseNotAnAddress)
 	case errors.As(err, &refused):
 		http.Error(w, refused.Message, http.StatusConflict)
 	case errors.As(err, &inv):

@@ -153,3 +153,145 @@ func TestUsersReadsEveryPage(t *testing.T) {
 		t.Errorf("%d pages read, want 3", n)
 	}
 }
+
+// R.C4: a user is made with an address, or none; an update sets it or removes
+// it; Keycloak's refusals of an address are the package's errors: another
+// user's, in a realm that lets no two users have one, and one its user
+// profile's validator does not take.
+func TestRC4AnAddress(t *testing.T) {
+	kc := kctest.New(t)
+	c := client(kc, kc.ClientSecret)
+	ctx := context.Background()
+	kc.Add(kctest.Seed{Username: "anna", FirstName: "Anna", Email: "anna@example.org"})
+
+	t.Run("R.C4 made with an address, or none", func(t *testing.T) {
+		mia, err := c.Create(ctx, keycloak.NewUser{Username: "mia", FirstName: "Mia", Email: "mia@example.org"})
+		if err != nil || kc.User(mia)["email"] != "mia@example.org" {
+			t.Fatalf("made %v: %v", kc.User(mia), err)
+		}
+		leo, err := c.Create(ctx, keycloak.NewUser{Username: "leo", FirstName: "Leo"})
+		if err != nil || kc.User(leo)["email"] != nil {
+			t.Errorf("made without one: %v, %v", kc.User(leo), err)
+		}
+	})
+	t.Run("R.C4 an update sets it, and removes it", func(t *testing.T) {
+		id := kc.UserByName("leo")
+		u, err := c.User(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u.SetEmail("leo@example.org")
+		if err := c.Update(ctx, u); err != nil || kc.User(id)["email"] != "leo@example.org" || kc.User(id)["firstName"] != "Leo" {
+			t.Fatalf("set: %v, %v", kc.User(id), err)
+		}
+		// An empty address removes it: Keycloak keeps no key for it then.
+		u.SetEmail("")
+		if err := c.Update(ctx, u); err != nil || kc.User(id)["email"] != nil {
+			t.Errorf("removed: %v, %v", kc.User(id), err)
+		}
+	})
+	t.Run("R.C4 another user's address", func(t *testing.T) {
+		if _, err := c.Create(ctx, keycloak.NewUser{Username: "kim", FirstName: "Kim", Email: "ANNA@example.org"}); !errors.Is(err, keycloak.ErrEmailConflict) {
+			t.Errorf("made with anna's: %v, want ErrEmailConflict", err)
+		}
+		u, _ := c.User(ctx, kc.UserByName("mia"))
+		u.SetEmail("anna@example.org")
+		if err := c.Update(ctx, u); !errors.Is(err, keycloak.ErrEmailConflict) {
+			t.Errorf("changed to anna's: %v, want ErrEmailConflict", err)
+		}
+		// A username taken stays ErrConflict.
+		if _, err := c.Create(ctx, keycloak.NewUser{Username: "anna", FirstName: "Anna", Email: "other@example.org"}); !errors.Is(err, keycloak.ErrConflict) {
+			t.Errorf("a username taken: %v, want ErrConflict", err)
+		}
+	})
+	t.Run("R.C4 an address the user profile does not take", func(t *testing.T) {
+		var inv *keycloak.Invalid
+		_, err := c.Create(ctx, keycloak.NewUser{Username: "kim", FirstName: "Kim", Email: strings.Repeat("k", 65) + "@example.org"})
+		if !errors.As(err, &inv) || inv.Field != "email" || inv.Code != "error-invalid-email" || len(inv.Params) != 2 || inv.Params[0] != "email" {
+			t.Errorf("a local part of 65 characters: %v", err)
+		}
+		if kc.UserByName("kim") != "" {
+			t.Error("kim was made")
+		}
+	})
+}
+
+// R.C4: Keycloak 26.0.7 answers a write that would take what another user has
+// with a 409 in one of two texts: "User exists with same email" — on a create
+// and a change alike, and on a create that would take both — and "User exists
+// with same username". A 409 in any other words, as two writes at once may be
+// answered, is looked up: the address where another user has it, else the
+// username, else the refusal as it came.
+func TestRC4TheProvidersRefusalOfATakenAddress(t *testing.T) {
+	kc := kctest.New(t)
+	c := client(kc, kc.ClientSecret)
+	ctx := context.Background()
+	kc.Add(kctest.Seed{Username: "anna", FirstName: "Anna", Email: "anna@example.org"})
+	mia, err := c.Create(ctx, keycloak.NewUser{Username: "mia", FirstName: "Mia", Email: "mia@example.org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changeTo := func(address string) error {
+		u, err := c.User(ctx, mia)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u.SetEmail(address)
+		return c.Update(ctx, u)
+	}
+	t.Run("R.C4 Keycloak's own two texts", func(t *testing.T) {
+		for name, w := range map[string]struct {
+			err  error
+			want error
+		}{
+			"an address taken at a create": {errOf(c.Create(ctx, keycloak.NewUser{Username: "kim", FirstName: "Kim", Email: "anna@example.org"})), keycloak.ErrEmailConflict},
+			"a username taken":             {errOf(c.Create(ctx, keycloak.NewUser{Username: "anna", FirstName: "Other", Email: "other@example.org"})), keycloak.ErrConflict},
+			"both taken: the address":      {errOf(c.Create(ctx, keycloak.NewUser{Username: "anna", FirstName: "Other", Email: "anna@example.org"})), keycloak.ErrEmailConflict},
+			"an address taken at a change": {changeTo("anna@example.org"), keycloak.ErrEmailConflict},
+		} {
+			if !errors.Is(w.err, w.want) {
+				t.Errorf("%s: %v, want %v", name, w.err, w.want)
+			}
+		}
+		if kc.UserByName("kim") != "" || kc.User(mia)["email"] != "mia@example.org" {
+			t.Errorf("a refused write was kept: kim %q, mia %v", kc.UserByName("kim"), kc.User(mia)["email"])
+		}
+	})
+	t.Run("R.C4 a 409 in other words is looked up", func(t *testing.T) {
+		const other = "User exists with same username or email"
+		// Another write takes the address, or the username, at the moment
+		// of this one, and Keycloak refuses this one in other words.
+		kc.Race = &kctest.Race{Seed: &kctest.Seed{Username: "lena", FirstName: "Lena", Email: "kim@example.org"}, Text: other}
+		if _, err := c.Create(ctx, keycloak.NewUser{Username: "kim", FirstName: "Kim", Email: "kim@example.org"}); !errors.Is(err, keycloak.ErrEmailConflict) {
+			t.Errorf("the address taken at once: %v, want ErrEmailConflict", err)
+		}
+		kc.Race = &kctest.Race{Seed: &kctest.Seed{Username: "noah", FirstName: "Noah", Email: "noah@example.org"}, Text: other}
+		if _, err := c.Create(ctx, keycloak.NewUser{Username: "noah", FirstName: "Noah K", Email: "noah.k@example.org"}); !errors.Is(err, keycloak.ErrConflict) {
+			t.Errorf("the username taken at once: %v, want ErrConflict", err)
+		}
+		kc.Race = &kctest.Race{Seed: &kctest.Seed{Username: "omar", FirstName: "Omar", Email: "omar@example.org"}, Text: other}
+		if err := changeTo("omar@example.org"); !errors.Is(err, keycloak.ErrEmailConflict) {
+			t.Errorf("a change, the address taken at once: %v, want ErrEmailConflict", err)
+		}
+		// The loser of two creates at once, as Keycloak 26.0.7 answered it in
+		// 256 of 300 tries: no errorMessage at all.
+		kc.Race = &kctest.Race{Seed: &kctest.Seed{Username: "rosa", FirstName: "Rosa", Email: "ida@example.org"},
+			Body: map[string]any{"error": "unknown_error", "error_description": "Duplicate resource error"}}
+		if _, err := c.Create(ctx, keycloak.NewUser{Username: "ida", FirstName: "Ida", Email: "ida@example.org"}); !errors.Is(err, keycloak.ErrEmailConflict) {
+			t.Errorf("Keycloak's own answer to the loser of two creates at once: %v, want ErrEmailConflict", err)
+		}
+		// Neither is another user's: the refusal stays Keycloak's, no taken one.
+		kc.Race = &kctest.Race{Text: "Could not create user"}
+		_, err := c.Create(ctx, keycloak.NewUser{Username: "pia", FirstName: "Pia", Email: "pia@example.org"})
+		var failed *keycloak.Failed
+		if !errors.As(err, &failed) || failed.Status != 409 || errors.Is(err, keycloak.ErrConflict) || errors.Is(err, keycloak.ErrEmailConflict) {
+			t.Errorf("a 409 that names nothing taken: %v", err)
+		}
+		if kc.UserByName("kim") != "" || kc.UserByName("pia") != "" || kc.UserByName("ida") != "" || kc.User(mia)["email"] != "mia@example.org" {
+			t.Error("a refused write was kept")
+		}
+	})
+}
+
+// errOf is the error of a create.
+func errOf(_ string, err error) error { return err }

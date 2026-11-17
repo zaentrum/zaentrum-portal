@@ -21,20 +21,21 @@ authenticating against any OIDC issuer it discovers at runtime.
 ## people
 
 one account per person. an admin adds the people who use the server on the **People**
-page (`/portal/people`), gives a child a rating cap, and sends each an invite link; the
-person opens it — no sign-in, they have nothing to sign in with yet — chooses their own
-password, and signs in on every app with their username. portal-api does it through the
+page (`/portal/people`), gives a child a rating cap, and sends each an invite link — by
+hand, or by mail to the person's address where mail is ready; the person opens it — no
+sign-in, they have nothing to sign in with yet — chooses their own password, and signs in
+on every app with their username. portal-api does it through the
 platform realm's `zaentrum-people` client, which may view, query and manage the realm's
 users and nothing else (the platform chart's realm Job keeps it so). with an external
 identity provider people live there: the page says so and links to it.
 
 | route | who | what |
 |---|---|---|
-| `GET /api/portal/people` | admin | everyone (the platform's own accounts aside): role, rating cap, enabled, created, their newest invite's state — never its token; `mode` bundled, external (`manageUrl`) or unavailable (`note`) |
-| `POST /api/portal/people` | admin | `{username, displayName, role, maxRating}`: an enabled account with no password, `zaentrum-user` (+ `zaentrum-admin`); answers the person and their invite link, once |
-| `PATCH /api/portal/people/{id}` | admin | `displayName`, `role`, `maxRating` (`null`: no cap), `enabled`; switched off, the open invite is revoked |
+| `GET /api/portal/people` | admin | everyone (the platform's own accounts aside): `email` (none for an address at the placeholder domain `zaentrum.local`), role, rating cap, enabled, created, their newest invite's state — never its token; `mode` bundled, external (`manageUrl`) or unavailable (`note`) |
+| `POST /api/portal/people` | admin | `{username, displayName, email, role, maxRating, sendInvite}`: an enabled account with no password and the address, if one is given, `zaentrum-user` (+ `zaentrum-admin`); answers the person and their invite link, once, and with `sendInvite` true `mail`: `sent`, `not-set-up`, `no-address` or `failed`, with `mailError` when it failed |
+| `PATCH /api/portal/people/{id}` | admin | `displayName`, `email` (empty: the address removed), `role`, `maxRating` (`null`: no cap), `enabled`; switched off, the open invite is revoked |
 | `DELETE /api/portal/people/{id}` | admin | chino-api deletes the person's data first, then the account goes, then their invites |
-| `POST /api/portal/people/{id}/invite` | admin | a new link; older ones stop working |
+| `POST /api/portal/people/{id}/invite` | admin | `{send}`, the body optional: a new link, and older ones stop working; with `send` true, `mail` and `mailError` as for `POST /api/portal/people` |
 | `GET /api/portal/invites/{token}` | anyone with the link | `{valid, username, displayName, expiresAt, passwordPolicy}` while it works |
 | `POST /api/portal/invites/{token}` | anyone with the link | `{password}`: set (not temporary), required actions cleared, the invite used — once; answers where to sign in |
 | `DELETE /api/portal/me` | chino-api | the signed-in person's own account (see below) |
@@ -47,6 +48,36 @@ console, not here (the people client could reset its password; the page does not
 rating cap is for a user. a rating cap is the user attribute `max_rating`, an age from 0
 to 21, which the viewers' access tokens carry as the integer claim `max_rating`; no
 claim, no cap.
+
+**addresses.** a person's address is their account's in the identity provider, optional,
+and one address belongs to one account: portal-api refuses one that another account of the
+realm has, the platform's own accounts' too, by looking at the realm before it writes.
+nothing holds the address between that look and the write; there the realm's own refusal
+is the guard, where the realm lets no two users have one address, as the bundled realm
+does. Keycloak's refusal of another user's address or username is read by its words, and a
+refusal in other words by looking again at who has which. an address at `zaentrum.local`,
+the placeholder the realm's import gives the first admin, is no address: it is refused
+where it is typed, the routes answer its account without one, and nothing is mailed to
+it. an account that administers Keycloak gets its address in Keycloak's console.
+
+**the invite by mail.** with `sendInvite` or `send`, portal-api mails the person their
+link while the admin waits, through the mail settings (see mail); the answer still carries
+the link. the link in the mail starts with the public address, `PORTAL_PUBLIC_URL`, alone,
+never the address the admin reached the portal on. `mail` is `not-set-up` while mail is
+not set up, `no-address` for a person without one, and `failed` with `mailError` — the
+reason as a refusal of the mail routes: `mail_not_ready`, `mail_password_missing`, a mail
+server's code, or, where the platform's resource cannot be read, `platform_read_forbidden`
+or `cluster_unexpected_answer` with the cluster's words in `detail`.
+
+| code | status | route | the case |
+|---|---|---|---|
+| `address_invalid` | 400 | `POST`, `PATCH` | `email` is not one address, or is one the identity provider declines |
+| `address_unsupported` | 400 | `POST`, `PATCH` | `email` has accented or non-Latin letters |
+| `address_placeholder` | 400 | `POST`, `PATCH` | `email` is at the placeholder domain `zaentrum.local` |
+| `address_taken` | 409 | `POST`, `PATCH` | another account has the address |
+
+a refusal with a code is as the mail routes' are; the people routes' other refusals are
+their sentence as plain text.
 
 **invites.** a token is 32 random bytes (base64url); portal-api stores only its SHA-256
 (migration 014), with whose account it is for, who made it, until when it holds (7 days,

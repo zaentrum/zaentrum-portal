@@ -14,6 +14,13 @@
 //     an admin of the platform cannot make themselves one of Keycloak's.
 //   - Accounts of the platform's own (the self-test's) are not people and
 //     are neither listed nor changed.
+//   - One address belongs to one account: an address another account of the
+//     realm has — the platform's own too — is refused. The look before a
+//     write finds one already there; the realm's own refusal at the write
+//     holds against another write at the same moment where the realm lets no
+//     two users have one address (the bundled realm's duplicateEmailsAllowed
+//     false). In a realm that lets two users have one, two writes at once can
+//     each find the address free and both keep it.
 //
 // A rating cap is the user attribute max_rating, an age from 0 to 21, which
 // the viewers' access tokens carry as the claim max_rating (no attribute, no
@@ -76,6 +83,8 @@ type Person struct {
 var (
 	ErrNotFound     = errors.New("no such person")
 	ErrUsernameUsed = errors.New("that username is taken")
+	// ErrEmailUsed: another account has the address.
+	ErrEmailUsed = errors.New("another account has that address")
 )
 
 // Refused is a change the rules do not allow, in words for the admin.
@@ -326,10 +335,12 @@ func CheckRating(n int) error {
 
 // ─── changes ─────────────────────────────────────────────────────────────────
 
-// NewPerson is a person to add.
+// NewPerson is a person to add. Email is their address, "" for none, as the
+// caller read it: one address alone.
 type NewPerson struct {
 	Username    string
 	DisplayName string
+	Email       string
 	Role        string
 	MaxRating   *int
 }
@@ -361,11 +372,18 @@ func (s *Service) Create(ctx context.Context, np NewPerson) (Person, error) {
 	if slices.Contains(s.hidden, username) {
 		return Person{}, ErrUsernameUsed
 	}
-	id, err := s.kc.Create(ctx, keycloak.NewUser{Username: username, FirstName: name, Attributes: attrs})
-	if errors.Is(err, keycloak.ErrConflict) {
-		return Person{}, ErrUsernameUsed
+	if np.Email != "" {
+		if err := s.addressFree(ctx, np.Email, ""); err != nil {
+			return Person{}, err
+		}
 	}
-	if err != nil {
+	id, err := s.kc.Create(ctx, keycloak.NewUser{Username: username, FirstName: name, Email: np.Email, Attributes: attrs})
+	switch {
+	case errors.Is(err, keycloak.ErrConflict):
+		return Person{}, ErrUsernameUsed
+	case errors.Is(err, keycloak.ErrEmailConflict):
+		return Person{}, ErrEmailUsed
+	case err != nil:
 		return Person{}, err
 	}
 	// A person half made — no role, or a cap Keycloak did not keep — is not
@@ -441,10 +459,31 @@ func adminCapped() error {
 	return invalid("An admin can change every rating cap, their own too: a cap is for a user.")
 }
 
+// addressFree refuses an address that an account of the realm other than
+// except has, compared without regard to case, as Keycloak keeps an address
+// in lower case. It is asked in every realm, one that lets two users have one
+// address too. It looks at the realm as it is: nothing holds the address
+// between this look and the write, where the realm's own refusal — in a realm
+// that lets no two users have one — is the guard (ErrEmailUsed either way).
+func (s *Service) addressFree(ctx context.Context, address, except string) error {
+	users, err := s.kc.Users(ctx)
+	if err != nil {
+		return err
+	}
+	for _, u := range users {
+		if u.ID() != except && strings.EqualFold(strings.TrimSpace(u.Email()), address) {
+			return ErrEmailUsed
+		}
+	}
+	return nil
+}
+
 // Change is what a PATCH changes; nil leaves it as it is. ClearRating removes
-// the cap.
+// the cap. Email is an address as the caller read it — one address alone —
+// and "" removes the person's.
 type Change struct {
 	DisplayName *string
+	Email       *string
 	Role        *string
 	MaxRating   *int
 	ClearRating bool
@@ -478,6 +517,13 @@ func (s *Service) Update(ctx context.Context, caller, id string, ch Change) (Per
 	if ch.Enabled != nil {
 		enabled = *ch.Enabled
 	}
+	email := p.Email
+	if ch.Email != nil {
+		email = *ch.Email
+	}
+	// Keycloak keeps an address in lower case: the same one in other letters
+	// changes nothing.
+	emailChanged := !strings.EqualFold(email, p.Email)
 	rating := p.MaxRating
 	switch {
 	case ch.ClearRating:
@@ -499,6 +545,11 @@ func (s *Service) Update(ctx context.Context, caller, id string, ch Change) (Per
 			return Person{}, err
 		}
 	}
+	if emailChanged && email != "" {
+		if err := s.addressFree(ctx, email, id); err != nil {
+			return Person{}, err
+		}
+	}
 
 	u := a.user
 	if name != p.DisplayName {
@@ -507,6 +558,9 @@ func (s *Service) Update(ctx context.Context, caller, id string, ch Change) (Per
 	if enabled != p.Enabled {
 		u.SetEnabled(enabled)
 	}
+	if emailChanged {
+		u.SetEmail(email)
+	}
 	if !sameRating(rating, p.MaxRating) {
 		v := ""
 		if rating != nil {
@@ -514,8 +568,13 @@ func (s *Service) Update(ctx context.Context, caller, id string, ch Change) (Per
 		}
 		u.SetAttribute(RatingAttribute, v)
 	}
-	if name != p.DisplayName || enabled != p.Enabled || !sameRating(rating, p.MaxRating) {
-		if err := s.kc.Update(ctx, u); err != nil {
+	if name != p.DisplayName || enabled != p.Enabled || emailChanged || !sameRating(rating, p.MaxRating) {
+		err := s.kc.Update(ctx, u)
+		// An update never changes the username: a conflict is the address.
+		if emailChanged && (errors.Is(err, keycloak.ErrEmailConflict) || errors.Is(err, keycloak.ErrConflict)) {
+			return Person{}, ErrEmailUsed
+		}
+		if err != nil {
 			return Person{}, err
 		}
 	}

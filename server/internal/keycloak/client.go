@@ -47,6 +47,22 @@ var (
 	ErrNotFound = errors.New("no such user")
 	// ErrConflict: a user of that username exists.
 	ErrConflict = errors.New("a user of that username exists")
+	// ErrEmailConflict: another user has that address: Keycloak refused the
+	// write for it, in a realm that lets no two users have one
+	// (duplicateEmailsAllowed false), or a write it refused in other words
+	// met a user who has it.
+	ErrEmailConflict = errors.New("a user of that address exists")
+)
+
+// What Keycloak answers a write that would give a user what another user has,
+// exactly: an address, in a realm that lets no two users have one — on a
+// create and a change alike, and on a create that would take both — or a
+// username, on a create (Keycloak 26.0.7). Two writes at once can be refused
+// on another path, in other words: a 409 in any other words is looked up
+// (taken).
+const (
+	emailExists    = "User exists with same email"
+	usernameExists = "User exists with same username"
 )
 
 // Invalid is Keycloak declining a value: a user profile attribute it does not
@@ -192,15 +208,20 @@ func (u *User) SetName(name string) {
 // SetEnabled lets the user sign in, or not.
 func (u *User) SetEnabled(on bool) { u.rep["enabled"] = on }
 
+// SetEmail sets the user's address, or removes it for "".
+func (u *User) SetEmail(address string) { u.rep["email"] = address }
+
 // ClearRequiredActions drops whatever the user would be asked to do at their
 // next sign-in.
 func (u *User) ClearRequiredActions() { u.rep["requiredActions"] = []any{} }
 
 // NewUser is a user to make: enabled, with no password and nothing to do at
-// the first sign-in. Attributes holds one value each.
+// the first sign-in. Email is the user's address, "" for none. Attributes
+// holds one value each.
 type NewUser struct {
 	Username   string
 	FirstName  string
+	Email      string
 	Attributes map[string]string
 }
 
@@ -246,7 +267,13 @@ func (c *Client) Create(ctx context.Context, nu NewUser) (string, error) {
 		"username": nu.Username, "enabled": true, "firstName": nu.FirstName,
 		"attributes": attrs, "requiredActions": []string{},
 	}
+	if nu.Email != "" {
+		rep["email"] = nu.Email
+	}
 	loc, err := c.callLocation(ctx, http.MethodPost, "/users", rep)
+	if conflict(err) {
+		return "", c.taken(ctx, err, "", nu.Username, nu.Email)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -259,7 +286,45 @@ func (c *Client) Create(ctx context.Context, nu NewUser) (string, error) {
 
 // Update writes u back, whole.
 func (c *Client) Update(ctx context.Context, u *User) error {
-	return c.call(ctx, http.MethodPut, "/users/"+url.PathEscape(u.ID()), u.rep, nil)
+	err := c.call(ctx, http.MethodPut, "/users/"+url.PathEscape(u.ID()), u.rep, nil)
+	if conflict(err) {
+		return c.taken(ctx, err, u.ID(), u.Username(), u.Email())
+	}
+	return err
+}
+
+// conflict: Keycloak refused a write with a 409 whose words name neither the
+// address nor the username.
+func conflict(err error) bool {
+	var f *Failed
+	return errors.As(err, &f) && f.Status == http.StatusConflict
+}
+
+// taken looks up what a write refused with a 409 in other words would have
+// given the user id ("" for one being made) and another user has: the address
+// — ErrEmailConflict, as Keycloak's own checks answer when both are taken —
+// else the username, ErrConflict. The refusal as it came where no other user
+// has either, and the look-up's own failure where it fails.
+func (c *Client) taken(ctx context.Context, refused error, id, username, email string) error {
+	users, err := c.Users(ctx)
+	if err != nil {
+		return err
+	}
+	email = strings.TrimSpace(email)
+	usernameTaken := false
+	for _, u := range users {
+		if id != "" && u.ID() == id {
+			continue
+		}
+		if email != "" && strings.EqualFold(strings.TrimSpace(u.Email()), email) {
+			return ErrEmailConflict
+		}
+		usernameTaken = usernameTaken || username != "" && strings.EqualFold(u.Username(), username)
+	}
+	if usernameTaken {
+		return ErrConflict
+	}
+	return refused
 }
 
 // Delete deletes a user. One that is gone already is ErrNotFound.
@@ -466,7 +531,12 @@ func answerError(status int, raw []byte) error {
 	case http.StatusNotFound:
 		return ErrNotFound
 	case http.StatusConflict:
-		return ErrConflict
+		switch e.ErrorMessage {
+		case emailExists:
+			return ErrEmailConflict
+		case usernameExists:
+			return ErrConflict
+		}
 	case http.StatusBadRequest:
 		switch {
 		case len(e.Errors) > 0:

@@ -254,4 +254,124 @@ func TestCreate(t *testing.T) {
 	}
 }
 
+// R.C4: a person's address is their account's, optional, and one address
+// belongs to one account: one that another account of the realm has — the
+// platform's own too — is refused, in a realm that lets no two users have one
+// and in one that does. An account that administers Keycloak keeps its
+// address, as everything else of it, for Keycloak's admin console.
+func TestRC4Addresses(t *testing.T) {
+	s, kc := service(t)
+	ctx := context.Background()
+	owner := kc.Add(kctest.Seed{ID: "user-owner", Username: "owner", FirstName: "Owner", Email: "owner@example.org",
+		Roles: []string{kctest.AdminRole, kctest.UserRole}, RealmManagement: []string{"realm-admin"}})
+	kc.Add(kctest.Seed{ID: "user-lena", Username: "lena", FirstName: "Lena", Roles: []string{kctest.AdminRole, kctest.UserRole}})
+	kc.Add(kctest.Seed{Username: "zaentrum-verify", FirstName: "Zaentrum", LastName: "Verification", Email: "verify@example.org", Roles: []string{kctest.UserRole}})
+
+	mia, err := s.Create(ctx, NewPerson{Username: "mia", DisplayName: "Mia", Email: "Mia@Example.org", Role: RoleUser})
+	if err != nil || mia.Email != "mia@example.org" {
+		t.Fatalf("made with an address: %+v, %v", mia, err)
+	}
+	leo, err := s.Create(ctx, NewPerson{Username: "leo", DisplayName: "Leo", Role: RoleUser})
+	if err != nil || leo.Email != "" || kc.User(leo.ID)["email"] != nil {
+		t.Fatalf("made without one: %+v, %v", leo, err)
+	}
+
+	t.Run("R.C4 another account's address, also where the realm would take it", func(t *testing.T) {
+		for _, duplicates := range []bool{false, true} {
+			kc.DuplicateEmails = duplicates
+			for _, taken := range []string{"mia@example.org", "MIA@example.org", "owner@example.org", "verify@example.org"} {
+				if _, err := s.Create(ctx, NewPerson{Username: "kim", DisplayName: "Kim", Email: taken, Role: RoleUser}); !errors.Is(err, ErrEmailUsed) {
+					t.Errorf("duplicates %v: made with %s: %v", duplicates, taken, err)
+				}
+				if _, err := s.Update(ctx, "user-lena", leo.ID, Change{Email: ptr(taken)}); !errors.Is(err, ErrEmailUsed) {
+					t.Errorf("duplicates %v: leo changed to %s: %v", duplicates, taken, err)
+				}
+			}
+		}
+		kc.DuplicateEmails = false
+		if kc.UserByName("kim") != "" || kc.User(leo.ID)["email"] != nil {
+			t.Error("a refused address was kept")
+		}
+	})
+	t.Run("R.C4 changed, kept in other letters, removed", func(t *testing.T) {
+		p, err := s.Update(ctx, "user-lena", mia.ID, Change{Email: ptr("mia.k@example.org")})
+		if err != nil || p.Email != "mia.k@example.org" || p.DisplayName != "Mia" {
+			t.Fatalf("changed: %+v, %v", p, err)
+		}
+		puts := len(kc.CallsMatching("PUT /users/" + mia.ID))
+		if p, err := s.Update(ctx, "user-lena", mia.ID, Change{Email: ptr("Mia.K@example.org")}); err != nil || p.Email != "mia.k@example.org" {
+			t.Errorf("the same in other letters: %+v, %v", p, err)
+		}
+		if n := len(kc.CallsMatching("PUT /users/" + mia.ID)); n != puts {
+			t.Errorf("the same address in other letters was written again: %d writes", n-puts)
+		}
+		// Its own address is no other account's.
+		if _, err := s.Update(ctx, "user-lena", mia.ID, Change{Email: ptr("mia.k@example.org"), DisplayName: ptr("Mia K")}); err != nil {
+			t.Errorf("renamed with her own address: %v", err)
+		}
+		if p, err := s.Update(ctx, "user-lena", mia.ID, Change{Email: ptr("")}); err != nil || p.Email != "" || kc.User(mia.ID)["email"] != nil {
+			t.Errorf("removed: %+v, %v", p, err)
+		}
+		// A change that names no address leaves it.
+		if _, err := s.Update(ctx, "user-lena", leo.ID, Change{Email: ptr("leo@example.org")}); err != nil {
+			t.Fatal(err)
+		}
+		if p, err := s.Update(ctx, "user-lena", leo.ID, Change{DisplayName: ptr("Leo K")}); err != nil || p.Email != "leo@example.org" {
+			t.Errorf("renamed: %+v, %v", p, err)
+		}
+	})
+	t.Run("R.C4 a Keycloak administrator's address is changed in Keycloak", func(t *testing.T) {
+		var refused *Refused
+		for _, address := range []string{"new@example.org", ""} {
+			if _, err := s.Update(ctx, "user-lena", owner, Change{Email: ptr(address)}); !errors.As(err, &refused) || !strings.Contains(refused.Message, "Keycloak") {
+				t.Errorf("the owner's address to %q: %v", address, err)
+			}
+		}
+		if kc.User(owner)["email"] != "owner@example.org" {
+			t.Errorf("the owner's address: %v", kc.User(owner)["email"])
+		}
+	})
+}
+
 func ptr[T any](v T) *T { return &v }
+
+// R.C4: nothing holds an address between the look at the realm and the
+// write: where the listing finds the address free and another write takes it
+// at that moment, the realm's own refusal at the write refuses adding a
+// person and changing one, as another account's address.
+func TestRC4TheRealmRefusesAtTheWrite(t *testing.T) {
+	s, kc := service(t)
+	ctx := context.Background()
+	kc.Add(kctest.Seed{ID: "user-lena", Username: "lena", FirstName: "Lena", Roles: []string{kctest.AdminRole, kctest.UserRole}})
+	leo, err := s.Create(ctx, NewPerson{Username: "leo", DisplayName: "Leo", Role: RoleUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	racer := func(username, address string) *kctest.Race {
+		return &kctest.Race{Seed: &kctest.Seed{Username: username, FirstName: "Other", Email: address, Roles: []string{kctest.UserRole}}}
+	}
+	kc.Race = racer("other", "mia@example.org")
+	if _, err := s.Create(ctx, NewPerson{Username: "mia", DisplayName: "Mia", Email: "mia@example.org", Role: RoleUser}); !errors.Is(err, ErrEmailUsed) {
+		t.Errorf("adding mia: %v, want ErrEmailUsed", err)
+	}
+	kc.Race = racer("another", "leo@example.org")
+	if _, err := s.Update(ctx, "user-lena", leo.ID, Change{Email: ptr("leo@example.org")}); !errors.Is(err, ErrEmailUsed) {
+		t.Errorf("changing leo: %v, want ErrEmailUsed", err)
+	}
+	if kc.UserByName("mia") != "" || kc.User(leo.ID)["email"] != nil {
+		t.Errorf("a refused address was kept: mia %q, leo %v", kc.UserByName("mia"), kc.User(leo.ID)["email"])
+	}
+	// The listing right before each write found the address free.
+	calls := kc.CallsMatching("")
+	for _, write := range []string{"POST /users", "PUT /users/" + leo.ID} {
+		last := -1
+		for i, c := range calls {
+			if c == write {
+				last = i
+			}
+		}
+		if last < 1 || calls[last-1] != "GET /users" {
+			t.Errorf("%s did not follow a listing: %v", write, calls)
+		}
+	}
+}

@@ -10,7 +10,16 @@
 // user's profile with what it sends; an attribute the user profile does not
 // declare is dropped without a word; the rating cap is an integer from 0 to
 // 21; the password policy refuses a short password; usernames are unique and
-// lower case; the realm's default roles come with every new user.
+// lower case; the realm's default roles come with every new user; an address
+// is kept in lower case, refused by the user profile's email validator when it
+// is none, and refused when another user has it, as a realm that lets no two
+// users have one address refuses it (the bundled realm's
+// duplicateEmailsAllowed false); an address written empty is gone, its key
+// with it. Its answers are Keycloak 26.0.7's, in their words: a declined
+// address is 400 error-invalid-email; another user's address is 409 "User
+// exists with same email", on a create and a change, and on a create that
+// would take another user's username too; another user's username is 409
+// "User exists with same username".
 package kctest
 
 import (
@@ -53,8 +62,16 @@ type Server struct {
 	// asks for digits(n) besides, a rule portal-api does not know about.
 	MinPassword int
 	ExtraDigits int
+	// DuplicateEmails: the realm lets two users have one address
+	// (duplicateEmailsAllowed). Off, as the bundled realm has it, a user made
+	// or changed with another user's address is refused.
+	DuplicateEmails bool
 	// Fail answers every admin call with this status, 0 for none.
 	Fail int
+	// Race is another write that lands at the moment the next create or
+	// change of a user reaches the fake: the next such write takes it, after
+	// every listing before it.
+	Race *Race
 	// Calls is every admin call, "METHOD /path" (the realm's prefix cut).
 	Calls []string
 
@@ -99,6 +116,43 @@ func newID() string {
 
 // ─── seeding and reading, for tests ──────────────────────────────────────────
 
+// Race is a write that lands at the same moment as another. Seed is the
+// account it makes, added to the realm before the other write is checked, so
+// that the write meets it where a listing before did not; nil for none. Text,
+// where it is set, is the 409 the other write is refused with at once, in
+// words of the path two writes at once take, in place of the fake's own
+// checks. Body, where it is set, is that 409's whole body instead, as
+// Keycloak 26.0.7 answers the loser of two creates at once most often:
+// {"error":"unknown_error","error_description":"Duplicate resource error"},
+// with no errorMessage at all.
+type Race struct {
+	Seed *Seed
+	Text string
+	Body map[string]any
+}
+
+// race runs the Race of a write, if one waits: false when it answered the
+// write.
+func (s *Server) race(w http.ResponseWriter) bool {
+	r := s.Race
+	if r == nil {
+		return true
+	}
+	s.Race = nil
+	if r.Seed != nil {
+		s.add(*r.Seed)
+	}
+	switch {
+	case r.Body != nil:
+		writeJSON(w, http.StatusConflict, r.Body)
+		return false
+	case r.Text != "":
+		writeJSON(w, http.StatusConflict, map[string]any{"errorMessage": r.Text})
+		return false
+	}
+	return true
+}
+
 // Seed is an account the realm already holds.
 type Seed struct {
 	ID, Username, FirstName, LastName, Email string
@@ -114,13 +168,20 @@ type Seed struct {
 func (s *Server) Add(u Seed) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.add(u)
+}
+
+func (s *Server) add(u Seed) string {
 	id := u.ID
 	if id == "" {
 		id = newID()
 	}
 	rep := map[string]any{
 		"id": id, "username": u.Username, "enabled": !u.Disabled, "firstName": u.FirstName, "lastName": u.LastName,
-		"email": u.Email, "emailVerified": u.Email != "", "attributes": map[string]any{}, "requiredActions": []any{},
+		"emailVerified": u.Email != "", "attributes": map[string]any{}, "requiredActions": []any{},
+	}
+	if u.Email != "" {
+		rep["email"] = u.Email
 	}
 	if !u.Imported {
 		rep["createdTimestamp"] = float64(time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC).UnixMilli())
@@ -318,6 +379,15 @@ func (s *Server) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unable to read contents from stream"})
 			return
 		}
+		if !s.race(w) {
+			return
+		}
+		// Another user's address is answered before another user's username,
+		// as Keycloak answers a create that would take both.
+		if address, _ := rep["email"].(string); !s.DuplicateEmails && s.emailTaken(address, "") {
+			writeJSON(w, http.StatusConflict, map[string]any{"errorMessage": "User exists with same email"})
+			return
+		}
 		name := strings.ToLower(fmt.Sprint(rep["username"]))
 		for _, u := range s.users {
 			if u["username"] == name {
@@ -346,6 +416,9 @@ func (s *Server) apply(w http.ResponseWriter, stored, rep map[string]any) bool {
 	for _, k := range []string{"firstName", "lastName", "email"} {
 		v, _ := rep[k].(string)
 		stored[k] = v
+	}
+	if !s.email(w, stored) {
+		return false
 	}
 	if v, ok := rep["enabled"].(bool); ok {
 		stored["enabled"] = v
@@ -384,6 +457,46 @@ func (s *Server) apply(w http.ResponseWriter, stored, rep map[string]any) bool {
 	return true
 }
 
+// email checks the address apply wrote, as Keycloak 26 does with the bundled
+// realm: kept in lower case; gone, its key with it, where it is empty;
+// refused by the user profile's email validator when it is not one @ between
+// a local part of 1 to 64 characters and a domain, neither ending in a dot;
+// and, unless DuplicateEmails, refused when another user has it.
+func (s *Server) email(w http.ResponseWriter, stored map[string]any) bool {
+	address, _ := stored["email"].(string)
+	if strings.TrimSpace(address) == "" {
+		delete(stored, "email")
+		return true
+	}
+	typed := address
+	address = strings.ToLower(address)
+	stored["email"] = address
+	local, domain, _ := strings.Cut(address, "@")
+	if local == "" || len(local) > 64 || domain == "" || strings.Contains(domain, "@") ||
+		strings.HasSuffix(local, ".") || strings.HasSuffix(domain, ".") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"field": "email", "errorMessage": "error-invalid-email", "params": []any{"email", typed}})
+		return false
+	}
+	if !s.DuplicateEmails && s.emailTaken(address, fmt.Sprint(stored["id"])) {
+		writeJSON(w, http.StatusConflict, map[string]any{"errorMessage": "User exists with same email"})
+		return false
+	}
+	return true
+}
+
+// emailTaken: a user other than except has the address.
+func (s *Server) emailTaken(address, except string) bool {
+	if strings.TrimSpace(address) == "" {
+		return false
+	}
+	for id, u := range s.users {
+		if other, _ := u["email"].(string); id != except && strings.EqualFold(other, strings.TrimSpace(address)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) user(w http.ResponseWriter, r *http.Request, id string, rest []string) {
 	stored, ok := s.users[id]
 	if !ok {
@@ -406,6 +519,9 @@ func (s *Server) user(w http.ResponseWriter, r *http.Request, id string, rest []
 		}
 		if u, _ := rep["username"].(string); u != "" && u != stored["username"] {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"errorMessage": "error-user-attribute-read-only", "field": "username"})
+			return
+		}
+		if !s.race(w) {
 			return
 		}
 		next := map[string]any{"id": id, "username": stored["username"], "enabled": stored["enabled"], "requiredActions": stored["requiredActions"]}
