@@ -33,8 +33,8 @@ group badge repeated on all 14 platform rows (redundant with the section
 heading it sat under, and it made the service column ragged), and three
 independently auto-sized tables whose columns did not line up.
 
-`mock-server.mjs` mirrors live `zaentrum-beta` — 14 platform services and
-the ImagePullBackOff state the estate was actually in — plus one installed
+`mock-server.mjs` answers as a running platform does — 14 platform services,
+some of them in ImagePullBackOff — plus one installed
 addon, `example`, made of three containers (one crash-looping, one not
 deployed), addon workloads no installed addon declares, and one deliberately
 unclaimed workload, so every section of the operator console renders. The

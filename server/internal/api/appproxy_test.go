@@ -28,8 +28,8 @@ func TestEmbedTargetAcceptsInClusterAddresses(t *testing.T) {
 	for _, raw := range []string{
 		"http://example",
 		"http://example:8080",
-		"http://example.zaentrum-beta.svc",
-		"http://example.zaentrum-beta.svc.cluster.local:8080",
+		"http://example.zaentrum.svc",
+		"http://example.zaentrum.svc.cluster.local:8080",
 		"http://localhost:8080",
 	} {
 		if _, err := embedTarget(raw); err != nil {

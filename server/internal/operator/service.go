@@ -741,8 +741,8 @@ func addonLabels(d k8s.Deployment) (addon, component string) {
 // `app.kubernetes.io/part-of: <namespace>-addons`.
 //
 // The part-of suffix is matched rather than the full value because the prefix
-// is the environment name — beta stamps `zaentrum-beta-addons`, and hardcoding
-// that would silently classify every addon as "other" in any other install.
+// is the namespace — `media-addons` in a namespace named media — and hardcoding
+// one would silently classify every addon as "other" in any other install.
 func groupOf(d k8s.Deployment) string {
 	if ownedByZaentrum(d) {
 		return "platform"

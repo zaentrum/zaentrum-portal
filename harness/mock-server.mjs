@@ -1,5 +1,5 @@
 // Serves the portal-api surface the operator and settings consoles read,
-// shaped like live zaentrum-beta (14 platform services) plus one installed
+// shaped like a running platform (14 platform services) plus one installed
 // addon made of three containers, a few addon workloads no installed addon
 // declares, and one deliberately unclaimed workload so every group renders.
 import { randomBytes } from 'node:crypto';
