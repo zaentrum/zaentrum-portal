@@ -202,7 +202,7 @@ the same on every page is shared.
 | `mail_write_refused` | 422 | `PUT`, `DELETE` | the cluster refuses the settings, a field of `spec.mail` its schema does not know among them |
 | `cluster_unexpected_answer` | 502 | all four | any other answer of the cluster |
 | `address_invalid` | 400 | test | `to` is no address |
-| `address_placeholder` | 400 | test | `to` is a placeholder, at `zaentrum.local` |
+| `address_placeholder` | 400 | `PUT`, test | a placeholder address, at `zaentrum.local`: the sender, a further address, `to` |
 | `mail_not_set_up` | 409 | test | mail is not set up |
 | `mail_not_ready` | 409 | test | set up, and not ready yet: the settings are being applied, or portal-api has no full public address |
 | `mail_password_missing` | 409 | test | the operator says the password's Secret is missing, or portal-api runs with a user and no password |
@@ -216,14 +216,134 @@ the same on every page is shared.
 | `mail_server_answered` | 502 | test | the server refused the mail in its own words, in `values.words` |
 
 the five with the cluster in them carry `detail`. "test" is `POST /api/portal/mail/test`. a
-field of the wrong kind is refused with its field's code, never in the decoder's words; a
-body that is no JSON object, or holds a field the route does not take, gets the shared
-answer, `invalid json: …`, as on every route.
+field of the wrong kind is refused with its field's code. a body that is no JSON object is
+answered `400` with the line `the body is not an object`, and one that holds a field the
+route does not take with `the field {name} is not one this route takes`: a plain line of
+detail with no code, never in the decoder's words, as on every route that reads its body
+the same way — all of portal-api's but the chart addons' two. on a route without codes of
+its own, a field of the wrong kind is `the field {name} has a value of the wrong kind`, and
+a body larger than the route reads `the body is larger than this route takes`.
 
 configuration: `PORTAL_MAIL_HOST`, `PORTAL_MAIL_PORT`, `PORTAL_MAIL_ENCRYPTION`,
 `PORTAL_MAIL_FROM`, `PORTAL_MAIL_FROM_NAME`, `PORTAL_MAIL_ALERTS_TO` (comma-separated),
 `PORTAL_MAIL_USERNAME`, `PORTAL_MAIL_PASSWORD`, `PORTAL_MAIL_SECRET` (the name of the
 password's Secret) and `PORTAL_PUBLIC_URL`. the operator sets them from `spec.mail`.
+
+## alerts
+
+portal-api reads the status of the platform's resource every 60 seconds and raises five
+alerts for the admins: a part that is not ready, a volume that is almost full, the
+platform's certificate that ends soon, no good backup, and an update that failed. it keeps
+them in a table of its own (migration 016) until 90 days after they ended, swept once an
+hour a batch at a time, and which admin has seen which in another. one alert of a kind is
+active for one subject; where portal-api runs more than once, the write that starts an
+alert, and the one that ends it, decide which of them mails it. a check writes every start
+and every end before it sends a mail, so a mail server that does not answer delays no
+alert; a check has 50 seconds, and each call of the portal's database in it 10; a check
+that fails is said in the log, and the next one runs. while the phase is `Restoring`, no
+alert about a part or about the update starts or ends. a resource younger than 1 hour
+raises no alert, and a platform the operator does not run raises none. the updater's
+report of a one-machine install is not read yet: that is I.C17's.
+
+an alert is mailed when it starts and when it ends, plain text to each address: every
+admin whose account is enabled and has an address, and each address of
+`spec.mail.alertsTo` that is no placeholder, once each — the end to the addresses the start
+reached. one start mail is sent for an alert about one subject in 24 hours, counted from
+when the mail server first took the mail of the last start for an address. a mail the
+server does not take, one held back while mail is set up and not ready, and one whose
+mail settings could not be read, with the cluster's refusal as its reason, is tried again
+after 5 minutes, three times in all for each address, by whichever portal-api runs then:
+mail that is set up and not ready — the settings still being applied, the password
+missing — holds a mail back at each try, and after the third it could not be sent. an
+address the start mail has not reached when the alert ends gets neither mail: no try of
+the start mail is made after the end, and a portal-api that carries it on learns of an
+end written by another with its next write. nothing is mailed while mail is not set up,
+while `spec.alerts.mail` is false, or where nobody has an address: an alert that starts
+then is never mailed, not later either, and neither is its end, and a mail that meets one
+of them at a try again goes no further.
+
+an address gets a start mail once and an end mail once, however many portal-apis run: one
+holds an alert's mail at a time, for 2 minutes by the database's clock, right before it
+goes; each write of what became of it names its holder, and is made after each address,
+which keeps the hold. a portal-api told to stop finishes the address it is on, writes what
+became of it, and lets the rest go to whichever portal-api runs next, at once; it is given
+25 of the 30 seconds a pod has to stop. the addresses are kept until the alert's end mail
+is done, and then their number, how many took it, and one reason with no address in it.
+
+the thresholds are `spec.alerts`: `partNotReadyMinutes` (default 10, 1 to 1440),
+`volumeFullPercent` (90, 50 to 99), `certificateDays` (14, 1 to 90) and `backupAgeDays` (2,
+1 to 30), with `mail` (true). the resource holds no defaults: portal-api applies them.
+
+| route | who | what |
+|---|---|---|
+| `GET /api/portal/alerts` | admin | `{available, alerts, more, unseen, watched}`: every active alert, the newest first, and then the newest 500 that ended in the last 90 days, the newest end first; `more`, true, where older ones that ended are kept; `unseen`, how many of those the bell shows — the active ones and those that ended within 7 days — the admin has not seen since they last changed; `watched`, the five. where the operator does not run the platform, `{available: false, reason: "no-operator"}` |
+| `PATCH /api/portal/alerts/settings` | admin | any of `partNotReadyMinutes`, `volumeFullPercent`, `certificateDays`, `backupAgeDays` and `mail` into `spec.alerts`, the ranges checked first, written with strict field validation (`fieldValidation=Strict`); answers `{generation}` |
+| `POST /api/portal/alerts/{id}/read` | admin | the alert seen by the admin who asks: `{unseen}`; `404` for one there is not |
+| `POST /api/portal/alerts/read-all` | admin | every alert the admin who asks had not seen since it last changed, seen by them, and no other: `{seen, unseen}`, `seen` how many |
+
+an alert is `{id, kind, about, title, text, values, link, startedAt, endedAt, mail,
+seen}`. `kind` is `part-not-ready`, `volume-full`, `certificate-ends`, `no-good-backup` or
+`update-failed`; `about` the part's name, the disk's first volume as the status names it
+(`media`, `postgres-data`, `backups` or `kafka`), `certificate`, `backups` or `update`;
+`link` a path of the portal; `values` what filled in the title and the text. a disk is the
+volumes that report one filesystem id at a check, and its alert is about its first volume
+in the order library, databases, backups, event broker: the id only says at each check
+which volumes are one disk, so an id that changes neither ends an alert nor starts one; a
+volume that reports another filesystem id and another size than the alert's volume is on
+another disk from that check on, and raises its own alert by its own figures (one of
+exactly the same size is taken for a changed id until the alert ends). figures older than
+2 hours are named with when they were measured (`values.measuredAt`). a
+part whose own rollout has given up (`status.components[].stalled`) raises no alert of its
+own: an update failed names it. {minutes} is the setting as it was when the alert started, and a part starts one once it
+is not ready for longer than that.
+a percentage is compared in whole numbers, used × 100 against the setting × size. `mail`
+is `{state, addresses, taken, error}`: `state` is `sent`, `sending`, `not-set-up`, `off`,
+`no-address`, `admins-unread` (the admins could not be read in three tries, and there is
+no further address), `sent-recently`, `failed` or `ended-before-mail` (the alert ended before its
+start mail got a single try, and neither mail went), of the start mail while the alert is
+active and of the end mail once it ended (of the start mail where no end mail was due);
+`addresses` how many it is for; `taken`, where some took it and others did not or still
+wait, how many did — once the server took it for an address it is sent, whatever changes
+afterwards; `error`, with `failed` and always there with it, the reason as a refusal: the
+test mail's codes, `mail_not_ready`, `mail_password_missing`, and, where the mail settings
+could not be read, `platform_read_forbidden` or `cluster_unexpected_answer`; where a mail
+went no further before it was tried for some addresses, `mail_not_set_up` (“Mail is not
+set up.”) or `alerts_mail_off` (“Alert mail is off.”) for them. once the end mail is done,
+a reason that named an address is `mail_recipient_refused` with no values and the sentence
+“The mail server refused an address.”. `watched` is each of the five as `{kind, setting,
+least, most, now}`, `now` a `{state, values}`: `parts-ready` and `parts-not-ready` (`n`),
+`fullest` (`n`), `not-measured`, `certificate-ends` (`date`), `no-certificate`,
+`certificate-unreadable`, `newest-backup` (`date`), `no-backup-yet`, `backups-off`,
+`databases-external`, `databases-without-volume`, `version-runs` (`version`), and under an
+operator older than a fact `update-operator-parts`, `update-operator-volumes` and
+`update-operator-certificate`, and `parts-unlearned` where it could not be learned whether
+the operator says since when a part is not ready. a part the status says it of answers
+that; else it is asked of the cluster in a dry run (`dryRun=All`) that writes nothing: an
+operator whose schema has alert settings says it, and a dry run that is refused or fails
+for another reason than the schema learns nothing.
+
+| code | status | route | the case |
+|---|---|---|---|
+| `alerts_threshold_out_of_range` | 400 | `PATCH` | a threshold outside its range, or no whole number: `values.field`, `values.least`, `values.most` |
+| `alerts_not_run_by_operator` | 409 | `PATCH` | the platform has no resource |
+| `alerts_settings_unknown` | 503 | `PATCH` | the cluster does not know `spec.alerts`, as under an operator from before alert settings: nothing is written |
+| `platform_read_forbidden` | 503 | `GET`, `PATCH` | the cluster does not let portal-api read the resource |
+| `alerts_write_forbidden` | 503 | `PATCH` | the cluster does not let portal-api change it |
+| `alerts_write_refused` | 422 | `PATCH` | the cluster refuses the settings |
+| `cluster_unexpected_answer` | 502 | `GET`, `PATCH` | any other answer of the cluster |
+| `alerts_mail_off` | 200, in `mail.error` | `GET` | alert mail was switched off before a mail was tried for some of its addresses: “Alert mail is off.” |
+
+the five with the cluster in them carry `detail`. `mail` that is not true or false, a body
+that names none of the five, one that is no JSON object (`the body is not an object`) or
+holds a field the route does not take (`the field {name} is not one this route takes`):
+`400` with a line of detail and no code, as on the mail routes.
+
+portal-api's log says that an alert started or ended, `alerts: {kind} about {about}
+started`, where {about} is the alert's subject: the part's name, the disk's first volume
+(`media`, `postgres-data`, `backups` or `kafka`), `certificate`, `backups` or `update`; that
+a mail of an alert was sent, refused or given up; and what of the portal's database or the
+cluster failed. no line holds an address, a title or a text, and a control character in a
+value from the status, a line break among them, is written as a space.
 
 ## develop
 
