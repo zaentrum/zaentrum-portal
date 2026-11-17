@@ -90,7 +90,8 @@ var (
 	refuseAddressLetters = refusal{Error: "address_unsupported", Message: "Addresses with accented or non-Latin letters are not supported."}
 
 	// The refusals of send test mail. The first two are also the people
-	// page's.
+	// page's, and the placeholder save's too: the sender's address, or a
+	// further one.
 	refuseNotAnAddress = refusal{Error: "address_invalid", Message: "This is not an e-mail address."}
 	refusePlaceholder  = refusal{Error: "address_placeholder", Message: "This address is a placeholder: nothing is sent to it. Type another."}
 	refuseNotSetUp     = refusal{Error: "mail_not_set_up", Message: "Mail is not set up."}
@@ -338,30 +339,49 @@ func (a *API) getMail(w http.ResponseWriter, r *http.Request) {
 // counts as none — and the further addresses.
 func (a *API) mailRecipients(ctx context.Context, further []string) mailRecipients {
 	out := mailRecipients{Further: nonNil(further)}
-	switch a.peopleMode() {
-	case peopleExternal:
-		out.Admins = []mailAdmin{}
+	admins, err := a.mailAdmins(ctx)
+	switch {
+	case errors.Is(err, errPeopleUnavailable):
 		return out
-	case peopleUnavailable:
-		return out
-	}
-	list, err := a.people.List(ctx)
-	if err != nil {
+	case err != nil:
 		log.Printf("mail: the admins could not be read: %v", err)
 		return out
 	}
-	out.Admins = []mailAdmin{}
+	out.Admins = admins
+	return out
+}
+
+// errPeopleUnavailable: the platform manages its people, and its people
+// client is not set up, so the admins cannot be read.
+var errPeopleUnavailable = errors.New("the people client is not set up: the admins cannot be read")
+
+// mailAdmins are the admins whose account is enabled, each with their
+// address, "" for none — the placeholder counts as none: whom alert mail goes
+// to besides the further addresses. None with an external identity provider,
+// whose admins the platform cannot see; an error where they cannot be read.
+func (a *API) mailAdmins(ctx context.Context) ([]mailAdmin, error) {
+	switch a.peopleMode() {
+	case peopleExternal:
+		return []mailAdmin{}, nil
+	case peopleUnavailable:
+		return nil, errPeopleUnavailable
+	}
+	list, err := a.people.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := []mailAdmin{}
 	for _, p := range list {
-		if p.Role != people.RoleAdmin {
+		if p.Role != people.RoleAdmin || !p.Enabled {
 			continue
 		}
 		address := strings.TrimSpace(p.Email)
 		if placeholder(address) {
 			address = ""
 		}
-		out.Admins = append(out.Admins, mailAdmin{Name: p.DisplayName, Address: address})
+		out = append(out, mailAdmin{Name: p.DisplayName, Address: address})
 	}
-	return out
+	return out, nil
 }
 
 // ─── PUT and DELETE /mail ────────────────────────────────────────────────────
@@ -535,6 +555,9 @@ func (b mailBody) clean() (mailInput, refusal) {
 	if in.from, err = mail.ReadAddress(from); err != nil {
 		return in, addressRefusal(err, refuseSender)
 	}
+	if placeholder(in.from) {
+		return in, refusePlaceholder
+	}
 	if in.fromName = fromName; utf8.RuneCountInString(in.fromName) > mail.MaxFromName {
 		return in, refuseSenderName
 	}
@@ -542,6 +565,9 @@ func (b mailBody) clean() (mailInput, refusal) {
 		addr, err := mail.ReadAddress(raw)
 		if err != nil {
 			return in, addressRefusal(err, refuseFurther)
+		}
+		if placeholder(addr) {
+			return in, refusePlaceholder
 		}
 		if !slices.ContainsFunc(in.alertsTo, func(s string) bool { return strings.EqualFold(s, addr) }) {
 			in.alertsTo = append(in.alertsTo, addr)

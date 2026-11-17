@@ -339,7 +339,7 @@ func TestAnAddonPostsAsItselfOnly(t *testing.T) {
 		"a second person named":   notice("user-mia", "subs", []string{"user-leo"}),
 		"from someone else named": notice("user-mia", "from", "other"),
 	} {
-		if rec := e.do(addonSample, http.MethodPost, "/api/portal/notices", body); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "unknown field") {
+		if rec := e.do(addonSample, http.MethodPost, "/api/portal/notices", body); rec.Code != http.StatusBadRequest || !strings.HasSuffix(rec.Body.String(), " is not one this route takes\n") {
 			t.Errorf("%s: %d %s", name, rec.Code, rec.Body)
 		}
 	}
@@ -436,8 +436,8 @@ func TestAPersonPostsOnlyToThemselves(t *testing.T) {
 		body    map[string]any
 		mention string
 	}{
-		"to someone else":         {ownNotice("sample", "sub", "user-leo"), "unknown field"},
-		"to someone else by name": {ownNotice("sample", "to", "leo"), "unknown field"},
+		"to someone else":         {ownNotice("sample", "sub", "user-leo"), "the field sub is not one this route takes"},
+		"to someone else by name": {ownNotice("sample", "to", "leo"), "the field to is not one this route takes"},
 		"from an addon not here":  {ownNotice("ghost"), `no addon "ghost" is installed`},
 		"from no addon":           {ownNotice(""), "the key of an installed addon"},
 		"from a key that is none": {ownNotice("Sample Addon"), "the key of an installed addon"},
@@ -479,9 +479,9 @@ func TestNoticeTextRules(t *testing.T) {
 		"an item that is a path":        {notice("user-mia", "itemId", "../items/1"), "no catalog item's id"},
 		"an item over 128":              {notice("user-mia", "itemId", strings.Repeat("a", 129)), "no catalog item's id"},
 		"an item with a space":          {notice("user-mia", "itemId", "item 1"), "no catalog item's id"},
-		"a title that is no string":     {map[string]any{"sub": "user-mia", "title": 7, "body": "b"}, "invalid json"},
+		"a title that is no string":     {map[string]any{"sub": "user-mia", "title": 7, "body": "b"}, "the field title has a value of the wrong kind"},
 		"two objects":                   {`{"sub":"user-mia","title":"t","body":"b"}{"sub":"user-leo"}`, ""},
-		"a body too big to be one":      {notice("user-mia", "body", strings.Repeat("a", 9000)), "invalid json"},
+		"a body too big to be one":      {notice("user-mia", "body", strings.Repeat("a", 9000)), "the body is larger than this route takes"},
 	} {
 		rec := e.do(addonSample, http.MethodPost, "/api/portal/notices", c.body)
 		if name == "two objects" {
