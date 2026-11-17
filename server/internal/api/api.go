@@ -273,6 +273,13 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 				// Each addon's notices, counted — never what they say
 				// (notices.go).
 				ar.Get("/notices", a.noticeCounts)
+
+				// Mail: the SMTP server the platform sends through, kept in
+				// the platform's resource, and the test mail (mail.go).
+				ar.Get("/mail", a.getMail)
+				ar.Put("/mail", a.putMail)
+				ar.Delete("/mail", a.deleteMail)
+				ar.Post("/mail/test", a.testMail)
 			})
 
 			// UI extension registry — writable by a human admin OR an addon's

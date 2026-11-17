@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -41,6 +42,33 @@ func TestCreateSecretTakesOnlyTheName(t *testing.T) {
 		`{"metadata":{"generateName":"zaentrum-addon-example-values-"}}`}
 	if len(calls) != 2 || calls[0] != want {
 		t.Fatalf("calls = %+v", calls)
+	}
+}
+
+// R.C2: the mail page's write is checked in a dry run before its password is
+// stored — the same merge patch, with dryRun=All — and only then applied.
+func TestRC2PatchResourceDryRun(t *testing.T) {
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		calls = append(calls, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery+" "+r.Header.Get("Content-Type")+" "+string(b))
+		_, _ = w.Write([]byte(`{"metadata":{"name":"zaentrum","generation":3}}`))
+	}))
+	defer srv.Close()
+	c := NewAt(srv.URL, "ns", "", srv.Client())
+	patch := []byte(`{"spec":{"mail":null}}`)
+	if _, err := c.PatchResourceDryRun(context.Background(), "zaentrum.io", "v1alpha1", "zaentrums", "zaentrum", patch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.PatchResource(context.Background(), "zaentrum.io", "v1alpha1", "zaentrums", "zaentrum", patch); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`PATCH /apis/zaentrum.io/v1alpha1/namespaces/ns/zaentrums/zaentrum?dryRun=All application/merge-patch+json {"spec":{"mail":null}}`,
+		`PATCH /apis/zaentrum.io/v1alpha1/namespaces/ns/zaentrums/zaentrum? application/merge-patch+json {"spec":{"mail":null}}`,
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Errorf("calls =\n%s\nwant\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
 	}
 }
 
@@ -84,5 +112,56 @@ func TestResourceCalls(t *testing.T) {
 	// a Status: still NotFound.
 	if _, err := c.GetResource(ctx, "zaentrum.io", "v1alpha1", "unknown", "x"); !IsNotFound(err) {
 		t.Errorf("unknown type = %v, want NotFound", err)
+	}
+}
+
+// R.C2: the mail page's write is validated strictly — fieldValidation=Strict,
+// in the dry run and in the write — so that a field the resource's schema
+// does not know is refused, not dropped; the refusal names the fields, in the
+// apiserver's words as Kubernetes 1.37 answers them, and no other refusal does.
+func TestRC2PatchResourceStrict(t *testing.T) {
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		calls = append(calls, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery+" "+r.Header.Get("Content-Type")+" "+string(b))
+		_, _ = w.Write([]byte(`{"metadata":{"name":"zaentrum","generation":3}}`))
+	}))
+	defer srv.Close()
+	c := NewAt(srv.URL, "ns", "", srv.Client())
+	patch := []byte(`{"spec":{"mail":{"host":"smtp.example.org"}}}`)
+	for _, dry := range []bool{true, false} {
+		if _, err := c.PatchResourceStrict(context.Background(), "zaentrum.io", "v1alpha1", "zaentrums", "zaentrum", patch, dry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{
+		`PATCH /apis/zaentrum.io/v1alpha1/namespaces/ns/zaentrums/zaentrum?dryRun=All&fieldValidation=Strict application/merge-patch+json {"spec":{"mail":{"host":"smtp.example.org"}}}`,
+		`PATCH /apis/zaentrum.io/v1alpha1/namespaces/ns/zaentrums/zaentrum?fieldValidation=Strict application/merge-patch+json {"spec":{"mail":{"host":"smtp.example.org"}}}`,
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Errorf("calls =\n%s\nwant\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
+	}
+
+	// The apiserver's refusal, as kube-apiserver 1.37 words it: the object it
+	// quotes, its own quotes escaped, then the fields.
+	quoted := `{\"apiVersion\":\"zaentrum.io/v1alpha1\",\"kind\":\"Zaentrum\",\"spec\":{\"mail\":{\"host\":\"smtp.example.org\"}}}`
+	for _, c := range []struct {
+		err    error
+		fields []string
+		words  string
+	}{
+		{&APIError{Code: 422, Reason: "Invalid", Message: ` "" is invalid: patch: Invalid value: "` + quoted + `": strict decoding error: unknown field "spec.mail"`},
+			[]string{"spec.mail"}, `k8s 422 Invalid: strict decoding error: unknown field "spec.mail"`},
+		{&APIError{Code: 422, Reason: "Invalid", Message: ` "" is invalid: patch: Invalid value: "` + quoted + `": strict decoding error: unknown field "spec.mail.user", unknown field "spec.mail.x"`},
+			[]string{"spec.mail.user", "spec.mail.x"}, `k8s 422 Invalid: strict decoding error: unknown field "spec.mail.user", unknown field "spec.mail.x"`},
+		{&APIError{Code: 422, Reason: "Invalid", Message: `Zaentrum.zaentrum.io "zaentrum" is invalid: spec.mail.port: Invalid value: "string": spec.mail.port in body must be of type integer: "string"`}, nil, ""},
+		{&APIError{Code: 403, Reason: "Forbidden", Message: `strict decoding error: unknown field "spec.mail"`}, nil, ""},
+		{&APIError{Code: 422, Reason: "Invalid", Message: `strict decoding error: duplicate field "host"`}, nil, ""},
+		{nil, nil, ""},
+	} {
+		fields, words := UnknownFields(c.err)
+		if !slices.Equal(fields, c.fields) || words != c.words {
+			t.Errorf("UnknownFields(%v) = %q, %q; want %q, %q", c.err, fields, words, c.fields, c.words)
+		}
 	}
 }

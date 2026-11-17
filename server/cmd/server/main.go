@@ -25,6 +25,7 @@ import (
 	"github.com/zaentrum/zaentrum-portal/server/internal/dbbrowse"
 	"github.com/zaentrum/zaentrum-portal/server/internal/eventtap"
 	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
+	"github.com/zaentrum/zaentrum-portal/server/internal/mail"
 	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
 	"github.com/zaentrum/zaentrum-portal/server/internal/store"
 )
@@ -143,6 +144,19 @@ func run() error {
 	}
 	if cfg.AccountDeletionToken == "" {
 		log.Printf("people: no account deletion token (PORTAL_ACCOUNT_DELETION_TOKEN) — accounts are not deleted from the apps")
+	}
+	// Mail: where it goes, never the sender's address.
+	switch m := cfg.Mail.Effective(); {
+	case !m.SetUp():
+		log.Printf("mail: not set up (PORTAL_MAIL_HOST, PORTAL_MAIL_FROM) — no mail is sent")
+	case !mail.KnownEncryption(m.Encryption):
+		log.Printf("mail: PORTAL_MAIL_ENCRYPTION %q is none of starttls, tls and none — no mail is sent", m.Encryption)
+	default:
+		signIn := "signing in"
+		if m.Username == "" {
+			signIn = "with no sign-in"
+		}
+		log.Printf("mail: sending through %s, port %d, %s, %s", m.Host, m.Port, m.Encryption, signIn)
 	}
 	// Chart addons the operator reports ready are registered from their primary
 	// Service; outside a cluster this returns at once. Stops with bgCtx.

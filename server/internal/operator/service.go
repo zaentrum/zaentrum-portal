@@ -405,6 +405,11 @@ type zaentrumCR struct {
 		Verification struct {
 			Enabled *bool `json:"enabled"`
 		} `json:"verification"`
+		// Mail and Alerts are kept raw and read on their own (mail.go), so
+		// that a mail server this portal cannot read costs the mail page and
+		// nothing else.
+		Mail   json.RawMessage `json:"mail"`
+		Alerts json.RawMessage `json:"alerts"`
 	} `json:"spec"`
 	Status struct {
 		Phase              string `json:"phase"`
@@ -441,6 +446,9 @@ type condition struct {
 	Status             string `json:"status"`
 	Reason             string `json:"reason"`
 	LastTransitionTime string `json:"lastTransitionTime"`
+	// ObservedGeneration is the spec's generation the condition was written
+	// for.
+	ObservedGeneration int64 `json:"observedGeneration"`
 }
 
 // OperatorInfo returns the Zaentrum CR summary, or {Present:false} + a note when the

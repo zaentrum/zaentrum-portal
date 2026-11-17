@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -530,8 +531,65 @@ func (c *Client) GetResourceList(ctx context.Context, group, version, plural str
 // returns it as patched — the caller reads the generation its write produced,
 // which is what makes a wait exact rather than hopeful.
 func (c *Client) PatchResource(ctx context.Context, group, version, plural, name string, mergePatch []byte) (json.RawMessage, error) {
+	return c.patchResource(ctx, group, version, plural, name, mergePatch, false)
+}
+
+// PatchResourceDryRun is PatchResource as a dry run: the apiserver checks the
+// patch as it would apply it — admission, schema, every check — and persists
+// nothing. It answers the resource as the patch would leave it.
+func (c *Client) PatchResourceDryRun(ctx context.Context, group, version, plural, name string, mergePatch []byte) (json.RawMessage, error) {
+	return c.patchResource(ctx, group, version, plural, name, mergePatch, true)
+}
+
+func (c *Client) patchResource(ctx context.Context, group, version, plural, name string, mergePatch []byte, dry bool) (json.RawMessage, error) {
 	p := fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s", group, version, c.namespace, plural, name)
-	return c.do(ctx, http.MethodPatch, p, "application/merge-patch+json", mergePatch)
+	return c.do(ctx, http.MethodPatch, p+dryRun(dry), "application/merge-patch+json", mergePatch)
+}
+
+// PatchResourceStrict is PatchResource, or with dryRun PatchResourceDryRun,
+// validated strictly (fieldValidation=Strict): a field the resource's schema
+// does not know is refused, where the apiserver would otherwise drop it from
+// what it stores, answer 200 and only warn. UnknownFields reads the refusal.
+func (c *Client) PatchResourceStrict(ctx context.Context, group, version, plural, name string, mergePatch []byte, dryRun bool) (json.RawMessage, error) {
+	p := fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s", group, version, c.namespace, plural, name)
+	q := url.Values{"fieldValidation": {"Strict"}}
+	if dryRun {
+		q.Set("dryRun", "All")
+	}
+	return c.do(ctx, http.MethodPatch, p+"?"+q.Encode(), "application/merge-patch+json", mergePatch)
+}
+
+// strictDecoding starts what a write that validates strictly is refused with
+// for a field the schema does not know: 422 Invalid, its message ending in
+// strict decoding error: unknown field "spec.mail" — one such field after
+// another, joined by ", " — after the object as the write would have left it.
+const strictDecoding = "strict decoding error: "
+
+// unknownField is one field a strict refusal names.
+var unknownField = regexp.MustCompile(`unknown field "([^"]*)"`)
+
+// UnknownFields are the fields a write that validates strictly was refused
+// for, as the schema does not know them — "spec.mail" — and the apiserver's
+// own words for that: what its message says after the object it quotes.
+// None, and "", for any other answer.
+func UnknownFields(err error) ([]string, string) {
+	var a *APIError
+	if !errors.As(err, &a) || a.Code != http.StatusUnprocessableEntity && a.Code != http.StatusBadRequest {
+		return nil, ""
+	}
+	i := strings.LastIndex(a.Message, strictDecoding)
+	if i < 0 {
+		return nil, ""
+	}
+	words := a.Message[i:]
+	var fields []string
+	for _, m := range unknownField.FindAllStringSubmatch(words[len(strictDecoding):], -1) {
+		fields = append(fields, m[1])
+	}
+	if len(fields) == 0 {
+		return nil, ""
+	}
+	return fields, fmt.Sprintf("k8s %d %s: %s", a.Code, a.Reason, words)
 }
 
 // dryRun is the query that makes a write validate — admission, schema, every

@@ -2,7 +2,8 @@
 // custom resources and Secrets with the semantics portal-api relies on:
 // resourceVersion conflicts on update and on a patch that carries one,
 // generation bumps on spec changes, JSON merge patch, server-side dry runs,
-// generateName, and owner-reference garbage collection on delete. Pods are
+// strict field validation, generateName, and owner-reference garbage
+// collection on delete. Pods are
 // served for reading — listed, read, and their containers' logs — and nodes,
 // which are cluster-scoped, are listed.
 //
@@ -52,6 +53,17 @@ type Server struct {
 	// Validate stands in for the CRD's schema: an error refuses a create or
 	// update — dry run or not — with 422 Invalid.
 	Validate func(plural string, obj map[string]any) error
+	// Unknown stands in for what a CRD's structural schema does not declare:
+	// it names the fields of an object a write would store that the schema
+	// does not know, "spec.mail" for one. A write that validates strictly
+	// (fieldValidation=Strict) is refused for them as kube-apiserver refuses
+	// it, 422 Invalid, "strict decoding error: unknown field …"; any other
+	// write drops them, answers 200 and warns, as the apiserver does.
+	Unknown func(plural string, obj map[string]any) []string
+	// NoFieldValidation: the apiserver does not know fieldValidation, as one
+	// older than Kubernetes 1.25 does not, and drops an unknown field from
+	// every write, a strict one too.
+	NoFieldValidation bool
 	// Fail answers a request with an error before the fake looks at it, when
 	// it says so: a failure injected at exactly one step. It runs with the fake
 	// locked and must not call the fake.
@@ -364,7 +376,7 @@ func (s *Server) serveResource(w http.ResponseWriter, r *http.Request, plural, n
 			status(w, http.StatusConflict, "AlreadyExists", fmt.Sprintf("%s %q already exists", plural, n))
 			return
 		}
-		if !s.valid(w, plural, obj) {
+		if !s.valid(w, plural, obj) || !s.schema(w, r, plural, obj) {
 			return
 		}
 		delete(obj, "status")
@@ -396,7 +408,7 @@ func (s *Server) serveResource(w http.ResponseWriter, r *http.Request, plural, n
 			status(w, http.StatusConflict, "Conflict", "the object has been modified; please apply your changes to the latest version and try again")
 			return
 		}
-		if !s.valid(w, plural, obj) {
+		if !s.valid(w, plural, obj) || !s.schema(w, r, plural, obj) {
 			return
 		}
 		if dry {
@@ -424,6 +436,13 @@ func (s *Server) serveResource(w http.ResponseWriter, r *http.Request, plural, n
 			return
 		}
 		next, _ := MergePatch(cur, patch).(map[string]any)
+		if !s.schema(w, r, plural, next) {
+			return
+		}
+		if dry {
+			writeJSON(w, http.StatusOK, next)
+			return
+		}
 		s.store(key, cur, next)
 		writeJSON(w, http.StatusOK, s.objects[key])
 	case r.Method == http.MethodDelete && name != "":
@@ -451,6 +470,46 @@ func (s *Server) valid(w http.ResponseWriter, plural string, obj map[string]any)
 		return false
 	}
 	return true
+}
+
+// schema applies Unknown to an object a write would store: a field the
+// schema does not know refuses a write that validates strictly, and is
+// dropped from any other, with a warning. false when it answered the request.
+func (s *Server) schema(w http.ResponseWriter, r *http.Request, plural string, obj map[string]any) bool {
+	if s.Unknown == nil {
+		return true
+	}
+	fields := s.Unknown(plural, clone(obj))
+	if len(fields) == 0 {
+		return true
+	}
+	if r.URL.Query().Get("fieldValidation") == "Strict" && !s.NoFieldValidation {
+		quoted, _ := json.Marshal(obj)
+		unknown := make([]string, 0, len(fields))
+		for _, f := range fields {
+			unknown = append(unknown, fmt.Sprintf("unknown field %q", f))
+		}
+		status(w, http.StatusUnprocessableEntity, "Invalid",
+			fmt.Sprintf(` "" is invalid: patch: Invalid value: %q: strict decoding error: %s`, quoted, strings.Join(unknown, ", ")))
+		return false
+	}
+	for _, f := range fields {
+		drop(obj, strings.Split(f, "."))
+		w.Header().Add("Warning", fmt.Sprintf(`299 - "unknown field \"%s\""`, f))
+	}
+	return true
+}
+
+// drop removes the field at path from obj.
+func drop(obj map[string]any, path []string) {
+	for len(path) > 1 {
+		next, ok := obj[path[0]].(map[string]any)
+		if !ok {
+			return
+		}
+		obj, path = next, path[1:]
+	}
+	delete(obj, path[0])
 }
 
 // store writes next over cur as an update does: status stays the

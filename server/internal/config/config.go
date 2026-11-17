@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zaentrum/zaentrum-portal/server/internal/mail"
 )
 
 type Config struct {
@@ -114,6 +116,28 @@ type Config struct {
 	// NoticeRetention is how long a notice an addon posted is kept, read or
 	// not: older ones are swept every hour.
 	NoticeRetention time.Duration // PORTAL_NOTICE_RETENTION (default 2160h — 90 days)
+
+	// Mail is the SMTP server portal-api sends the platform's mail through,
+	// as the operator gives it from spec.mail of the platform's resource, the
+	// password from the Secret spec.mail.secretName names. Without a server
+	// or a sender no mail is sent.
+	//
+	//	Host        PORTAL_MAIL_HOST
+	//	Port        PORTAL_MAIL_PORT (default 587 with starttls, 465 with tls, 25 with none)
+	//	Encryption  PORTAL_MAIL_ENCRYPTION: starttls, tls or none (default starttls)
+	//	From        PORTAL_MAIL_FROM: the sender's address
+	//	FromName    PORTAL_MAIL_FROM_NAME (default zaentrum)
+	//	AlertsTo    PORTAL_MAIL_ALERTS_TO: further addresses for alert mail, comma-separated
+	//	Username    PORTAL_MAIL_USERNAME, from spec.mail.user: absent or empty, there is no sign-in
+	//	Password    PORTAL_MAIL_PASSWORD, from the Secret, as it is given (not trimmed)
+	Mail mail.Settings
+	// MailSecret is the name of the Secret PORTAL_MAIL_PASSWORD comes from,
+	// so that portal-api can tell a password that changed without reading
+	// any Secret.
+	MailSecret string // PORTAL_MAIL_SECRET
+	// PublicURL is the platform's public address, which the links in a mail
+	// start with; its host names the platform in a mail.
+	PublicURL string // PORTAL_PUBLIC_URL
 }
 
 func env(keys ...string) string {
@@ -212,7 +236,30 @@ func Load() Config {
 		ChinoAPIURL:          env("PORTAL_CHINO_API_URL"),
 
 		NoticeRetention: envDuration(90*24*time.Hour, "PORTAL_NOTICE_RETENTION"),
+
+		Mail: mail.Settings{
+			Host:       env("PORTAL_MAIL_HOST"),
+			Port:       envPort("PORTAL_MAIL_PORT"),
+			Encryption: strings.ToLower(env("PORTAL_MAIL_ENCRYPTION")),
+			From:       env("PORTAL_MAIL_FROM"),
+			FromName:   env("PORTAL_MAIL_FROM_NAME"),
+			AlertsTo:   splitCSV(os.Getenv("PORTAL_MAIL_ALERTS_TO")),
+			Username:   env("PORTAL_MAIL_USERNAME"),
+			Password:   os.Getenv("PORTAL_MAIL_PASSWORD"),
+		},
+		MailSecret: env("PORTAL_MAIL_SECRET"),
+		PublicURL:  env("PORTAL_PUBLIC_URL"),
 	}
+}
+
+// envPort is a port from 1 to 65535; anything else is 0, which reads as the
+// encryption's default.
+func envPort(keys ...string) int {
+	n, err := strconv.Atoi(env(keys...))
+	if err != nil || n < 1 || n > 65535 {
+		return 0
+	}
+	return n
 }
 
 // envDuration is a positive Go duration ("168h"), else def.

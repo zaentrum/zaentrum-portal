@@ -107,6 +107,81 @@ installed addon, and it reaches that person only. an addon that tells someone so
 later — when their title is ready — posts with its service account (`zaentrum-addon`, the
 client named after the addon), whose token binds the addon.
 
+## mail
+
+portal-api sends the platform's own mails, the test mail so far, through the SMTP server
+an admin sets with the routes below. the settings are the platform resource's
+`spec.mail`, which the operator gives portal-api as `PORTAL_MAIL_*`; a new
+password goes alone into a new Secret, which portal-api writes and never reads. a link in
+a mail and the platform's name in it come from the public address, `PORTAL_PUBLIC_URL`,
+alone: without a full one, http or https and a host, no mail is sent, and with a user none
+is sent while portal-api runs without its password. a mail is plain text in UTF-8 to one
+address, over STARTTLS, TLS or none, the certificate checked; its headers are ASCII,
+folded at 78 characters where they can be. portal-api signs in only with a user. an
+address is one bare address of at most 254 characters, its domain a host name of at least
+two parts, in ASCII letters. no setting takes a control character. its log says that a
+mail of a kind was sent or refused, never an address and never the text.
+
+| route | who | what |
+|---|---|---|
+| `GET /api/portal/mail` | admin | the settings without the password, `passwordSet`, `setUp`, `ready`, `secretMissing` (the condition `Mail` says the password's Secret is missing), `runByOperator` (false where the operator does not run the platform), `identity` (bundled or external), `alertMail`, and `recipients`: each admin's name and address, and the further addresses |
+| `PUT /api/portal/mail` | admin | `{host, port, encryption, from, fromName, user, password, alertsTo}` into `spec.mail`, a password left out keeping the one kept and a port left out the encryption's default; checked first in a dry run, and written, with strict field validation (`fieldValidation=Strict`), so that a cluster that does not know `spec.mail` refuses it; answers `{generation}` |
+| `DELETE /api/portal/mail` | admin | `spec.mail` removed; answers `{generation}` |
+| `POST /api/portal/mail/test` | admin | `{to}`: the test mail, sent while the admin waits; answers `{to, message}` |
+
+a refusal is `{"error": code, "values": {…}, "message": "…", "detail": "…"}`, as ADR-0023
+part 4 has it: `error` names the case, and a code has one sentence; `values` are what its
+sentence names, numbers and names as they are; `message` is the sentence a page shows until
+the portal takes it from its message catalogue, and `detail` what the cluster said, for a
+page's details and never its message. `values` and `detail` are there only where there is
+something in them. a code the mail page words its own way starts with `mail_`; one worded
+the same on every page is shared.
+
+| code | status | route | the case |
+|---|---|---|---|
+| `mail_server_missing` | 400 | `PUT` | no server |
+| `mail_server_invalid` | 400 | `PUT` | a server that is no host name or IP address, or not text |
+| `mail_port_invalid` | 400 | `PUT` | a port that is no whole number from 1 to 65535: 0, a fraction, a number as text |
+| `mail_encryption_invalid` | 400 | `PUT` | an encryption other than `starttls`, `tls` or `none` |
+| `mail_sender_missing` | 400 | `PUT` | no sender |
+| `mail_sender_invalid` | 400 | `PUT` | a sender that is not one address |
+| `mail_sender_name_too_long` | 400 | `PUT` | a sender's name over 60 characters, or not text |
+| `mail_further_address_invalid` | 400 | `PUT` | a further address that is no address, or `alertsTo` that is no list of text |
+| `mail_further_address_limit` | 400 | `PUT` | more than 10 further addresses |
+| `mail_user_needs_password` | 400 | `PUT` | a user, and no password typed or kept |
+| `mail_value_invalid` | 400 | `PUT` | a value of the wrong kind in a field with no code of its own, `user` or `password`, in `values.field` |
+| `mail_control_character` | 400 | `PUT` | a control character in the server, the sender, the sender's name, the user, the password or a further address |
+| `address_unsupported` | 400 | `PUT`, test | an address with accented or non-Latin letters: the sender, a further address, `to` |
+| `mail_not_run_by_operator` | 409 | `PUT`, `DELETE` | the platform has no resource |
+| `mail_settings_unknown` | 503 | `PUT` | the cluster does not know `spec.mail`, as under an operator from before mail settings: nothing is written and no Secret made |
+| `platform_read_forbidden` | 503 | all four | the cluster does not let portal-api read the resource |
+| `mail_write_forbidden` | 503 | `PUT`, `DELETE` | the cluster does not let portal-api change it |
+| `mail_write_refused` | 422 | `PUT`, `DELETE` | the cluster refuses the settings, a field of `spec.mail` its schema does not know among them |
+| `cluster_unexpected_answer` | 502 | all four | any other answer of the cluster |
+| `address_invalid` | 400 | test | `to` is no address |
+| `address_placeholder` | 400 | test | `to` is a placeholder, at `zaentrum.local` |
+| `mail_not_set_up` | 409 | test | mail is not set up |
+| `mail_not_ready` | 409 | test | set up, and not ready yet: the settings are being applied, or portal-api has no full public address |
+| `mail_password_missing` | 409 | test | the operator says the password's Secret is missing, or portal-api runs with a user and no password |
+| `mail_server_unreachable` | 502 | test | no connection to the mail server, or it broke |
+| `mail_encryption_not_offered` | 502 | test | the server does not offer the encryption chosen |
+| `mail_certificate_unverified` | 502 | test | the server's certificate did not pass the check |
+| `mail_sign_in_refused` | 502 | test | the server refused the user or the password |
+| `mail_sender_refused` | 502 | test | the server refused the sender's address |
+| `mail_recipient_refused` | 502 | test | the server refused the address, in `values.address` |
+| `mail_server_timeout` | 502 | test | the server did not answer in time |
+| `mail_server_answered` | 502 | test | the server refused the mail in its own words, in `values.words` |
+
+the five with the cluster in them carry `detail`. "test" is `POST /api/portal/mail/test`. a
+field of the wrong kind is refused with its field's code, never in the decoder's words; a
+body that is no JSON object, or holds a field the route does not take, gets the shared
+answer, `invalid json: …`, as on every route.
+
+configuration: `PORTAL_MAIL_HOST`, `PORTAL_MAIL_PORT`, `PORTAL_MAIL_ENCRYPTION`,
+`PORTAL_MAIL_FROM`, `PORTAL_MAIL_FROM_NAME`, `PORTAL_MAIL_ALERTS_TO` (comma-separated),
+`PORTAL_MAIL_USERNAME`, `PORTAL_MAIL_PASSWORD`, `PORTAL_MAIL_SECRET` (the name of the
+password's Secret) and `PORTAL_PUBLIC_URL`. the operator sets them from `spec.mail`.
+
 ## develop
 
 ```bash
