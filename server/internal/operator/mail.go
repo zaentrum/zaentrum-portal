@@ -124,14 +124,8 @@ func (s *Service) Mail(ctx context.Context) (*Mail, error) {
 			m.Spec = spec
 		}
 	}
-	if !isNull(cr.Spec.Alerts) {
-		var alerts struct {
-			Mail *bool `json:"mail"`
-		}
-		if json.Unmarshal(cr.Spec.Alerts, &alerts) == nil {
-			m.AlertMail = alerts.Mail
-		}
-	}
+	// spec.alerts is read as the alerts read it (alerts.go).
+	m.AlertMail = alertsSpecOf(cr.Spec.Alerts).Mail
 	for _, c := range cr.Status.Conditions {
 		if c.Type == condTypeMail {
 			m.Condition = &MailCondition{Status: c.Status, Reason: c.Reason, ObservedGeneration: c.ObservedGeneration}

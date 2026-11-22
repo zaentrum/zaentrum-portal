@@ -1008,7 +1008,7 @@ func TestRC2AValueOfTheWrongKind(t *testing.T) {
 				req.Header.Set("Content-Type", "application/json")
 				rec := httptest.NewRecorder()
 				e.h.ServeHTTP(rec, req)
-				if rec.Code != http.StatusBadRequest || !strings.HasPrefix(rec.Body.String(), "invalid json: ") {
+				if rec.Code != http.StatusBadRequest || rec.Body.String() != "the body is not an object\n" {
 					t.Errorf("%s %s %s = %d %s", method, route, raw, rec.Code, rec.Body)
 				}
 			}

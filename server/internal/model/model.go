@@ -249,6 +249,41 @@ type NoticeCount struct {
 	Latest *time.Time `json:"latest"`
 }
 
+// Alert is one of the five things that can be wrong with the platform, as
+// portal-api keeps it for the admins (migration 016). The routes answer it in
+// a shape of their own; this is what is stored.
+type Alert struct {
+	ID string
+	// Kind is part-not-ready, volume-full, certificate-ends, no-good-backup
+	// or update-failed; About is its subject.
+	Kind  string
+	About string
+	// Title and Text as the status last wrote them, and the values that
+	// filled them in.
+	Title  string
+	Text   string
+	Values json.RawMessage
+	// Link is a path of the portal: the page that explains the alert.
+	Link string
+	// Memo is what the rules keep of it between two checks.
+	Memo      json.RawMessage
+	StartedAt time.Time
+	// EndedAt is nil while it is active; EndText is the sentence of its end,
+	// and EndValues what filled it in.
+	EndedAt   *time.Time
+	EndText   string
+	EndValues json.RawMessage
+	// Mail is what became of its mails; MailNext is when a try is due, nil
+	// for none. StartMailedAt is when the mail server first took its start
+	// mail for an address.
+	Mail          json.RawMessage
+	MailNext      *time.Time
+	StartMailedAt *time.Time
+	// Seen: the admin who asked has seen it since it last changed. Set by the
+	// reads that name an admin.
+	Seen bool
+}
+
 // AddonComponent is one workload an addon declares. Workload is the name of
 // its Deployment and Service; the console matches live state by it.
 type AddonComponent struct {

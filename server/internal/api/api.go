@@ -4,6 +4,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"github.com/zaentrum/zaentrum-portal/server/internal/k8s"
 	"github.com/zaentrum/zaentrum-portal/server/internal/katalog"
 	"github.com/zaentrum/zaentrum-portal/server/internal/keycloak"
+	"github.com/zaentrum/zaentrum-portal/server/internal/mail"
 	"github.com/zaentrum/zaentrum-portal/server/internal/model"
 	"github.com/zaentrum/zaentrum-portal/server/internal/operator"
 	"github.com/zaentrum/zaentrum-portal/server/internal/people"
@@ -68,6 +70,12 @@ type API struct {
 	notices      noticeStore
 	noticeAddon  *ratelimit.Limiter
 	noticePerson *ratelimit.Limiter
+	// alerts are what is wrong with the platform (alerts.go), and alertLoop
+	// what their checks keep between them. sendMail sends an alert's mail:
+	// through the server portal-api runs with, unless a test sets it.
+	alerts    alertStore
+	alertLoop alertLoop
+	sendMail  func(ctx context.Context, m mail.Message) error
 	// now is the clock; time.Now unless a test sets one.
 	now func() time.Time
 }
@@ -113,7 +121,7 @@ type registryStore interface {
 }
 
 func New(st *store.Store, cfg config.Config, op *operator.Service, tap *eventtap.Tap, br *dbbrowse.Browser) *API {
-	a := &API{reg: st, addons: st, setup: st, invites: st, notices: st, cfg: cfg, op: op, tap: tap, br: br}
+	a := &API{reg: st, addons: st, setup: st, invites: st, notices: st, alerts: st, cfg: cfg, op: op, tap: tap, br: br}
 	a.registration.kick = make(chan struct{}, 1)
 	a.inviteIP, a.inviteToken = newInviteLimits()
 	a.noticeAddon, a.noticePerson = newNoticeLimits()
@@ -281,6 +289,13 @@ func (a *API) Register(r chi.Router, mw *auth.Middleware) {
 				ar.Put("/mail", a.putMail)
 				ar.Delete("/mail", a.deleteMail)
 				ar.Post("/mail/test", a.testMail)
+
+				// Alerts: what is wrong with the platform, raised from its
+				// status every 60 seconds, and seen by each admin (alerts.go).
+				ar.Get("/alerts", a.getAlerts)
+				ar.Patch("/alerts/settings", a.patchAlertSettings)
+				ar.Post("/alerts/read-all", a.readAllAlerts)
+				ar.Post("/alerts/{id}/read", a.readAlert)
 			})
 
 			// UI extension registry — writable by a human admin OR an addon's
@@ -990,27 +1005,66 @@ func (a *API) handleDelete(w http.ResponseWriter, err error, kind, key string) {
 	}
 }
 
+// decode reads a body that is one JSON object of the fields dst takes. What
+// it refuses is answered 400 with a plain line of detail and no code, and the
+// decoder's own words reach no client: a body that is no object, a field the
+// route does not take, a field whose value is of the wrong kind, and a body
+// larger than the route reads.
 func decode(w http.ResponseWriter, r *http.Request, dst any) bool {
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		badRequest(w, "invalid json: "+err.Error())
-		return false
-	}
-	return true
+	return decodeBody(w, r, dst, false)
 }
 
 // decodeOptional reads a body a caller may leave out entirely — an empty body
 // leaves dst as it was. Anything actually sent must still parse, unknown
 // fields and all: "optional" is about the body, not about its contents.
 func decodeOptional(w http.ResponseWriter, r *http.Request, dst any) bool {
-	dec := json.NewDecoder(r.Body)
+	return decodeBody(w, r, dst, true)
+}
+
+func decodeBody(w http.ResponseWriter, r *http.Request, dst any, optional bool) bool {
+	var raw json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		var tooLarge *http.MaxBytesError
+		switch {
+		case optional && errors.Is(err, io.EOF):
+			return true
+		case errors.As(err, &tooLarge):
+			badRequest(w, "the body is larger than this route takes")
+		default:
+			badRequest(w, "the body is not an object")
+		}
+		return false
+	}
+	if t := bytes.TrimSpace(raw); len(t) == 0 || t[0] != '{' {
+		badRequest(w, "the body is not an object")
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) {
-		badRequest(w, "invalid json: "+err.Error())
+	if err := dec.Decode(dst); err != nil {
+		badRequest(w, decodeRefusal(err))
 		return false
 	}
 	return true
+}
+
+// decodeRefusal is the line of detail for a JSON object dst did not take:
+// the field it does not take, or the field whose value is of the wrong kind.
+func decodeRefusal(err error) string {
+	var kind *json.UnmarshalTypeError
+	if errors.As(err, &kind) && kind.Field != "" {
+		// The path the decoder names holds the Go names of the structs a
+		// route's body embeds: the field is its last name.
+		name := kind.Field[strings.LastIndex(kind.Field, ".")+1:]
+		return "the field " + operator.Spaced(name) + " has a value of the wrong kind"
+	}
+	if name, ok := strings.CutPrefix(err.Error(), "json: unknown field "); ok {
+		if unquoted, err := strconv.Unquote(name); err == nil {
+			name = unquoted
+		}
+		return "the field " + operator.Spaced(name) + " is not one this route takes"
+	}
+	return "the body is not an object"
 }
 
 // ─── debug: container logs ─────────────────────────────────────────────────────

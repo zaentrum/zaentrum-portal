@@ -164,6 +164,17 @@ func run() error {
 	// Notices past their retention go now and every hour. Stops with bgCtx.
 	log.Printf("notices: kept %s, a person's newest %d", cfg.NoticeRetention, store.NoticesKept)
 	go registry.RunNoticeSweep(bgCtx)
+	// Alerts: the platform's status is read now and every 60 seconds, and
+	// what is wrong is raised for the admins and mailed. At shutdown the loop
+	// is told to stop first, and given the time to finish the address it is
+	// on and to write what became of it.
+	alertsCtx, stopAlerts := context.WithCancel(context.Background())
+	defer stopAlerts()
+	alertsDone := make(chan struct{})
+	go func() {
+		defer close(alertsDone)
+		registry.RunAlerts(alertsCtx)
+	}()
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -186,9 +197,17 @@ func run() error {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Println("shutting down…")
+	// Within the 30 seconds a pod is given to stop by default.
+	stopBy := time.Now().Add(25 * time.Second)
+	stopAlerts()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	err = srv.Shutdown(shutdownCtx)
+	select {
+	case <-alertsDone:
+	case <-time.After(time.Until(stopBy)):
+	}
+	return err
 }
 
 func writeText(w http.ResponseWriter, s string) {
